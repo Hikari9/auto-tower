@@ -409,6 +409,11 @@ describe('missed heartbeats', () => {
     const h = createFleetHarness();
     const runner = await h.runner({ maxConcurrent: 3 });
     const held = await hold(h, runner, ['repo:one']);
+    await runner.progress(held.leaseId, {
+      fence: 1,
+      seq: 1,
+      message: 'under way',
+    });
     h.clock.advance(TTL + 1_000);
     h.mission([{ scope: ['repo:two'] }]);
 
@@ -546,8 +551,11 @@ describe('reassignment', () => {
       close_reason: 'reassigned to another runner',
     });
     expect(auditKinds(h)).toContain('lease.reassigned');
-    // Delivered once.
-    expect((await b.claim()).body.assignments).toEqual([]);
+    // Sent again until b shows evidence for it, then not.
+    expect((await b.claim()).body.assignments[0]?.leaseId).toBe(next.leaseId);
+    expect(
+      (await b.claim({ active: [evidence(next)] })).body.assignments,
+    ).toEqual([]);
 
     // The old runner comes back and is turned away on every path.
     const old = [

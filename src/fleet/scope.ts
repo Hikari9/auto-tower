@@ -11,6 +11,23 @@ export interface PacketRequirements {
   /** Everything the runner must be allowed: all non-capability entries. */
   scopes: string[];
   scopeKey: string;
+  /**
+   * Why no single execution scope can be derived, or undefined. A packet that names two repos,
+   * two worktrees, a worktree without a repo or a malformed name would otherwise lock only part of
+   * what it touches, so it is never dispatched.
+   */
+  invalid: string | undefined;
+}
+
+const NAME = /^[a-z0-9][a-z0-9._/-]{0,127}$/;
+
+/** `Repo`, `repo/` and `repo.git` are one repository. */
+function normalise(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/\/+$/, '')
+    .replace(/\.git$/, '');
 }
 
 export function requirementsOf(
@@ -19,26 +36,38 @@ export function requirementsOf(
 ): PacketRequirements {
   const capabilities: string[] = [];
   const scopes: string[] = [];
-  let repo: string | undefined;
-  let worktree: string | undefined;
+  const repos: string[] = [];
+  const worktrees: string[] = [];
   for (const entry of packet.scope) {
     if (entry.startsWith('cap:')) {
       capabilities.push(entry.slice(4));
       continue;
     }
     scopes.push(entry);
-    if (entry.startsWith('repo:') && repo === undefined) {
-      repo = entry.slice(5);
-    } else if (entry.startsWith('worktree:') && worktree === undefined) {
-      worktree = entry.slice(9);
+    if (entry.startsWith('repo:')) {
+      repos.push(normalise(entry.slice(5)));
+    } else if (entry.startsWith('worktree:')) {
+      worktrees.push(normalise(entry.slice(9)));
     }
   }
+  const alone = `packet:${missionId}/${packet.id}`;
+  let invalid: string | undefined;
+  if (repos.length > 1) {
+    invalid = 'it names more than one repo';
+  } else if (worktrees.length > 1) {
+    invalid = 'it names more than one worktree';
+  } else if (worktrees.length === 1 && repos.length === 0) {
+    invalid = 'it names a worktree but no repo';
+  } else if ([...repos, ...worktrees].some((name) => !NAME.test(name))) {
+    invalid = 'a repo or worktree name is not a plain name';
+  }
+  const repo = repos[0];
   // Without a declared repo nothing is shared, so the packet only excludes itself.
   const scopeKey =
-    repo === undefined
-      ? `packet:${missionId}/${packet.id}`
-      : `repo:${repo}#worktree:${worktree ?? 'default'}`;
-  return { capabilities, scopes, scopeKey };
+    repo === undefined || invalid !== undefined
+      ? alone
+      : `repo:${repo}#worktree:${worktrees[0] ?? 'default'}`;
+  return { capabilities, scopes, scopeKey, invalid };
 }
 
 /** `*` allows everything, a trailing `*` allows a prefix, anything else must match exactly. */

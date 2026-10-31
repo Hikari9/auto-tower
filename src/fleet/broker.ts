@@ -18,8 +18,9 @@ export interface EligibilityOptions {
   /**
    * What counts against `maxConcurrent`. Dispatch counts leases and attempts not yet claimed.
    * A claim counts leases only, because the attempt being claimed is not yet one of them.
+   * `none` is for a lease the runner already holds.
    */
-  load: 'dispatched' | 'leases';
+  load: 'dispatched' | 'leases' | 'none';
 }
 
 /**
@@ -50,6 +51,9 @@ export function ineligibleReason(
     }
   }
   const need = requirementsOf(missionId, packet);
+  if (need.invalid !== undefined) {
+    return `execution scope is ambiguous: ${need.invalid}`;
+  }
   const missing = need.capabilities.find(
     (cap) => !runner.capabilities.includes(cap),
   );
@@ -63,10 +67,12 @@ export function ineligibleReason(
     return `scope ${outside} is not allowed`;
   }
   const load =
-    options.load === 'leases'
-      ? liveLeaseCount(db, runner.workspaceId, runner.id)
-      : runnerLoad(db, runner.workspaceId, runner.id);
-  if (load >= runner.maxConcurrent) {
+    options.load === 'none'
+      ? 0
+      : options.load === 'leases'
+        ? liveLeaseCount(db, runner.workspaceId, runner.id)
+        : runnerLoad(db, runner.workspaceId, runner.id);
+  if (options.load !== 'none' && load >= runner.maxConcurrent) {
     return 'runner is at capacity';
   }
   return undefined;
@@ -99,7 +105,7 @@ export function pickRunner(
     return undefined;
   }
   const lastOnScope = db.get<{ runner_id: string }>(
-    'SELECT runner_id FROM runner_leases WHERE workspace_id = ? AND scope_key = ? ORDER BY granted_at DESC, fence DESC LIMIT 1',
+    'SELECT runner_id FROM runner_leases WHERE workspace_id = ? AND scope_key = ? ORDER BY fence DESC LIMIT 1',
     [workspaceId, scopeKey],
   )?.runner_id;
   const onMission = new Set(

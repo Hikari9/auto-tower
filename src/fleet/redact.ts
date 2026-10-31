@@ -1,13 +1,20 @@
 export const REDACTED = '[REDACTED]';
 
+/** Longest string scanned. Callers cap their inputs lower; this bounds anything that slips past. */
+const MAX_SCANNED = 100_000;
+
+const SECRET_WORDS =
+  'secret|token|passw(?:or)?d|passwd|pwd|passphrase|api[_-]?key|private[_-]?key|credential';
+
 /**
  * Secret shapes scanned in every string Tower stores from a runner. Best effort: it catches
  * well-known token formats and key/value assignments, not a secret split across fields or
- * encoded. Order matters only for overlap; each pattern is replaced as a whole.
+ * encoded. Every quantifier is bounded or anchored on a literal, so the cost is linear in the
+ * input: no pattern starts with an open-ended scan that a long repeated word could re-run.
  */
 const PATTERNS: readonly RegExp[] = [
-  // PEM blocks, including a truncated one that lacks its END line.
-  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g,
+  // Private key blocks (PEM and PGP armor), including a truncated one that lacks its END line.
+  /-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----|$)/g,
   // Tower's own credentials.
   /\btw[re]_[A-Za-z0-9_-]{16,}/g,
   // GitHub tokens, GitLab, Slack, Stripe, npm, Google API keys, AWS access key ids.
@@ -23,22 +30,39 @@ const PATTERNS: readonly RegExp[] = [
   /\bsk-[A-Za-z0-9_-]{20,}/g,
   // JSON web tokens.
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+  // Webhook URLs, where the path is the credential.
+  /hooks\.slack\.com\/services\/[A-Za-z0-9/_-]{8,}/gi,
+  /discord(?:app)?\.com\/api\/webhooks\/\d+\/[A-Za-z0-9_-]+/gi,
+  // Signed-URL and query-string credentials.
+  /[?&](?:sig|signature|x-amz-signature|x-amz-security-token|x-amz-credential|access_token|api_key|apikey|token)=[^&\s"']+/gi,
   // Credentials inside a URL.
-  /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/@]+@/gi,
-  // Authorization headers.
-  /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{12,}/g,
-  // name = value or name: value, where the name says it is a secret.
-  /\b[\w.-]*(?:secret|token|passw(?:or)?d|passwd|pwd|api[_-]?key|private[_-]?key|credential|authorization)[\w.-]*["']?\s*[:=]\s*["']?[^\s"',;]{4,}/gi,
+  /\b[a-z][a-z0-9+.-]{0,31}:\/\/[^\s/:@]{1,200}:[^\s/@]{1,200}@/gi,
+  // Bearer values.
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/g,
+  // An Authorization header: the whole value, scheme included, to the end of the line.
+  /authorization["']?\s{0,5}[:=]\s{0,5}(?:"[^"\n]{0,2000}"|'[^'\n]{0,2000}'|[^\n"']{1,2000})/gi,
+  // name = value or name: value, where the name says it is a secret. A quoted value is taken whole.
+  new RegExp(
+    `(?:${SECRET_WORDS})[\\w.-]{0,40}["']?\\s{0,5}[:=]\\s{0,5}(?:"[^"\\n]{0,2000}"|'[^'\\n]{0,2000}'|[^\\s"',;]{1,2000})`,
+    'gi',
+  ),
+  // `pass` alone is too common a word, so it counts only directly before a separator.
+  /\bpass(?=["']?\s{0,5}[:=])["']?\s{0,5}[:=]\s{0,5}(?:"[^"\n]{0,2000}"|'[^'\n]{0,2000}'|[^\s"',;]{1,2000})/gi,
 ];
 
 /** Object keys whose value is never stored, whatever it looks like. */
-const SECRET_KEY =
-  /secret|token|passw(?:or)?d|passwd|pwd|api[_-]?key|private[_-]?key|credential|authorization|cookie/i;
+const SECRET_KEY = new RegExp(
+  `${SECRET_WORDS}|^pass$|authorization|cookie`,
+  'i',
+);
 
 const MAX_DEPTH = 8;
 
 export function redactString(text: string): string {
-  let out = text;
+  let out =
+    text.length > MAX_SCANNED
+      ? `${text.slice(0, MAX_SCANNED)}[TRUNCATED]`
+      : text;
   for (const pattern of PATTERNS) {
     out = out.replace(pattern, (match) =>
       // Keep a URL's scheme and host readable, so the redaction still says where it pointed.

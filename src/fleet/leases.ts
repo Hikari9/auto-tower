@@ -323,7 +323,7 @@ function latestCheckpoint(
   attemptId: string,
 ): { ref: string; commit: string | null } | undefined {
   const row = tx.get<{ ref: string; commit_sha: string | null }>(
-    'SELECT ref, commit_sha FROM runner_checkpoints WHERE workspace_id = ? AND attempt_id = ? ORDER BY recorded_at DESC, rowid DESC LIMIT 1',
+    'SELECT ref, commit_sha FROM runner_checkpoints WHERE workspace_id = ? AND attempt_id = ? ORDER BY seq DESC LIMIT 1',
     [workspaceId, attemptId],
   );
   return row === undefined
@@ -340,16 +340,17 @@ function closeLease(
   actorId?: string,
 ): void {
   const at = ctx.now().toISOString();
+  const text = redactString(reason);
   tx.run(
     'UPDATE runner_leases SET status = ?, closed_at = ?, close_reason = ? WHERE workspace_id = ? AND id = ?',
-    [status, at, reason, lease.workspaceId, lease.id],
+    [status, at, text, lease.workspaceId, lease.id],
   );
   recordAudit(tx, lease.workspaceId, at, {
     kind: `lease.${status}`,
     runnerId: lease.runnerId,
     leaseId: lease.id,
     actorId: actorId ?? null,
-    detail: { reason, fence: lease.fence, scopeKey: lease.scopeKey },
+    detail: { reason: text, fence: lease.fence, scopeKey: lease.scopeKey },
   });
 }
 
@@ -566,15 +567,27 @@ function applyEvidence(
   return { leases, unmatched };
 }
 
-/** Matching work evidence extends the lease and is the only thing that does. */
+/**
+ * Matching work evidence extends the lease and is the only thing that does. It also confirms the
+ * assignment reached the runner, and retires the fence a reconcile replaced, so the lost-answer
+ * retry works only until the runner has shown it holds the new one.
+ */
 function renew(ctx: FleetContext, tx: SqlDatabase, lease: Lease): Lease {
   const now = ctx.now();
   const expiresAt = iso(now.getTime() + ctx.config.leaseTtlMs);
   tx.run(
-    "UPDATE runner_leases SET expires_at = ?, last_proof_at = ? WHERE workspace_id = ? AND id = ? AND status = 'held'",
-    [expiresAt, now.toISOString(), lease.workspaceId, lease.id],
+    `UPDATE runner_leases SET expires_at = MAX(expires_at, ?), last_proof_at = ?,
+       confirmed_at = COALESCE(confirmed_at, ?), reconciled_from = NULL
+     WHERE workspace_id = ? AND id = ? AND status = 'held'`,
+    [
+      expiresAt,
+      now.toISOString(),
+      now.toISOString(),
+      lease.workspaceId,
+      lease.id,
+    ],
   );
-  return { ...lease, expiresAt, lastProofAt: now.toISOString() };
+  return getLease(tx, lease.workspaceId, lease.id) ?? lease;
 }
 
 function recovering(tx: SqlDatabase, runner: Runner): LeaseView[] {
@@ -583,23 +596,34 @@ function recovering(tx: SqlDatabase, runner: Runner): LeaseView[] {
     .map((lease) => viewOf(tx, lease, runner));
 }
 
+/** Admission, a heartbeat, and a sweep. The runner it returns is in good standing. */
+function standing(
+  ctx: FleetContext,
+  tx: SqlDatabase,
+  caller: RunnerCaller,
+  input: PollInput,
+): Runner {
+  const runner = touch(
+    ctx,
+    tx,
+    admit(ctx, tx, caller, input),
+    input.capabilities,
+  );
+  sweep(ctx, tx, runner.workspaceId);
+  return runner;
+}
+
 function heartbeatIn(
   ctx: FleetContext,
   tx: SqlDatabase,
   caller: RunnerCaller,
   input: PollInput,
-): { runner: Runner; result: HeartbeatResult } {
-  const admitted = admit(ctx, tx, caller, input);
-  const runner = touch(ctx, tx, admitted, input.capabilities);
-  sweep(ctx, tx, runner.workspaceId);
-  const evidence = applyEvidence(ctx, tx, runner, input.active);
+): HeartbeatResult {
+  const runner = standing(ctx, tx, caller, input);
   return {
-    runner,
-    result: {
-      runner: { id: runner.id, status: runner.status },
-      ...evidence,
-      reconcile: recovering(tx, runner),
-    },
+    runner: { id: runner.id, status: runner.status },
+    ...applyEvidence(ctx, tx, runner, input.active),
+    reconcile: recovering(tx, runner),
   };
 }
 
@@ -609,9 +633,8 @@ export function heartbeat(
   caller: RunnerCaller,
   input: PollInput,
 ): HeartbeatResult {
-  return ctx.transact(
-    caller.workspaceId,
-    (tx) => heartbeatIn(ctx, tx, caller, input).result,
+  return ctx.transact(caller.workspaceId, (tx) =>
+    heartbeatIn(ctx, tx, caller, input),
   );
 }
 
@@ -645,12 +668,21 @@ export function claim(
   input: PollInput,
 ): ClaimResult {
   const { workspaceId } = caller;
-  ctx.transact(workspaceId, (tx) => heartbeatIn(ctx, tx, caller, input));
+  // Evidence is applied once, before scheduling. The second transaction checks standing again
+  // because the world moved while the scheduler ran, but does not re-apply or re-audit evidence.
+  const first = ctx.transact(workspaceId, (tx) =>
+    heartbeatIn(ctx, tx, caller, input),
+  );
   scheduleWorkspace(ctx, workspaceId);
   return ctx.transact(workspaceId, (tx) => {
-    // Everything is checked again: the world moved while the scheduler ran.
-    const { runner, result } = heartbeatIn(ctx, tx, caller, input);
-    if (result.reconcile.length > 0) {
+    const runner = standing(ctx, tx, caller, input);
+    const reconcile = recovering(tx, runner);
+    const result = {
+      ...first,
+      runner: { id: runner.id, status: runner.status },
+      reconcile,
+    };
+    if (reconcile.length > 0) {
       return {
         ...result,
         assignments: [],
@@ -718,9 +750,10 @@ function grant(
   const withheld: ClaimResult['withheld'] = [];
   let retryAfterMs = ctx.config.pollIntervalMs;
 
-  // Work moved to this runner by reassignment is delivered once.
+  // A lease the runner has not yet shown evidence for is sent again, so a response lost on the
+  // way (or a runner that restarted) does not strand it. Reassigned work arrives the same way.
   for (const lease of liveLeasesOf(tx, workspaceId, runner.id)) {
-    if (lease.status !== 'held' || lease.deliveredAt !== null) {
+    if (lease.status !== 'held' || lease.confirmedAt !== null) {
       continue;
     }
     const mission = missions.getMission(workspaceId, lease.missionId);
@@ -729,19 +762,26 @@ function grant(
     if (mission === undefined || found === undefined) {
       continue;
     }
-    tx.run(
-      'UPDATE runner_leases SET delivered_at = ? WHERE workspace_id = ? AND id = ?',
-      [nowIso, workspaceId, lease.id],
-    );
+    const reason =
+      runner.status !== 'active'
+        ? `runner is ${runner.status}`
+        : PAUSING_MISSION_STATES.includes(mission.state)
+          ? `mission is ${mission.state}`
+          : ineligibleReason(
+              tx,
+              ctx.config,
+              runner,
+              mission.id,
+              found.packet,
+              now,
+              { requireLive: false, load: 'none' },
+            );
+    if (reason !== undefined) {
+      withheld.push({ attemptId: lease.attemptId, reason });
+      continue;
+    }
     assignments.push(
-      assignmentOf(
-        ctx,
-        tx,
-        runner,
-        { ...lease, deliveredAt: nowIso },
-        mission,
-        found.packet,
-      ),
+      assignmentOf(ctx, tx, runner, lease, mission, found.packet),
     );
   }
   if (runner.status !== 'active') {
@@ -817,8 +857,8 @@ function grant(
       savepoint(tx, () => {
         tx.run(
           `INSERT INTO runner_leases (workspace_id, id, scope_key, fence, attempt_id, mission_id, packet_id, runner_id,
-             status, granted_at, expires_at, last_proof_at, delivered_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'held', ?, ?, ?, ?)`,
+             status, granted_at, expires_at, last_proof_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'held', ?, ?, ?)`,
           [
             workspaceId,
             leaseId,
@@ -830,7 +870,6 @@ function grant(
             runner.id,
             nowIso,
             iso(now.getTime() + ctx.config.leaseTtlMs),
-            nowIso,
             nowIso,
           ],
         );
@@ -1108,15 +1147,15 @@ export interface ReceiptResult {
 function reportToCore(
   ctx: FleetContext,
   tx: SqlDatabase,
-  lease: Lease,
+  target: Pick<Lease, 'workspaceId' | 'missionId' | 'attemptId' | 'packetId'>,
   runner: Runner | undefined,
   outcome: 'succeeded' | 'failed',
   summary: string,
   fallbackActor: string,
 ): void {
   const missions = missionsIn(ctx, tx);
-  const mission = missions.getMission(lease.workspaceId, lease.missionId);
-  const found = mission === undefined ? undefined : findPacket(mission, lease);
+  const mission = missions.getMission(target.workspaceId, target.missionId);
+  const found = mission === undefined ? undefined : findPacket(mission, target);
   if (mission === undefined || found === undefined) {
     throw new FleetError(
       'lease_closed',
@@ -1128,13 +1167,13 @@ function reportToCore(
   const direct = runner !== undefined && found.attempt.runnerId === runner.id;
   const actor: Actor = direct
     ? { id: runner.id, kind: 'runner' }
-    : systemActor(tx, lease.workspaceId, ctx.now().toISOString());
+    : systemActor(tx, target.workspaceId, ctx.now().toISOString());
   const text = direct ? summary : `[${fallbackActor}] ${summary}`.trim();
   missions.reportAttempt(
-    { workspaceId: lease.workspaceId, actor },
+    { workspaceId: target.workspaceId, actor },
     mission.id,
     mission.version,
-    lease.attemptId,
+    target.attemptId,
     outcome,
     text === '' ? null : text,
   );
@@ -1238,6 +1277,8 @@ export function recordReceipt(
 
 export interface ReconcileResult {
   lease: LeaseView;
+  /** The work itself, for a runner that lost it along with its state. */
+  assignment: Assignment | null;
   /** Where Tower's record of the attempt ends. The runner resends anything past it. */
   resume: {
     progressSeq: number;
@@ -1310,9 +1351,25 @@ export function reconcile(
       checkpoint:
         latestCheckpoint(tx, runner.workspaceId, lease.attemptId) ?? null,
     };
+    const answer = (current: Lease): ReconcileResult => {
+      const mission = missionsIn(ctx, tx).getMission(
+        runner.workspaceId,
+        current.missionId,
+      );
+      const found =
+        mission === undefined ? undefined : findPacket(mission, current);
+      return {
+        lease: viewOf(tx, current, runner),
+        assignment:
+          mission === undefined || found === undefined
+            ? null
+            : assignmentOf(ctx, tx, runner, current, mission, found.packet),
+        resume,
+      };
+    };
     // A retry whose answer was lost presents the fence this reconcile replaced.
     if (lease.status === 'held' && lease.reconciledFrom === input.fence) {
-      return { lease: viewOf(tx, lease, runner), resume };
+      return answer(lease);
     }
     if (lease.status !== 'recovering' || input.fence !== lease.fence) {
       throw refuse(
@@ -1348,8 +1405,7 @@ export function reconcile(
         recordedProgressSeq: lease.progressSeq,
       },
     });
-    const updated = getLease(tx, runner.workspaceId, lease.id) ?? lease;
-    return { lease: viewOf(tx, updated, runner), resume };
+    return answer(getLease(tx, runner.workspaceId, lease.id) ?? lease);
   });
 }
 
@@ -1428,9 +1484,12 @@ export function quarantine(
     }
     const at = ctx.now().toISOString();
     const text = reason === null ? null : redactString(reason);
+    // Remember a pause, so lifting the quarantine does not quietly lift it too.
+    const prior =
+      runner.status === 'quarantined' ? runner.priorStatus : runner.status;
     tx.run(
-      "UPDATE runners SET status = 'quarantined', quarantine_reason = ?, updated_at = ? WHERE workspace_id = ? AND id = ?",
-      [text, at, runner.workspaceId, runner.id],
+      "UPDATE runners SET status = 'quarantined', prior_status = ?, quarantine_reason = ?, updated_at = ? WHERE workspace_id = ? AND id = ?",
+      [prior, text, at, runner.workspaceId, runner.id],
     );
     // Its work stops being trusted at once: held leases go to recovery, where nothing it sends is accepted.
     for (const lease of liveLeasesOf(tx, runner.workspaceId, runner.id)) {
@@ -1447,12 +1506,18 @@ export function quarantine(
     return {
       ...runner,
       status: 'quarantined',
+      priorStatus: prior,
       quarantineReason: text,
       updatedAt: at,
     };
   });
 }
 
+/**
+ * Lifts a quarantine and restores the status before it. The runner's leases are still in
+ * recovery, and their grace period starts again now, so the runner can reconcile first
+ * instead of finding its work already moved on the strength of its own checkpoint.
+ */
 export function unquarantine(
   ctx: FleetContext,
   caller: HumanCaller,
@@ -1463,16 +1528,23 @@ export function unquarantine(
     if (runner === undefined) {
       throw new FleetError('runner_not_found', 'No such runner');
     }
+    if (runner.status !== 'quarantined') {
+      return runner;
+    }
     const at = ctx.now().toISOString();
     tx.run(
-      "UPDATE runners SET status = 'active', quarantine_reason = NULL, updated_at = ? WHERE workspace_id = ? AND id = ? AND status = 'quarantined'",
+      'UPDATE runners SET status = ?, prior_status = NULL, quarantine_reason = NULL, updated_at = ? WHERE workspace_id = ? AND id = ?',
+      [runner.priorStatus ?? 'active', at, runner.workspaceId, runner.id],
+    );
+    tx.run(
+      "UPDATE runner_leases SET recovering_since = ?, reassign_failures = 0, reassign_not_before = NULL WHERE workspace_id = ? AND runner_id = ? AND status = 'recovering'",
       [at, runner.workspaceId, runner.id],
     );
     recordAudit(tx, runner.workspaceId, at, {
       kind: 'runner.unquarantined',
       runnerId: runner.id,
       actorId: caller.principalId,
-      detail: {},
+      detail: { restoredStatus: runner.priorStatus ?? 'active' },
     });
     return getRunner(tx, runner.workspaceId, runner.id) ?? runner;
   });
@@ -1510,6 +1582,66 @@ export function releaseLease(
     );
     closeLease(ctx, tx, lease, 'released', text, caller.principalId);
     return getLease(tx, caller.workspaceId, leaseId) ?? lease;
+  });
+}
+
+/**
+ * The same escape for an attempt that was dispatched but never claimed, which has no lease to
+ * release: its runner may be quarantined, gone or no longer eligible. The attempt is reported
+ * failed, which puts the packet on the usual reject and requeue path.
+ */
+export function releaseOffer(
+  ctx: FleetContext,
+  caller: HumanCaller,
+  attemptId: string,
+  reason: string | null,
+): { attemptId: string; missionId: string } {
+  return ctx.transact(caller.workspaceId, (tx) => {
+    sweep(ctx, tx, caller.workspaceId);
+    const offer = tx.get<{
+      mission_id: string;
+      packet_id: string;
+      runner_id: string;
+      status: string;
+    }>(
+      'SELECT mission_id, packet_id, runner_id, status FROM execution_attempts WHERE workspace_id = ? AND id = ?',
+      [caller.workspaceId, attemptId],
+    );
+    if (offer === undefined) {
+      throw new FleetError('lease_not_found', 'No such attempt');
+    }
+    const lease = tx.get<{ id: string }>(
+      'SELECT id FROM runner_leases WHERE workspace_id = ? AND attempt_id = ? LIMIT 1',
+      [caller.workspaceId, attemptId],
+    );
+    if (offer.status !== 'leased' || lease !== undefined) {
+      throw new FleetError(
+        'lease_closed',
+        'The attempt is not an unclaimed offer; release its lease instead',
+      );
+    }
+    const text = reason === null ? 'no reason given' : redactString(reason);
+    reportToCore(
+      ctx,
+      tx,
+      {
+        workspaceId: caller.workspaceId,
+        missionId: offer.mission_id,
+        packetId: offer.packet_id,
+        attemptId,
+      },
+      undefined,
+      'failed',
+      `Offer released by ${caller.principalId}: ${text}`,
+      'fleet',
+    );
+    recordAudit(tx, caller.workspaceId, ctx.now().toISOString(), {
+      kind: 'offer.released',
+      runnerId: offer.runner_id,
+      actorId: caller.principalId,
+      detail: { attemptId, reason: text },
+    });
+    return { attemptId, missionId: offer.mission_id };
   });
 }
 

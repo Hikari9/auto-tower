@@ -1,5 +1,6 @@
 import { ValidationError } from '../core/errors.js';
 import { InputReader } from '../core/validation.js';
+import { redactString } from './redact.js';
 import { LEASE_STATUSES, type LeaseStatus } from './store.js';
 import { isDigest, isVersion } from './version.js';
 
@@ -7,7 +8,7 @@ const ID = { max: 128, min: 1 } as const;
 const FENCE = { min: 1, max: 2_147_483_647 } as const;
 const CAPABILITY = /^[a-z0-9][a-z0-9._:-]{0,63}$/;
 const RECEIPT_ID = /^[A-Za-z0-9._:-]{1,128}$/;
-const REF = /^[A-Za-z0-9._/-]{1,200}$/;
+const REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const MAX_JSON_BYTES = 16 * 1024;
 
@@ -209,8 +210,19 @@ export function parseCheckpoint(body: unknown): CheckpointInput {
   const ref = r.string('ref', { max: 200, min: 1 });
   // A portable ref is a branch or tag name another runner can fetch. The strict charset
   // keeps credentials and URLs out of it.
-  if (ref !== '' && (!REF.test(ref) || ref.includes('..'))) {
-    r.fail('ref', 'must be a branch or tag ref of letters, digits, . _ / -');
+  if (
+    ref !== '' &&
+    (!REF.test(ref) ||
+      ref.includes('..') ||
+      ref.includes('//') ||
+      ref.endsWith('/') ||
+      ref.endsWith('.lock') ||
+      redactString(ref) !== ref)
+  ) {
+    r.fail(
+      'ref',
+      'must be a branch or tag name starting with a letter or digit, using only letters, digits, . _ / -',
+    );
   }
   const commit = r.optString('commit', { max: 64, min: 1 }) ?? null;
   if (commit !== null && !COMMIT.test(commit)) {
@@ -235,6 +247,8 @@ export function parseReceipt(body: unknown): ReceiptInput {
   const receiptId = r.string('receiptId', ID);
   if (receiptId !== '' && !RECEIPT_ID.test(receiptId)) {
     r.fail('receiptId', 'may only contain letters, digits, . _ : -');
+  } else if (redactString(receiptId) !== receiptId) {
+    r.fail('receiptId', 'must not look like a credential');
   }
   const input = {
     receiptId,

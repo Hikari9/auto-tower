@@ -30,6 +30,7 @@ import {
   recordProgress,
   recordReceipt,
   releaseLease,
+  releaseOffer,
   sweepWorkspace,
   unquarantine,
   updateRunner,
@@ -149,6 +150,11 @@ export interface Fleet {
     leaseId: string,
     reason: string | null,
   ): Lease;
+  releaseOffer(
+    caller: HumanCaller,
+    attemptId: string,
+    reason: string | null,
+  ): ReturnType<typeof releaseOffer>;
   /** All runners in the workspace, or only `onlyId`. */
   runners(
     workspaceId: string,
@@ -201,6 +207,7 @@ export function createFleet(deps: FleetDependencies): Fleet {
       view(quarantine(ctx, caller, id, reason)),
     unquarantine: (caller, id) => view(unquarantine(ctx, caller, id)),
     releaseLease: (caller, id, reason) => releaseLease(ctx, caller, id, reason),
+    releaseOffer: (caller, id, reason) => releaseOffer(ctx, caller, id, reason),
 
     runners(workspaceId, onlyId) {
       if (onlyId !== undefined) {
@@ -251,7 +258,7 @@ export function createFleet(deps: FleetDependencies): Fleet {
             commit_sha: string | null;
             recorded_at: string;
           }>(
-            'SELECT id, fence, ref, commit_sha, recorded_at FROM runner_checkpoints WHERE workspace_id = ? AND lease_id = ? ORDER BY recorded_at, rowid',
+            'SELECT id, fence, ref, commit_sha, recorded_at FROM runner_checkpoints WHERE workspace_id = ? AND lease_id = ? ORDER BY seq',
             [workspaceId, leaseId],
           )
           .map((r) => ({
@@ -269,7 +276,7 @@ export function createFleet(deps: FleetDependencies): Fleet {
             evidence_json: string;
             recorded_at: string;
           }>(
-            'SELECT receipt_id, outcome, summary, evidence_json, recorded_at FROM runner_receipts WHERE workspace_id = ? AND lease_id = ? ORDER BY recorded_at, rowid',
+            'SELECT receipt_id, outcome, summary, evidence_json, recorded_at FROM runner_receipts WHERE workspace_id = ? AND lease_id = ? ORDER BY recorded_at, receipt_id',
             [workspaceId, leaseId],
           )
           .map((r) => ({

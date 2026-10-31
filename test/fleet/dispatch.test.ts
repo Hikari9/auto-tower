@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { auditKinds, createFleetHarness } from './helpers.js';
+import { auditKinds, createFleetHarness, evidence } from './helpers.js';
 
 describe('the broker', () => {
   it('leaves authorized work waiting-runner while no runner exists', async () => {
@@ -42,8 +42,11 @@ describe('the broker', () => {
       runnerId: runner.id,
       status: 'running',
     });
-    // A second poll hands out nothing twice.
-    expect((await runner.claim()).body.assignments).toHaveLength(0);
+    // The runner shows evidence for what it holds, and then it is not sent again.
+    const held = res.body.assignments[0];
+    const next = await runner.claim({ active: [evidence(held)] });
+    expect(next.body.assignments).toHaveLength(0);
+    expect(next.body.leases).toHaveLength(1);
   });
 
   it('requires the declared capability, and re-evaluates when it changes', async () => {
@@ -120,8 +123,11 @@ describe('the broker', () => {
     expect(first.body.assignments).toHaveLength(1);
     expect(second.body.assignments).toHaveLength(1);
     // The third waits: both runners are full.
-    expect((await a.claim()).body.assignments).toHaveLength(0);
-    expect((await b.claim()).body.assignments).toHaveLength(0);
+    const held = (r: typeof first) => ({
+      active: [evidence(r.body.assignments[0])],
+    });
+    expect((await a.claim(held(first))).body.assignments).toHaveLength(0);
+    expect((await b.claim(held(second))).body.assignments).toHaveLength(0);
     const waiting = h
       .getMission(first.body.assignments[0].missionId)
       .packets.filter((p) => p.status === 'ready');

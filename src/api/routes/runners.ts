@@ -255,6 +255,19 @@ const releaseLease: RouteSpec = {
   }),
 };
 
+const releaseOffer: RouteSpec = {
+  method: 'post',
+  path: '/runners/attempts/:id/release',
+  access: { scopes: ['runner:write'] },
+  handler: fleetGuarded(async (c) => {
+    const human = humanCaller(c);
+    const reason = parseReason(await readJson(c));
+    return c.json(
+      fleetOf(c).releaseOffer(human, c.req.param('id') ?? '', reason),
+    );
+  }),
+};
+
 const claim: RouteSpec = {
   method: 'post',
   path: '/runners/claims',
@@ -349,6 +362,7 @@ export const runnerRoutes: readonly RouteSpec[] = [
   quarantineRunner,
   unquarantineRunner,
   releaseLease,
+  releaseOffer,
   claim,
   heartbeat,
   progress,

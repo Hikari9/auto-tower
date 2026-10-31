@@ -1,6 +1,6 @@
 import type { SqlDatabase } from '../storage/database.js';
 import type { AuditDraft } from './errors.js';
-import { redactValue } from './redact.js';
+import { redactString, redactValue } from './redact.js';
 
 export const RUNNER_STATUSES = ['active', 'paused', 'quarantined'] as const;
 export type RunnerStatus = (typeof RUNNER_STATUSES)[number];
@@ -27,6 +27,7 @@ interface RunnerRow {
   bound_digest: string;
   status: RunnerStatus;
   quarantine_reason: string | null;
+  prior_status: 'active' | 'paused' | null;
   capabilities_json: string;
   allowed_scopes_json: string;
   max_concurrent: number;
@@ -45,6 +46,8 @@ export interface Runner {
   boundDigest: string;
   status: RunnerStatus;
   quarantineReason: string | null;
+  /** The status a quarantine will restore. Internal. */
+  priorStatus: 'active' | 'paused' | null;
   capabilities: string[];
   allowedScopes: string[];
   maxConcurrent: number;
@@ -54,7 +57,7 @@ export interface Runner {
 }
 
 const RUNNER_COLUMNS =
-  'workspace_id, id, name, token_id, bound_version, bound_digest, status, quarantine_reason, capabilities_json, allowed_scopes_json, max_concurrent, last_seen_at, created_at, updated_at';
+  'workspace_id, id, name, token_id, bound_version, bound_digest, status, quarantine_reason, prior_status, capabilities_json, allowed_scopes_json, max_concurrent, last_seen_at, created_at, updated_at';
 
 function toRunner(row: RunnerRow): Runner {
   return {
@@ -66,6 +69,7 @@ function toRunner(row: RunnerRow): Runner {
     boundDigest: row.bound_digest,
     status: row.status,
     quarantineReason: row.quarantine_reason,
+    priorStatus: row.prior_status,
     capabilities: JSON.parse(row.capabilities_json) as string[],
     allowedScopes: JSON.parse(row.allowed_scopes_json) as string[],
     maxConcurrent: row.max_concurrent,
@@ -101,7 +105,7 @@ export function listRunners(
 }
 
 export function publicRunner(runner: Runner, load: number) {
-  const { tokenId: _tokenId, ...rest } = runner;
+  const { tokenId: _tokenId, priorStatus: _priorStatus, ...rest } = runner;
   return { ...rest, load };
 }
 
@@ -118,7 +122,7 @@ interface LeaseRow {
   granted_at: string;
   expires_at: string;
   last_proof_at: string;
-  delivered_at: string | null;
+  confirmed_at: string | null;
   recovering_since: string | null;
   reconciled_from: number | null;
   progress_seq: number;
@@ -141,7 +145,7 @@ export interface Lease {
   grantedAt: string;
   expiresAt: string;
   lastProofAt: string;
-  deliveredAt: string | null;
+  confirmedAt: string | null;
   recoveringSince: string | null;
   reconciledFrom: number | null;
   progressSeq: number;
@@ -152,7 +156,7 @@ export interface Lease {
 }
 
 const LEASE_COLUMNS =
-  'workspace_id, id, scope_key, fence, attempt_id, mission_id, packet_id, runner_id, status, granted_at, expires_at, last_proof_at, delivered_at, recovering_since, reconciled_from, progress_seq, reassign_failures, reassign_not_before, closed_at, close_reason';
+  'workspace_id, id, scope_key, fence, attempt_id, mission_id, packet_id, runner_id, status, granted_at, expires_at, last_proof_at, confirmed_at, recovering_since, reconciled_from, progress_seq, reassign_failures, reassign_not_before, closed_at, close_reason';
 
 function toLease(row: LeaseRow): Lease {
   return {
@@ -168,7 +172,7 @@ function toLease(row: LeaseRow): Lease {
     grantedAt: row.granted_at,
     expiresAt: row.expires_at,
     lastProofAt: row.last_proof_at,
-    deliveredAt: row.delivered_at,
+    confirmedAt: row.confirmed_at,
     recoveringSince: row.recovering_since,
     reconciledFrom: row.reconciled_from,
     progressSeq: row.progress_seq,
@@ -296,7 +300,7 @@ export interface AuditRecord {
   detail: unknown;
 }
 
-/** Detail is redacted here, so no caller can store a raw secret through the audit. */
+/** Detail and the lease id are redacted here, so no caller can store a raw secret through the audit. */
 export function recordAudit(
   db: SqlDatabase,
   workspaceId: string,
@@ -310,7 +314,10 @@ export function recordAudit(
       at,
       draft.kind,
       draft.runnerId ?? null,
-      draft.leaseId ?? null,
+      // A lease id can come straight from a request path, so it is scanned and bounded like detail.
+      draft.leaseId === undefined || draft.leaseId === null
+        ? null
+        : redactString(draft.leaseId).slice(0, 128),
       draft.actorId ?? null,
       JSON.stringify(redactValue(draft.detail ?? {})),
     ],

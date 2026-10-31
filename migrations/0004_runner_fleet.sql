@@ -58,6 +58,8 @@ CREATE TABLE runners (
   bound_digest TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('active', 'paused', 'quarantined')),
   quarantine_reason TEXT,
+  -- The status to restore when a quarantine is lifted, so a human pause survives it.
+  prior_status TEXT CHECK (prior_status IN ('active', 'paused')),
   capabilities_json TEXT NOT NULL,
   allowed_scopes_json TEXT NOT NULL,
   max_concurrent INTEGER NOT NULL CHECK (max_concurrent >= 0),
@@ -94,7 +96,9 @@ CREATE TABLE runner_leases (
   granted_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
   last_proof_at TEXT NOT NULL,
-  delivered_at TEXT,
+  -- Set by the first matching evidence. Until then the assignment is sent again on every claim,
+  -- so a response that was lost does not strand the lease.
+  confirmed_at TEXT,
   recovering_since TEXT,
   -- The fence a reconcile replaced, so a retried reconcile whose answer was lost still succeeds.
   reconciled_from INTEGER,
@@ -154,6 +158,8 @@ CREATE TABLE runner_progress (
 );
 
 CREATE TABLE runner_checkpoints (
+  -- Insert order, which does not depend on the clock.
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
   workspace_id TEXT NOT NULL REFERENCES workspaces(id),
   id TEXT NOT NULL,
   lease_id TEXT NOT NULL,
@@ -164,10 +170,10 @@ CREATE TABLE runner_checkpoints (
   ref TEXT NOT NULL,
   commit_sha TEXT,
   recorded_at TEXT NOT NULL,
-  PRIMARY KEY (workspace_id, id)
+  UNIQUE (workspace_id, id)
 );
 
-CREATE INDEX runner_checkpoints_attempt_idx ON runner_checkpoints (workspace_id, attempt_id, recorded_at);
+CREATE INDEX runner_checkpoints_attempt_idx ON runner_checkpoints (workspace_id, attempt_id, seq);
 
 CREATE TABLE runner_receipts (
   workspace_id TEXT NOT NULL REFERENCES workspaces(id),
