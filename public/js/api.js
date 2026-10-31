@@ -63,6 +63,14 @@ export function createApiClient({
           : `Request failed (${res.status})`,
       );
     }
+    if (data === null) {
+      // A 2xx body that is not JSON (a proxy page, an empty body) is not a usable answer.
+      throw new ApiError(
+        res.status,
+        'invalid_response',
+        'The server returned an unexpected response.',
+      );
+    }
     return data;
   }
 

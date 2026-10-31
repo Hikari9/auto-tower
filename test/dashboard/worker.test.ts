@@ -89,16 +89,31 @@ describe('Workers entry serves the dashboard', () => {
     expect(script.status).toBe(200);
     expect(script.headers.get('content-type')).toContain('text/javascript');
     expect(persona.headers.get('content-type')).toContain('application/json');
+    for (const res of [script, persona]) {
+      expect(res.headers.get('content-security-policy')).toBe(EXPECTED_CSP);
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+    }
   });
 
   it('refuses paths outside its file list, even when the binding has them', async () => {
-    const env = { ASSETS: assetsBinding() };
+    const binding = assetsBinding();
+    const env = { ASSETS: binding };
 
     for (const path of [
       '/dashboard/secret.txt',
       '/dashboard/js%2f..%2f..%2fpackage.json',
       '/dashboard/constructor',
+      '/dashboard/js/app.d.ts',
+      '/dashboard/js/boot.d.ts',
     ]) {
+      if (path.endsWith('.d.ts')) {
+        // The binding serves these, so the 404 below can only come from the allowlist.
+        const direct = await binding.fetch(
+          new Request(`${origin}${path.replace('/dashboard', '')}`),
+        );
+        expect(direct.status, `binding serves ${path}`).toBe(200);
+      }
       expect(
         (await worker.fetch(new Request(`${origin}${path}`), env)).status,
         path,
@@ -171,6 +186,34 @@ describe('Workers deployment config', () => {
   });
 });
 
+describe('Workers HEAD and encoded paths match the Node router', () => {
+  it('answers HEAD with the shell headers and no body', async () => {
+    const res = await worker.fetch(
+      new Request(`${origin}/dashboard`, { method: 'HEAD' }),
+      { ASSETS: assetsBinding() },
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-security-policy')).toBe(EXPECTED_CSP);
+    expect(await res.text()).toBe('');
+  });
+
+  it('decodes an encoded file name the way the Node router does', async () => {
+    const app = createApp({ db: openTestDatabase() }, [
+      ...ROUTES,
+      ...dashboardRoutes,
+    ]);
+    const path = '/dashboard/styles%2Ecss';
+
+    expect((await app.request(path)).status).toBe(200);
+    const res = await worker.fetch(new Request(`${origin}${path}`), {
+      ASSETS: assetsBinding(),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/css');
+  });
+});
+
 describe('Workers shell paths and config, round 3', () => {
   it('serves the shell for /dashboard/ and /dashboard/index.html', async () => {
     for (const path of ['/dashboard/', '/dashboard/index.html']) {
@@ -189,5 +232,77 @@ describe('Workers shell paths and config, round 3', () => {
     );
 
     expect(toml).toMatch(/run_worker_first = true/);
+  });
+});
+
+describe('Workers HEAD, malformed paths and the asset ignore list', () => {
+  it('answers HEAD on an unknown dashboard path with no body', async () => {
+    const res = await worker.fetch(
+      new Request(`${origin}/dashboard/nope`, { method: 'HEAD' }),
+      { ASSETS: assetsBinding() },
+    );
+
+    expect(res.status).toBe(404);
+    expect(await res.text()).toBe('');
+  });
+
+  it('answers HEAD on a storage path with no body', async () => {
+    const res = await worker.fetch(
+      new Request(`${origin}/missions`, { method: 'HEAD' }),
+      { ASSETS: assetsBinding() },
+    );
+
+    expect(res.status).toBe(503);
+    expect(await res.text()).toBe('');
+  });
+
+  it('answers a malformed percent sequence with 404 instead of throwing', async () => {
+    const res = await worker.fetch(
+      new Request(`${origin}/dashboard/%E0%A4%A`),
+      { ASSETS: assetsBinding() },
+    );
+
+    expect(res.status).toBe(404);
+  });
+
+  it('keeps %2F encoded, as the Node router does', async () => {
+    const path = '/dashboard/js%2Fapp.js';
+    const app = createApp({ db: openTestDatabase() }, [
+      ...ROUTES,
+      ...dashboardRoutes,
+    ]);
+
+    expect((await app.request(path)).status).toBe(404);
+    const res = await worker.fetch(new Request(`${origin}${path}`), {
+      ASSETS: assetsBinding(),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('excludes the type declarations from the uploaded assets', () => {
+    const ignore = readFileSync(join(PUBLIC_DIR, '.assetsignore'), 'utf8');
+
+    expect(ignore.split('\n').map((line) => line.trim())).toContain('*.d.ts');
+  });
+});
+
+describe('Workers HEAD on an existing asset', () => {
+  it('answers HEAD for a dashboard file with its headers and no body', async () => {
+    const env = { ASSETS: assetsBinding() };
+    const get = await worker.fetch(
+      new Request(`${origin}/dashboard/js/app.js`),
+      env,
+    );
+    const head = await worker.fetch(
+      new Request(`${origin}/dashboard/js/app.js`, { method: 'HEAD' }),
+      env,
+    );
+
+    expect(head.status).toBe(get.status);
+    expect(head.headers.get('content-type')).toBe(
+      get.headers.get('content-type'),
+    );
+    expect(head.headers.get('content-security-policy')).toBe(EXPECTED_CSP);
+    expect(await head.text()).toBe('');
   });
 });

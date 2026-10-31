@@ -54,7 +54,9 @@ export const RUNNER_STATES = {
  * @param {string} key
  */
 export function describe(table, key) {
-  return table[key] ?? { label: key, tone: 'neutral' };
+  return Object.hasOwn(table, key)
+    ? table[key]
+    : { label: key, tone: 'neutral' };
 }
 
 /**

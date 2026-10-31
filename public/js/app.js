@@ -1,6 +1,6 @@
 import { ApiError, createApiClient } from './api.js';
 import { h, replaceChildren } from './dom.js';
-import { describeError, VIEWS } from './views.js';
+import { clearDecisionDrafts, describeError, VIEWS } from './views.js';
 
 export const TOKEN_KEY = 'tower.dashboard.token';
 
@@ -54,11 +54,38 @@ const ROUTES = [
     label: 'Mission Overview',
     view: 'mission',
     match: /^\/missions\/([^/]+)$/,
-    params: (m) => ({ id: decodeURIComponent(m[1] ?? '') }),
+    params: (m) => {
+      const id = decodeURIComponent(m[1] ?? '');
+      // `.` and `..` survive encodeURIComponent and normalize away in the request path.
+      if (id === '.' || id === '..') {
+        throw new Error('not a mission id');
+      }
+      return { id };
+    },
   },
 ];
 
-/** Reads the route from a hash such as `#/missions/msn_1`. Unknown or empty hashes go to the overview. */
+/**
+ * Session storage when the browser grants it. Otherwise an in-memory copy, so the
+ * dashboard still works, with the token kept only for this page load.
+ */
+function sessionTokenStore() {
+  try {
+    const store = globalThis.sessionStorage;
+    store.getItem(TOKEN_KEY);
+    return store;
+  } catch {
+    const memory = new Map();
+    return {
+      getItem: (/** @type {string} */ key) => memory.get(key) ?? null,
+      setItem: (/** @type {string} */ key, /** @type {string} */ value) =>
+        memory.set(key, value),
+      removeItem: (/** @type {string} */ key) => memory.delete(key),
+    };
+  }
+}
+
+/** Reads the route from a hash such as `#/missions/msn_1`. An empty hash goes to the overview. An unknown path returns null. */
 export function resolveRoute(hash) {
   const path =
     String(hash ?? '')
@@ -92,13 +119,16 @@ export function resolveRoute(hash) {
 export function mountDashboard({
   root,
   fetchImpl,
-  storage = globalThis.sessionStorage,
+  storage = sessionTokenStore(),
   persona = DEFAULT_PERSONA,
 }) {
   const api = createApiClient({
     ...(fetchImpl ? { fetchImpl } : {}),
     getToken: () => storage.getItem(TOKEN_KEY),
-    onUnauthorized: () => storage.removeItem(TOKEN_KEY),
+    onUnauthorized: () => {
+      storage.removeItem(TOKEN_KEY);
+      clearDecisionDrafts();
+    },
   });
   const brand = {
     name: persona.name || DEFAULT_PERSONA.name,
@@ -129,7 +159,19 @@ export function mountDashboard({
   const header = h(
     'header',
     { class: 'site-header' },
-    h('a', { class: 'skip', href: '#main' }, 'Skip to content'),
+    h(
+      'a',
+      {
+        class: 'skip',
+        href: '#main',
+        // Focus moves to main. The hash stays put, so the link does not route to "#main".
+        onclick: (/** @type {Event} */ event) => {
+          event.preventDefault();
+          main.focus();
+        },
+      },
+      'Skip to content',
+    ),
     h(
       'div',
       { class: 'brand' },
@@ -149,7 +191,12 @@ export function mountDashboard({
 
   /** @param {string} hash */
   async function show(hash) {
-    current = hash || current;
+    // `#main` is the skip link's target, not a route. Keep the current route and clear the hash.
+    if (hash === '#main') {
+      win?.history.replaceState(null, '', current);
+    } else {
+      current = hash || current;
+    }
     // The view this render belongs to. A write it started reports back to this view only.
     const viewHash = current;
     const gen = ++generation;
@@ -275,6 +322,7 @@ export function mountDashboard({
 
   function signedOut() {
     storage.removeItem(TOKEN_KEY);
+    clearDecisionDrafts();
     win?.history.replaceState(null, '', '#/missions');
     show('#/missions');
   }

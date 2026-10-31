@@ -52,6 +52,15 @@ function notConfigured(message: string): Response {
   );
 }
 
+/** Decodes the path the way the Node router does (Hono applies decodeURI). Malformed input stays raw and misses the allowlist. */
+function decodePath(pathname: string): string {
+  try {
+    return decodeURI(pathname);
+  } catch {
+    return pathname;
+  }
+}
+
 async function serveDashboard(
   request: Request,
   env: WorkerEnv,
@@ -69,7 +78,12 @@ async function serveDashboard(
       { status: 404 },
     );
   }
-  return new Response(upstream.body, {
+  // HEAD gets the same headers as GET and no body. The unread asset stream is cancelled.
+  const head = request.method === 'HEAD';
+  if (head) {
+    await upstream.body?.cancel().catch(() => undefined);
+  }
+  return new Response(head ? null : upstream.body, {
     headers: {
       'content-type':
         upstream.headers.get('content-type') ?? 'application/octet-stream',
@@ -81,21 +95,33 @@ async function serveDashboard(
   });
 }
 
+function route(
+  request: Request | undefined,
+  env: WorkerEnv,
+): Response | Promise<Response> {
+  const pathname =
+    request === undefined ? '' : decodePath(new URL(request.url).pathname);
+  if (
+    (request?.method === 'GET' || request?.method === 'HEAD') &&
+    (pathname === '/dashboard' || pathname.startsWith('/dashboard/'))
+  ) {
+    const file = DASHBOARD_PATHS.get(pathname);
+    return file === undefined
+      ? Response.json(
+          { error: { code: 'not_found', message: 'Route not found' } },
+          { status: 404 },
+        )
+      : serveDashboard(request, env, file);
+  }
+  return notConfigured('Storage binding is not configured');
+}
+
 export default {
-  fetch(request?: Request, env: WorkerEnv = {}): Response | Promise<Response> {
-    const pathname = request === undefined ? '' : new URL(request.url).pathname;
-    if (
-      request?.method === 'GET' &&
-      (pathname === '/dashboard' || pathname.startsWith('/dashboard/'))
-    ) {
-      const file = DASHBOARD_PATHS.get(pathname);
-      return file === undefined
-        ? Response.json(
-            { error: { code: 'not_found', message: 'Route not found' } },
-            { status: 404 },
-          )
-        : serveDashboard(request, env, file);
-    }
-    return notConfigured('Storage binding is not configured');
+  async fetch(request?: Request, env: WorkerEnv = {}): Promise<Response> {
+    const res = await route(request, env);
+    // HEAD answers with the status and headers of the route and no body, on every path.
+    return request?.method === 'HEAD'
+      ? new Response(null, { status: res.status, headers: res.headers })
+      : res;
   },
 };

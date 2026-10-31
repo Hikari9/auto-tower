@@ -24,6 +24,30 @@ import {
 
 const LIST_LIMIT = 100;
 let confirmSeq = 0;
+/** Unsaved choice and note per decision id. A refresh rebuilds the card, so these carry over. */
+const decisionDrafts = new Map();
+
+/** @param {string} id @param {{choice?: string, note?: string}} patch */
+function rememberDraft(id, patch) {
+  decisionDrafts.set(id, { ...decisionDrafts.get(id), ...patch });
+}
+
+/** Drops every draft. Called on sign-out and on a rejected token, since drafts belong to the person who typed them. */
+export function clearDecisionDrafts() {
+  decisionDrafts.clear();
+}
+
+/**
+ * True when the write may have applied: no server answer, a 5xx, or a 2xx body that did not parse.
+ * Only a 4xx answer (other than 401 and 409, which reload) shows that nothing was written.
+ */
+function mayHaveApplied(error) {
+  return (
+    !(error instanceof ApiError) ||
+    error.status >= 500 ||
+    error.code === 'invalid_response'
+  );
+}
 
 /** @param {string} iso */
 function when(iso) {
@@ -178,7 +202,10 @@ function confirmAction({
                   await ctx.refresh();
                   return;
                 }
-                confirm.disabled = false;
+                // Cancel rebuilds the slot from `open`, so the trigger is locked too, until the view re-renders.
+                const uncertain = mayHaveApplied(caught);
+                confirm.disabled = uncertain;
+                open.disabled = uncertain;
                 cancel.disabled = false;
                 error.textContent = describeWriteError(caught);
               }
@@ -231,7 +258,7 @@ export function describeWriteError(error) {
   if (error instanceof ApiError) {
     return describeError(error);
   }
-  return 'The request failed. Check the connection. The change may already have been applied, so reload before retrying.';
+  return 'The request failed. Check the connection. The change may already have been applied, so check the current state before retrying.';
 }
 
 /** A rejected token or a stale record is not fixed by retrying here. The view reloads instead. */
@@ -322,21 +349,22 @@ export function renderMission(ctx, params) {
   return page(
     'Mission',
     async () => {
-      const [{ mission }, links, activity, decisions] = await Promise.all([
-        ctx.api.get(`/missions/${id}`),
-        ctx.api.get(`/missions/${id}/issue-links`),
-        ctx.api.get(`/missions/${id}/activity`),
-        ctx.api.get('/decisions?status=open&limit=200'),
-      ]);
-      return { mission, links, activity, decisions };
+      const [{ mission, holds = [] }, links, activity, decisions] =
+        await Promise.all([
+          ctx.api.get(`/missions/${id}`),
+          ctx.api.get(`/missions/${id}/issue-links`),
+          ctx.api.get(`/missions/${id}/activity`),
+          ctx.api.get('/decisions?status=open&limit=200'),
+        ]);
+      return { mission, holds: holds ?? [], links, activity, decisions };
     },
-    ({ mission, links, activity, decisions }) => {
+    ({ mission, holds, links, activity, decisions }) => {
       const packetsById = new Map(mission.packets.map((p) => [p.id, p]));
       const attemptsByPacket = new Map(
         mission.attempts.map((a) => [a.packetId, a]),
       );
       const openForMission = decisions.decisions.filter((d) =>
-        d.links.some(
+        (d.links ?? []).some(
           (l) => l.missionId === mission.id && l.status === 'blocked',
         ),
       );
@@ -354,7 +382,13 @@ export function renderMission(ctx, params) {
           ' ',
           h('span', { class: 'meta' }, `Version ${mission.version}`),
         ),
-        blockedPanel(mission, packetsById, openForMission, discrepancies),
+        blockedPanel(
+          mission,
+          packetsById,
+          openForMission,
+          discrepancies,
+          holds,
+        ),
         section(
           'Outcome',
           h(
@@ -481,7 +515,14 @@ function fact(term, value) {
   return h('div', null, h('dt', null, term), h('dd', null, String(value)));
 }
 
-function blockedPanel(mission, packetsById, openDecisions, discrepancies) {
+/** One line per authority hold: the packet it refuses, why, and when it was last refused. */
+function blockedPanel(
+  mission,
+  packetsById,
+  openDecisions,
+  discrepancies,
+  holds,
+) {
   const reasons = [];
   if (mission.state === 'waiting-runner') {
     reasons.push(
@@ -504,6 +545,10 @@ function blockedPanel(mission, packetsById, openDecisions, discrepancies) {
   }
   for (const d of discrepancies.filter((x) => x.requiresAttention)) {
     reasons.push(`Issue discrepancy (${d.kind}): ${d.detail}`);
+  }
+  for (const hold of holds) {
+    const title = packetsById.get(hold.packetId)?.title ?? hold.packetId;
+    reasons.push(`${title} held (${when(hold.at)}): ${hold.reason}`);
   }
   if (reasons.length === 0) {
     return null;
@@ -643,8 +688,8 @@ export function renderDecisions(ctx) {
   return page(
     'Decision inbox',
     () => ctx.api.get('/decisions?status=open&limit=200'),
-    ({ decisions }) =>
-      h(
+    ({ decisions }) => {
+      return h(
         'div',
         null,
         heading('Decision inbox', 'page-title'),
@@ -655,15 +700,22 @@ export function renderDecisions(ctx) {
               { class: 'cards', 'aria-label': 'Open decisions' },
               decisions.map((d) => h('li', null, decisionCard(ctx, d))),
             ),
-      ),
+      );
+    },
   );
 }
 
 /** @param {Context} ctx @param {any} decision */
 function decisionCard(ctx, decision) {
   const titleId = `decision-${decision.id}`;
+  const alternatives = decision.alternatives ?? [];
+  const links = decision.links ?? [];
+  const draft = decisionDrafts.get(decision.id) ?? {};
+  const preset = alternatives.some((a) => a.id === draft.choice)
+    ? draft.choice
+    : alternatives[0]?.id;
   const choice = h('fieldset', null, h('legend', null, 'Choose an answer'));
-  for (const alt of decision.alternatives) {
+  for (const alt of alternatives) {
     const radioId = `${titleId}-${alt.id}`;
     choice.append(
       h(
@@ -674,7 +726,8 @@ function decisionCard(ctx, decision) {
           name: `${titleId}-choice`,
           id: radioId,
           value: alt.id,
-          checked: alt.id === decision.alternatives[0]?.id,
+          checked: alt.id === preset,
+          onchange: () => rememberDraft(decision.id, { choice: alt.id }),
         }),
         h(
           'label',
@@ -690,7 +743,9 @@ function decisionCard(ctx, decision) {
     id: `${titleId}-note`,
     rows: '2',
     maxlength: '2000',
+    oninput: () => rememberDraft(decision.id, { note: note.value }),
   });
+  note.value = draft.note ?? '';
   const status = h('p', { role: 'status', class: 'meta' });
   const submit = h(
     'button',
@@ -698,9 +753,12 @@ function decisionCard(ctx, decision) {
       type: 'button',
       onclick: () => {
         const selected = choice.querySelector('input:checked');
-        const alt = decision.alternatives.find((a) => a.id === selected?.value);
+        const alt = alternatives.find((a) => a.id === selected?.value);
         if (!alt) {
-          status.textContent = 'Choose an answer first.';
+          status.textContent =
+            alternatives.length === 0
+              ? 'No answer options were returned for this decision.'
+              : 'Choose an answer first.';
           return;
         }
         const resumes = alt.resumes
@@ -720,7 +778,7 @@ function decisionCard(ctx, decision) {
           h(
             'div',
             { class: 'actions' },
-            confirmButton(ctx, decision, alt, note, error, cancel),
+            confirmButton(ctx, decision, alt, note, error, cancel, submit),
             cancel,
           ),
           error,
@@ -770,7 +828,7 @@ function decisionCard(ctx, decision) {
     h(
       'p',
       { class: 'meta' },
-      `Blocks ${decision.links.filter((l) => l.status === 'blocked').length} branch(es). Requested by ${decision.createdBy} at ${when(decision.createdAt)}.`,
+      `Blocks ${links.filter((l) => l.status === 'blocked').length} branch(es). Requested by ${decision.createdBy} at ${when(decision.createdAt)}.`,
     ),
     h(
       'form',
@@ -791,7 +849,7 @@ function decisionCard(ctx, decision) {
 }
 
 /** @param {Context} ctx @param {any} decision @param {any} alt @param {HTMLTextAreaElement} note @param {HTMLElement} error @param {HTMLButtonElement} cancel */
-function confirmButton(ctx, decision, alt, note, error, cancel) {
+function confirmButton(ctx, decision, alt, note, error, cancel, submit) {
   return h(
     'button',
     {
@@ -801,6 +859,7 @@ function confirmButton(ctx, decision, alt, note, error, cancel) {
         const button = /** @type {HTMLButtonElement} */ (event.currentTarget);
         button.disabled = true;
         cancel.disabled = true;
+        submit.disabled = true;
         error.textContent = '';
         try {
           await ctx.api.post(
@@ -811,14 +870,19 @@ function confirmButton(ctx, decision, alt, note, error, cancel) {
               note: note.value.trim() || null,
             },
           );
+          decisionDrafts.delete(decision.id);
           await ctx.refresh();
         } catch (caught) {
           if (needsReload(caught)) {
+            decisionDrafts.delete(decision.id);
             ctx.flash(describeError(caught));
             await ctx.refresh();
             return;
           }
-          button.disabled = false;
+          // The answer may have applied, so Confirm and Answer… stay off until the view re-renders.
+          const uncertain = mayHaveApplied(caught);
+          button.disabled = uncertain;
+          submit.disabled = uncertain;
           cancel.disabled = false;
           error.textContent = describeWriteError(caught);
         }
@@ -883,7 +947,7 @@ function rulesTable(ctx, rules) {
       rule.resource,
       rule.scope,
       rule.maxRisk,
-      rule.grantee.kind ?? 'any',
+      rule.grantee?.kind ?? 'any',
       rule.expiresAt ? when(rule.expiresAt) : 'never',
       confirmAction({
         trigger: `Revoke ${rule.action}`,
@@ -924,7 +988,9 @@ function limitsText(limits) {
   const { maxAmount = null, missionIds = null } = limits;
   const amount = maxAmount === null ? 'no amount cap' : `up to ${maxAmount}`;
   const missions =
-    missionIds === null ? 'all missions' : `missions ${missionIds.join(', ')}`;
+    missionIds === null || missionIds === undefined
+      ? 'all missions'
+      : `missions ${missionIds.join(', ')}`;
   return `Limits: ${amount}; ${missions}.`;
 }
 
