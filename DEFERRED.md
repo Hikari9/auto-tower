@@ -66,3 +66,31 @@ Items here are real, planned, and intentionally not done in Phase 0. Each has an
 6. **Expose the endpoint** `POST /webhooks/github/<workspaceId>` behind HTTPS only after steps 2 to 5, and point the App's webhook URL at it. Check a `ping` answers `pong`.
 7. **Schedule polling** (`POST /issues/poll` with the adapter's token) as the fallback for missed deliveries. Nothing in `src/hosting` runs it on a timer yet.
 8. **Roll back** by setting the repository to `link-only` and removing the webhook from the App. Stored discrepancies and history remain.
+
+## Identity provider, ChatGPT connector registration and MCP hosting (T7)
+
+**Status:** Deferred. The MCP endpoint, the OAuth-compatible resource surface (`/.well-known/oauth-protected-resource`, `WWW-Authenticate` challenges, audience-bound provider tokens) and the `AuthProvider` port are built and tested against a fake provider. No identity provider exists, no client is registered anywhere, and nothing is publicly reachable. `src/hosting` does not yet read MCP settings from the environment, so a host built from `startHost` serves the endpoint with Tower tokens only.
+
+**Why it matters:** Tower is only the resource server. ChatGPT and other connector clients discover the authorization server from the metadata, so until a real provider sits behind `AuthProvider` they can only present Tower tokens, which a connector cannot obtain on its own.
+
+**Activation steps:**
+
+1. **Get explicit approval.** Creating an identity-provider tenant, registering a connector and exposing a public URL are external, possibly billable actions. Confirm the provider, the account and the public origin first.
+2. **Choose and configure the provider.** It must issue access tokens whose audience is `<publicBaseUrl>/mcp` (RFC 8707), support PKCE and dynamic client registration or a pre-registered client, and publish its own authorization-server metadata. Record its issuer URL.
+3. **Write the adapter.** Implement `AuthProvider` (`src/auth/oauth/provider.ts`): `authorizationServers` is the issuer list and `verifyAccessToken` checks signature, expiry and issuer against the provider's keys, then returns `{ issuer, subject, scopes, audience, expiresAt }`. Keep keys and client secrets on the host. Tower stores none. Test it against recorded tokens, not a live tenant.
+4. **Wire the host.** Pass `mcp: { publicBaseUrl, authProvider, allowedOrigins, approvedAiProviders }` to `createApp`, and read `publicBaseUrl` from the environment in `src/hosting/host.ts`. The URL must be an https origin with no path.
+5. **Link identities.** For each person or agent, a human runs `linkIdentity` for the provider's `(issuer, subject)`, naming the Tower principal and the scope ceiling. A valid provider token with no link authenticates nobody. There is no admin route for this yet.
+6. **Register the ChatGPT connector.** Add `<publicBaseUrl>/mcp` as a custom MCP connector, let it discover the metadata and complete the provider's consent. Check `tools/list` shows only what the linked principal's scopes allow, then call `briefing`.
+7. **Roll back.** Revoke the identity links (`revokeIdentity`), remove the connector, and unset `authProvider`. Tower tokens keep working. Sessions end with the token, and `mcp_audit` keeps the record of what was called.
+
+## Cloud AI triage and hosted execution (T7)
+
+**Status:** Deferred. The flags `cloud_ai.triage` and `hosted_execution` exist, default off, and fail closed. Nothing consumes them: no cloud AI call and no hosted runner exists.
+
+**Activation steps:**
+
+1. **Get explicit approval** for the provider, the spend ceiling and the data that may leave Tower. A flag turning on is the last step, not the first.
+2. **Add the provider to `approvedAiProviders`** at deploy time, behind its own adapter and a fake for tests.
+3. **Create the delegated rule** (`grant_policy`, action `cloud_ai.triage.run` or `hosted_execution.run`, resource `provider:<id>`, with `maxAmount` as the spend cap), then turn the flag on with `set_feature_flag`, naming the provider, a budget in cents and the rule.
+4. **Make the capability check `isEnabled`** at the point of effect, so revoking the rule stops it immediately. Spend tracking against the budget is not built.
+5. **Roll back** by turning the flag off or revoking the rule. Either stops the capability on the next check.
