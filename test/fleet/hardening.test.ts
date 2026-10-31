@@ -231,9 +231,13 @@ describe('one execution scope is one scope', () => {
 
   it('normalises names and refuses a scope that cannot be keyed', () => {
     const key = (scope: string[]) => requirementsOf('m', p(scope)).scopeKey;
-    expect(key(['repo:Foo'])).toBe(key(['repo:foo']));
-    expect(key(['repo:foo/'])).toBe(key(['repo:foo']));
-    expect(key(['repo:foo.git'])).toBe(key(['repo:foo']));
+    // A spelling policy never saw is refused, not folded into the canonical repository.
+    for (const alias of ['repo:Foo', 'repo:foo/', 'repo:foo.git']) {
+      expect(requirementsOf('m', p([alias])).invalid, alias).toMatch(
+        /canonical form, write repo:foo$/,
+      );
+      expect(key([alias]), alias).toMatch(/^packet:/);
+    }
     expect(key(['repo:a', 'worktree:b'])).not.toBe(key(['repo:a#worktree:b']));
     for (const scope of [
       ['repo:a', 'repo:b'],
@@ -270,18 +274,23 @@ describe('one execution scope is one scope', () => {
     expect((await b.claim()).body.assignments).toEqual([]);
   });
 
-  it('keeps aliases of one repo exclusive', async () => {
-    const h = createFleetHarness({
-      config: { backoff: { baseMs: 1_000, capMs: 4_000 } },
-    });
+  it('dispatches the canonical spelling and never an alias of it', async () => {
+    const h = createFleetHarness();
     const a = await h.runner({ name: 'a' });
     const b = await h.runner({ name: 'b' });
     await a.claim();
     await b.claim();
-    h.mission([{ scope: ['repo:Foo'] }, { scope: ['repo:foo.git'] }]);
+    h.mission([
+      { scope: ['repo:Foo'] },
+      { scope: ['repo:foo.git'] },
+      { scope: ['repo:foo'] },
+    ]);
     h.tick();
     const [ra, rb] = await Promise.all([a.claim(), b.claim()]);
-    expect([...ra.body.assignments, ...rb.body.assignments]).toHaveLength(1);
+    const got = [...ra.body.assignments, ...rb.body.assignments];
+    expect(got).toHaveLength(1);
+    expect(got[0].packet.scope).toEqual(['repo:foo']);
+    expect([...ra.body.withheld, ...rb.body.withheld]).toEqual([]);
   });
 
   it('does not allow a runner allowed only repo:* to take another scope', async () => {

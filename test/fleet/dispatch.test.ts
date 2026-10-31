@@ -218,6 +218,33 @@ describe('the broker', () => {
   });
 });
 
+describe('when the mission core refuses a start', () => {
+  it('withholds the offer and leaves no lease behind', async () => {
+    const h = createFleetHarness();
+    const a = await h.runner({ name: 'a' });
+    const b = await h.runner({ name: 'b' });
+    await a.claim();
+    await b.claim();
+    const { id } = h.mission([{ scope: ['repo:one'] }]);
+    h.tick();
+    const attempt = h.getMission(id).attempts[0];
+    // The projection row names the other runner, so the core's own check refuses the start.
+    const other = attempt?.runnerId === a.id ? b : a;
+    h.db.run('UPDATE execution_attempts SET runner_id = ? WHERE id = ?', [
+      other.id,
+      attempt?.id ?? '',
+    ]);
+
+    const res = await other.claim();
+    expect(res.body.assignments).toEqual([]);
+    expect(res.body.withheld).toHaveLength(1);
+    expect(res.body.withheld[0].reason).toMatch(/^the mission core refused: /);
+    expect(h.db.all('SELECT id FROM runner_leases')).toEqual([]);
+    expect(auditKinds(h)).not.toContain('lease.granted');
+    expect(h.getMission(id).attempts[0]?.status).toBe('leased');
+  });
+});
+
 describe('pause and quarantine', () => {
   it('gives a paused runner no new work and tells it to pause', async () => {
     const h = createFleetHarness();

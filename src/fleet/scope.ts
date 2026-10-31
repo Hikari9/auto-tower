@@ -86,6 +86,10 @@ export function requirementsOf(
     const plain = normalise(found.value);
     if (plain === undefined) {
       invalid = 'a repo or worktree name is not a plain name';
+    } else if (entry !== `${found.kind}:${plain}`) {
+      // Policy matches the entry exactly as written, so a spelling it never saw (`Repo`, `repo/`,
+      // `repo.git`, a space) must not run as the canonical repository. It is never dispatched.
+      invalid = `${entry.trim()} is not in canonical form, write ${found.kind}:${plain}`;
     } else {
       (found.kind === 'repo' ? repos : worktrees).add(plain);
     }

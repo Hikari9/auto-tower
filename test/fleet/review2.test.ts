@@ -101,30 +101,36 @@ describe('redaction of escaped, spaced and long values', () => {
   });
 });
 
-describe('scope names are plain and compared without regard to case', () => {
+describe('scope names are plain and in canonical form', () => {
   const key = (scope: string[]) =>
     requirementsOf('m', { id: 'p', scope }).scopeKey;
   const invalid = (scope: string[]) =>
     requirementsOf('m', { id: 'p', scope }).invalid;
 
-  it('treats every spelling of one repository as one repository', () => {
-    for (const alias of [
-      'REPO:foo',
-      'Repo:FOO/',
-      'repo: foo ',
-      'repo:foo.git',
-      'repo:foo.GIT',
-    ]) {
-      expect(key([alias]), alias).toBe(key(['repo:foo']));
+  it('refuses every other spelling of a repository, naming the one to write', () => {
+    const spellings: Array<[string, string]> = [
+      ['REPO:foo', 'repo:foo'],
+      ['Repo:FOO/', 'repo:foo'],
+      ['repo: foo ', 'repo:foo'],
+      ['repo:foo.git', 'repo:foo'],
+      ['repo:foo.GIT', 'repo:foo'],
+      ['repo:a/b.git', 'repo:a/b'],
+      ['repo :foo', 'repo:foo'],
+    ];
+    for (const [alias, canonical] of spellings) {
+      expect(invalid([alias]), alias).toMatch(
+        new RegExp(`write ${canonical.replace('/', '\\/')}$`),
+      );
+      expect(key([alias]), alias).toMatch(/^packet:/);
     }
-    expect(key(['repo:a/b.git'])).toBe(key(['repo:a/b']));
-    expect(key(['repo:foo', 'worktree:X'])).toBe(
-      key(['REPO:foo', 'WorkTree:x']),
-    );
+    expect(invalid(['repo:foo', 'WorkTree:x'])).toMatch(/write worktree:x$/);
+    expect(invalid(['repo:foo', 'worktree:x'])).toBeUndefined();
+    expect(key(['repo:foo', 'worktree:x'])).toBe('repo:foo#worktree:x');
   });
 
   it('refuses a name that could point somewhere else', () => {
     for (const bad of [
+      'repo:foo/.git',
       'repo:foo/.',
       'repo:foo/./.',
       'repo:x/../foo',
@@ -139,9 +145,9 @@ describe('scope names are plain and compared without regard to case', () => {
     expect(invalid(['repo:a', 'worktree:a/../b'])).toBeDefined();
   });
 
-  it('does not call one repository named twice ambiguous', () => {
-    expect(invalid(['repo:foo', 'repo:Foo', 'repo:foo.git'])).toBeUndefined();
-    expect(invalid(['repo:a', 'worktree:x', 'WORKTREE:X'])).toBeUndefined();
+  it('does not call one repository written twice the same way ambiguous', () => {
+    expect(invalid(['repo:foo', 'repo:foo'])).toBeUndefined();
+    expect(invalid(['repo:a', 'worktree:x', 'worktree:x'])).toBeUndefined();
     expect(invalid(['repo:foo', 'repo:bar'])).toBeDefined();
   });
 
@@ -151,16 +157,24 @@ describe('scope names are plain and compared without regard to case', () => {
     ).toEqual(['docker']);
   });
 
-  it('keeps aliases written with dots and slashes exclusive when dispatched', async () => {
+  it('is not bypassed by a spelling that policy never matched', async () => {
     const h = createFleetHarness();
-    const a = await h.runner({ name: 'a' });
-    const b = await h.runner({ name: 'b' });
-    await a.claim();
-    await b.claim();
-    h.mission([{ scope: ['repo:foo.git'] }, { scope: ['REPO:foo'] }]);
-    h.tick();
-    const [ra, rb] = await Promise.all([a.claim(), b.claim()]);
-    expect([...ra.body.assignments, ...rb.body.assignments]).toHaveLength(1);
+    const a = await h.runner({
+      name: 'a',
+      allowedScopes: ['repo:*', 'REPO:*'],
+    });
+    for (const alias of [
+      'repo:prod.git',
+      'repo:prod/',
+      'REPO:prod',
+      'repo:Prod',
+    ]) {
+      const { id } = h.mission([{ scope: [alias] }]);
+      h.tick();
+      expect(h.getMission(id).attempts, alias).toHaveLength(0);
+    }
+    const res = await a.claim();
+    expect(res.body.assignments).toEqual([]);
   });
 });
 

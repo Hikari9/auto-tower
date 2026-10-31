@@ -103,3 +103,30 @@ describe('packet scope conventions', () => {
     expect(scopeAllowed([], 'repo:app')).toBe(false);
   });
 });
+
+describe('the fleet principal', () => {
+  it('returns the kind it stored, and stores a disabled principal nobody can hold a token for', async () => {
+    const { openTestDatabase, TEST_WORKSPACE } = await import(
+      '../helpers/tower.js'
+    );
+    const { systemActor } = await import('../../src/fleet/leases.js');
+    const db = openTestDatabase();
+    db.run('INSERT INTO workspaces (id, name, created_at) VALUES (?, ?, ?)', [
+      TEST_WORKSPACE,
+      'w',
+      'now',
+    ]);
+    const actor = systemActor(db, TEST_WORKSPACE, '2026-03-01T00:00:00.000Z');
+    const row = db.get<{ kind: string; disabled_at: string | null }>(
+      'SELECT kind, disabled_at FROM principals WHERE id = ?',
+      [actor.id],
+    );
+    expect(actor.kind).toBe(row?.kind);
+    expect(actor.kind).toBe('chief_of_staff');
+    expect(row?.disabled_at).toBe('2026-03-01T00:00:00.000Z');
+    expect(systemActor(db, TEST_WORKSPACE, 'later')).toEqual(actor);
+    expect(
+      db.all('SELECT id FROM principals WHERE id = ?', [actor.id]),
+    ).toHaveLength(1);
+  });
+});

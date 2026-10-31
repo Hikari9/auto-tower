@@ -165,8 +165,6 @@ describe('redaction of what real secrets look like', () => {
 });
 
 describe('scope names', () => {
-  const key = (scope: string[]) =>
-    requirementsOf('m', { id: 'p', scope }).scopeKey;
   const invalid = (scope: string[]) =>
     requirementsOf('m', { id: 'p', scope }).invalid;
 
@@ -181,7 +179,7 @@ describe('scope names', () => {
     ]) {
       expect(invalid([`repo:${name}`]), name).toBeUndefined();
     }
-    expect(key(['repo:Org/.GitHub'])).toBe(key(['repo:org/.github']));
+    expect(invalid(['repo:Org/.GitHub'])).toMatch(/write repo:org\/\.github$/);
   });
 
   it('refuses a name that ends in a dot, which some filesystems read as the name without it', () => {
@@ -190,24 +188,22 @@ describe('scope names', () => {
     }
   });
 
-  it('reads an entry with leading space or space before the colon as the same entry', () => {
+  it('refuses an entry with leading space or space before the colon, but still reads it as a repo entry', () => {
     for (const alias of [
       ' repo:foo',
       'repo :foo',
       '\trepo: foo',
       ' REPO : Foo',
     ]) {
-      expect(key([alias]), alias).toBe(key(['repo:foo']));
+      expect(invalid([alias]), alias).toMatch(/write repo:foo$/);
     }
     expect(
       requirementsOf('m', { id: 'p', scope: [' cap:docker'] }).capabilities,
     ).toEqual(['docker']);
-    expect(key(['repo:foo', ' worktree :X'])).toBe(
-      key(['repo:foo', 'worktree:x']),
-    );
+    expect(invalid(['repo:foo', ' worktree :X'])).toMatch(/write worktree:x$/);
   });
 
-  it('keeps a whitespace-prefixed alias exclusive when dispatched', async () => {
+  it('never dispatches a whitespace-prefixed alias, so it cannot run beside the canonical repo', async () => {
     const h = createFleetHarness();
     const a = await h.runner({ name: 'a' });
     const b = await h.runner({ name: 'b' });
@@ -216,7 +212,9 @@ describe('scope names', () => {
     h.mission([{ scope: ['repo:foo'] }, { scope: [' repo:foo'] }]);
     h.tick();
     const [ra, rb] = await Promise.all([a.claim(), b.claim()]);
-    expect([...ra.body.assignments, ...rb.body.assignments]).toHaveLength(1);
+    const got = [...ra.body.assignments, ...rb.body.assignments];
+    expect(got).toHaveLength(1);
+    expect(got[0].packet.scope).toEqual(['repo:foo']);
   });
 });
 
@@ -437,16 +435,17 @@ describe('scope names, limits and exact reasons', () => {
   });
 
   it('treats a newline as part of the entry, not the end of it', () => {
-    expect(key(['repo:foo\n'])).toBe(key(['repo:foo']));
+    expect(req(['repo:foo\n']).invalid).toMatch(/write repo:foo$/);
     expect(req(['repo:foo\nbar']).invalid).toBeDefined();
     expect(req(['repo:foo\n/../x']).invalid).toBeDefined();
   });
 
   it('keeps distinct names distinct and normalises repeatably', () => {
     expect(key(['repo:org/.github'])).not.toBe(key(['repo:org/hub']));
+    expect(req(['repo:a.git/b']).invalid).toBeUndefined();
     expect(key(['repo:a.git/b'])).not.toBe(key(['repo:a/b']));
-    expect(key(['repo:foo//'])).toBe(key(['repo:foo']));
-    expect(key(['repo:foo.git.git'])).toBe(key(['repo:foo']));
+    expect(req(['repo:foo//']).invalid).toMatch(/write repo:foo$/);
+    expect(req(['repo:foo.git.git']).invalid).toMatch(/write repo:foo$/);
     for (const ok of ['repo:a1', 'repo:a-', 'repo:a_', 'repo:9']) {
       expect(req([ok]).invalid, ok).toBeUndefined();
     }

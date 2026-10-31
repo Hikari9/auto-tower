@@ -103,6 +103,11 @@ function joined(tx: SqlDatabase): SqlDatabase {
   return handle;
 }
 
+/**
+ * The mission service on the fleet's transaction. It gets the fleet's clock for parity with
+ * `createCore`; the fleet only starts and reports attempts and reads missions through it, so the
+ * policy check that clock feeds (a chief of staff authorizing a packet) is never reached here.
+ */
 function missionsIn(ctx: FleetContext, tx: SqlDatabase) {
   return createMissionService({
     db: joined(tx),
