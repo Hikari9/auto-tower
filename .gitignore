@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+.vitest/
+.wrangler/
+.tower/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+.env
+.env.*
