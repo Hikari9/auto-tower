@@ -44,30 +44,30 @@ A request carrying an `Origin` header is refused unless the origin is in `mcp.al
 
 Each tool declares, in `tools/list`, `annotations.readOnlyHint`, `destructiveHint`, and `_meta["tower/requiredScopes"]`, `"tower/mutating"`, `"tower/material"`. `tools/list` returns only the tools the caller's scopes cover. Calling one without its scopes is refused with 403 whatever the listing said.
 
-| Tool                     | Kind     | Scopes           | Does                                                                                      |
-| ------------------------ | -------- | ---------------- | ----------------------------------------------------------------------------------------- |
-| `briefing`               | read     | `mission:read`   | Missions by state, what blocks them, open decisions (only with `decision:read`).          |
-| `search_missions`        | read     | `mission:read`   | Search by text, state, parent, priority, risk.                                            |
-| `read_mission`           | read     | `mission:read`   | One mission with packets, attempts, links, verification.                                  |
-| `recent_activity`        | read     | `mission:read`   | Latest events, or one mission's history. No payloads in the cross-mission view.           |
-| `list_runs`              | read     | `mission:read`   | Execution attempts. A claim is labelled self-reported.                                    |
-| `inspect_evidence`       | read     | `mission:read`   | Verification, runner claims, Auto-Office receipt facts, issue links.                      |
-| `preview_dispatch`       | read     | `mission:read`   | What `request_dispatch` would do, and whether cited policy would be accepted.             |
-| `list_runners`           | read     | `runner:read`    | Enrolled runners. A runner principal sees only itself.                                    |
-| `list_decisions`         | read     | `decision:read`  | Decision Inbox items.                                                                     |
-| `read_policy`            | read     | `policy:read`    | Policy version, active rules, pending proposals.                                          |
-| `read_feature_flags`     | read     | `policy:read`    | The two flags and why a requested one is not in effect.                                   |
-| `create_mission`         | mutating | `mission:write`  | Creates a draft mission.                                                                  |
-| `update_mission`         | mutating | `mission:write`  | Changes descriptive fields. Risk lowering by a Chief of Staff is refused and receipted.   |
-| `request_reconciliation` | mutating | `mission:write`  | Reads linked issues back from the provider. Writes nothing to a provider.                 |
-| `answer_decision`        | material | `decision:write` | Answers a decision. Only the authority it requires may.                                   |
-| `request_expansion`      | material | `decision:write` | Settles work beyond a mission's authorization at the right tier. Asking approves nothing. |
-| `propose_policy_change`  | mutating | `decision:write` | Raises a decision for a person. Changes no policy.                                        |
-| `close_mission`          | material | `mission:write`  | `completed` (runs every guard) or `cancelled`.                                            |
-| `request_dispatch`       | material | `mission:write`  | Authorizes one packet and runs one scheduler pass.                                        |
-| `grant_policy`           | material | `policy:write`   | Creates an allow rule. Humans only.                                                       |
-| `revoke_policy`          | material | `policy:write`   | Revokes a rule. Blocks the next guarded effect at once. Humans only.                      |
-| `set_feature_flag`       | material | `policy:write`   | Turns a flag on or off. Humans only.                                                      |
+| Tool                     | Kind     | Scopes           | Does                                                                                                                          |
+| ------------------------ | -------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `briefing`               | read     | `mission:read`   | Missions by state, what blocks them, open decisions (only with `decision:read`).                                              |
+| `search_missions`        | read     | `mission:read`   | Search by text, state, parent, priority, risk.                                                                                |
+| `read_mission`           | read     | `mission:read`   | One mission with packets, attempts, links, verification, and any claim-time authority holds (as the HTTP route reports them). |
+| `recent_activity`        | read     | `mission:read`   | Latest events, or one mission's history. No payloads in the cross-mission view.                                               |
+| `list_runs`              | read     | `mission:read`   | Execution attempts. A claim is labelled self-reported.                                                                        |
+| `inspect_evidence`       | read     | `mission:read`   | Verification, runner claims, Auto-Office receipt facts, issue links.                                                          |
+| `preview_dispatch`       | read     | `mission:read`   | What `request_dispatch` would do, and whether cited policy would be accepted.                                                 |
+| `list_runners`           | read     | `runner:read`    | Enrolled runners. A runner principal sees only itself.                                                                        |
+| `list_decisions`         | read     | `decision:read`  | Decision Inbox items.                                                                                                         |
+| `read_policy`            | read     | `policy:read`    | Policy version, active rules, pending proposals.                                                                              |
+| `read_feature_flags`     | read     | `policy:read`    | The two flags and why a requested one is not in effect.                                                                       |
+| `create_mission`         | mutating | `mission:write`  | Creates a draft mission.                                                                                                      |
+| `update_mission`         | mutating | `mission:write`  | Changes descriptive fields. Risk lowering by a Chief of Staff is refused and receipted.                                       |
+| `request_reconciliation` | mutating | `mission:write`  | Reads linked issues back from the provider. Writes nothing to a provider.                                                     |
+| `answer_decision`        | material | `decision:write` | Answers a decision. Only the authority it requires may.                                                                       |
+| `request_expansion`      | material | `decision:write` | Settles work beyond a mission's authorization at the right tier. Asking approves nothing.                                     |
+| `propose_policy_change`  | mutating | `decision:write` | Raises a decision for a person. Changes no policy.                                                                            |
+| `close_mission`          | material | `mission:write`  | `completed` (runs every guard) or `cancelled`.                                                                                |
+| `request_dispatch`       | material | `mission:write`  | Authorizes one packet and runs one scheduler pass.                                                                            |
+| `grant_policy`           | material | `policy:write`   | Creates an allow rule. Humans only.                                                                                           |
+| `revoke_policy`          | material | `policy:write`   | Revokes a rule. Blocks the next guarded effect at once. Humans only.                                                          |
+| `set_feature_flag`       | material | `policy:write`   | Turns a flag on or off. Humans only.                                                                                          |
 
 **Mutating** tools require an `idempotencyKey` (1 to 100 printable characters). The first result is stored in `mcp_idempotency`, scoped to the caller. A retry with the same key and arguments returns it with `_meta["tower/replayed"] = true` and acts once. The same key with another tool or other arguments is `idempotency_key_reused`. A failed call stores nothing, so its key can be reused. The key is also passed to the core as its idempotency and correlation key, so a retry after a crash between the effect and the stored result is still deduplicated by the event log.
 

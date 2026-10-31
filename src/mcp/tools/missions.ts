@@ -9,6 +9,7 @@ import {
 } from '../../core/inputs.js';
 import type { CommandResult } from '../../core/service.js';
 import { InputReader } from '../../core/validation.js';
+import { authorityHoldsFor } from '../../fleet/broker.js';
 import { createPolicyService } from '../../policy/service.js';
 import { asQuery, takeId } from '../args.js';
 import type { ToolContext, ToolDefinition } from '../tool.js';
@@ -179,7 +180,15 @@ export const missionTools: readonly ToolDefinition[] = [
     run(ctx, args) {
       const { id, rest } = takeId(args, 'missionId');
       new InputReader(rest).finish();
-      return { data: { mission: requireMission(ctx, id) } };
+      const mission = requireMission(ctx, id);
+      const { db, now } = ctx.services;
+      // Claim-time authority refusals still holding a branch, as the HTTP route reports them.
+      return {
+        data: {
+          mission,
+          holds: authorityHoldsFor(db, now, ctx.caller.workspaceId, mission),
+        },
+      };
     },
   },
   {

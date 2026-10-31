@@ -34,11 +34,15 @@ describe('a mission over MCP', () => {
     expect(closed.mission.state).toBe('cancelled');
 
     const viaB = (await b.ok('read_mission', { missionId: id })).mission;
-    const viaHttp = (
-      (await (await env.http(env.owner, `/missions/${id}`)).json()) as {
-        mission: unknown;
-      }
-    ).mission;
+    const httpBody = (await (
+      await env.http(env.owner, `/missions/${id}`)
+    ).json()) as { mission: unknown; holds: unknown };
+    const viaHttp = httpBody.mission;
+    // Claim-time authority holds are reported the same way over both.
+    expect(httpBody.holds).toEqual([]);
+    expect((await b.ok('read_mission', { missionId: id })).holds).toEqual(
+      httpBody.holds,
+    );
     expect(viaB.state).toBe('cancelled');
     expect(viaB).toEqual(closed.mission);
     expect(viaB).toEqual(viaHttp);
