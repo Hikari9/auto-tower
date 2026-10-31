@@ -219,3 +219,257 @@ describe('scope names', () => {
     expect([...ra.body.assignments, ...rb.body.assignments]).toHaveLength(1);
   });
 });
+
+describe('reconcile of withheld work, in detail', () => {
+  async function narrowed() {
+    const h = createFleetHarness();
+    const a = await h.runner({ name: 'a', allowedScopes: ['repo:*'] });
+    const held = await hold(h, a);
+    h.clock.advance(TTL + 1_000);
+    await a.claim();
+    return { h, a, held };
+  }
+
+  it('turns a stale fence away with lease_fenced even when the work would be withheld', async () => {
+    const { h, a, held } = await narrowed();
+    await h.call(h.owner.token, 'PATCH', `/runners/${a.id}`, {
+      allowedScopes: ['repo:other'],
+    });
+    const res = await a.reconcile(held.leaseId, 99);
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('lease_fenced');
+    expect(
+      h.fleet
+        .audit(TEST_WORKSPACE, { afterSeq: 0, limit: 500 })
+        .filter((r) => r.kind === 'reconcile.withheld'),
+    ).toHaveLength(0);
+  });
+
+  it('does not answer a reconcile of a lease that is not in recovery just because the work is withheld', async () => {
+    const h = createFleetHarness();
+    const a = await h.runner();
+    const held = await hold(h, a);
+    await h.call(h.owner.token, 'PATCH', `/runners/${a.id}`, { paused: true });
+    const res = await a.reconcile(held.leaseId, 1);
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('lease_fenced');
+    expect(
+      h.fleet
+        .audit(TEST_WORKSPACE, { afterSeq: 0, limit: 500 })
+        .filter((r) => r.kind === 'reconcile.withheld'),
+    ).toHaveLength(0);
+  });
+
+  it('does not hand the work back on a lost-answer retry once the runner was narrowed or paused', async () => {
+    const { h, a, held } = await narrowed();
+    await a.reconcile(held.leaseId, 1); // the answer is lost
+    expect(lease(h, held.leaseId)).toMatchObject({ status: 'held', fence: 2 });
+    await h.call(h.owner.token, 'PATCH', `/runners/${a.id}`, { paused: true });
+    const retry = await a.reconcile(held.leaseId, 1);
+    expect(retry.status).toBe(200);
+    expect(retry.body.assignment).toBeNull();
+    expect(retry.body.withheld).toBe('runner is paused');
+    expect(retry.body.lease).toMatchObject({ status: 'held', fence: 2 });
+    await h.call(h.owner.token, 'PATCH', `/runners/${a.id}`, {
+      paused: false,
+      allowedScopes: ['repo:other'],
+    });
+    expect((await a.reconcile(held.leaseId, 1)).body.assignment).toBeNull();
+  });
+
+  it('records what was withheld, from whom, and when', async () => {
+    const { h, a, held } = await narrowed();
+    await h.call(h.owner.token, 'PATCH', `/runners/${a.id}`, {
+      allowedScopes: ['repo:other'],
+    });
+    h.clock.advance(7_000);
+    await a.reconcile(held.leaseId, 1);
+    const [row] = h.fleet
+      .audit(TEST_WORKSPACE, { afterSeq: 0, limit: 500 })
+      .filter((r) => r.kind === 'reconcile.withheld');
+    expect(row).toMatchObject({
+      runnerId: a.id,
+      leaseId: held.leaseId,
+      at: h.clock.now().toISOString(),
+      detail: { reason: 'scope repo:app is not allowed', presentedFence: 1 },
+    });
+  });
+
+  it('reports a paused runner first, and tells it to pause', async () => {
+    const { h, a, held } = await narrowed();
+    await h.call(h.owner.token, 'PATCH', `/runners/${a.id}`, { paused: true });
+    const m = h.getMission(held.missionId);
+    h.core.missions.transitionMission(
+      h.ctx(),
+      m.id,
+      m.version,
+      'needs-attention',
+      'blocked',
+    );
+    const res = await a.reconcile(held.leaseId, 1);
+    expect(res.body.withheld).toBe('runner is paused');
+    expect(res.body.lease.directives.pause).toBe(true);
+  });
+});
+
+describe('a pause remembered through quarantine', () => {
+  it('survives an unrelated PATCH of a quarantined runner, and is not logged for a runner that is not quarantined', async () => {
+    const h = createFleetHarness();
+    const runner = await h.runner();
+    await h.call(h.owner.token, 'PATCH', `/runners/${runner.id}`, {
+      paused: true,
+    });
+    await h.call(h.owner.token, 'POST', `/runners/${runner.id}/quarantine`, {});
+    await h.call(h.owner.token, 'PATCH', `/runners/${runner.id}`, {
+      allowedScopes: ['repo:x'],
+      maxConcurrent: 1,
+    });
+    expect(
+      (
+        await h.call(
+          h.owner.token,
+          'POST',
+          `/runners/${runner.id}/unquarantine`,
+        )
+      ).body.runner.status,
+    ).toBe('paused');
+
+    const plain = h.fleet
+      .audit(TEST_WORKSPACE, { afterSeq: 0, limit: 500 })
+      .filter((r) => r.kind === 'runner.updated');
+    expect(plain[0]?.detail).not.toHaveProperty('to.restoreTo');
+    expect(plain[1]?.detail).toHaveProperty('to.restoreTo', 'paused');
+  });
+});
+
+describe('redaction, every alternative', () => {
+  it('redacts unterminated single quotes, every flag, and the shapes at the start of a string', () => {
+    const cases: Array<[string, string]> = [
+      ["secret='never closed hunter2", 'hunter2'],
+      ...[
+        'password',
+        'passwd',
+        'pass',
+        'token',
+        'secret',
+        'api-key',
+        'apikey',
+        'auth-token',
+        'access-token',
+        'private-key',
+        'credentials',
+        'credential',
+      ].map((flag): [string, string] => [
+        `run --${flag} hunter2secret now`,
+        'hunter2secret',
+      ]),
+      ['run --PASSWORD hunter2secret', 'hunter2secret'],
+      ["--token 'hunter 2 secret'", 'secret'],
+      ['-u admin:hunter2secret x', 'hunter2secret'],
+      ['curl --user=admin:hunter2secret x', 'hunter2secret'],
+      ['POSTGRES://bob:hunter2secret@host/db', 'hunter2secret'],
+      ['secret.access.key=abc123xyz', 'abc123xyz'],
+      ['client-secret-key=abc123xyz', 'abc123xyz'],
+      ['token_for_the_production_service_x=abc123xyz', 'abc123xyz'],
+      ['PASS: hunter2', 'hunter2'],
+    ];
+    for (const [input, needle] of cases) {
+      expect(redactString(input), input).not.toContain(needle);
+    }
+  });
+
+  it('keeps the text around a redacted value', () => {
+    expect(redactString('password=hunter2 then keep')).toBe(
+      '[REDACTED] then keep',
+    );
+    expect(redactString("secret='abc def' keep this text")).toBe(
+      '[REDACTED] keep this text',
+    );
+    expect(redactString('secret="abc def" keep this text')).toBe(
+      '[REDACTED] keep this text',
+    );
+    expect(redactString('bypass: ok and compass=north')).toBe(
+      'bypass: ok and compass=north',
+    );
+  });
+
+  it('redacts values under secret-named keys, key names that are secrets, and deep structures', async () => {
+    const { redactValue } = await import('../../src/fleet/redact.js');
+    const token = `ghp_${'Aa1Bb2Cc3Dd4Ee5Ff6Gg7'}${'Hh8Ii9'}`;
+    const out = JSON.stringify(
+      redactValue({
+        pass: 'hunter2',
+        cookie: 'sid=abc',
+        [token]: 1,
+        keep: 'plain',
+      }),
+    );
+    expect(out).not.toContain('hunter2');
+    expect(out).not.toContain('sid=abc');
+    expect(out).not.toContain(token);
+    expect(out).toContain('plain');
+    const nested = (levels: number) => {
+      let value: unknown = 'plain';
+      for (let i = 0; i < levels; i += 1) {
+        value = { next: value };
+      }
+      return JSON.stringify(redactValue(value));
+    };
+    expect(nested(8)).toContain('plain');
+    expect(nested(9)).not.toContain('plain');
+    expect(nested(9)).toContain('[REDACTED]');
+  });
+});
+
+describe('scope names, limits and exact reasons', () => {
+  const req = (scope: string[]) => requirementsOf('m', { id: 'p', scope });
+  const key = (scope: string[]) => req(scope).scopeKey;
+
+  it('accepts 16 segments and 128 characters and refuses one more', () => {
+    expect(
+      req([`repo:${Array(16).fill('a').join('/')}`]).invalid,
+    ).toBeUndefined();
+    expect(
+      req([`repo:${Array(17).fill('a').join('/')}`]).invalid,
+    ).toBeDefined();
+    expect(req([`repo:${'a'.repeat(128)}`]).invalid).toBeUndefined();
+    expect(req([`repo:${'a'.repeat(129)}`]).invalid).toBeDefined();
+  });
+
+  it('treats a newline as part of the entry, not the end of it', () => {
+    expect(key(['repo:foo\n'])).toBe(key(['repo:foo']));
+    expect(req(['repo:foo\nbar']).invalid).toBeDefined();
+    expect(req(['repo:foo\n/../x']).invalid).toBeDefined();
+  });
+
+  it('keeps distinct names distinct and normalises repeatably', () => {
+    expect(key(['repo:org/.github'])).not.toBe(key(['repo:org/hub']));
+    expect(key(['repo:a.git/b'])).not.toBe(key(['repo:a/b']));
+    expect(key(['repo:foo//'])).toBe(key(['repo:foo']));
+    expect(key(['repo:foo.git.git'])).toBe(key(['repo:foo']));
+    for (const ok of ['repo:a1', 'repo:a-', 'repo:a_', 'repo:9']) {
+      expect(req([ok]).invalid, ok).toBeUndefined();
+    }
+  });
+
+  it('says why a scope cannot be keyed, and never gives it a shared key', () => {
+    expect(req(['repo:a', 'repo:b']).invalid).toBe(
+      'it names more than one repo',
+    );
+    expect(req(['repo:a', 'worktree:x', 'worktree:y']).invalid).toBe(
+      'it names more than one worktree',
+    );
+    expect(req(['worktree:x']).invalid).toBe('it names a worktree but no repo');
+    expect(req(['repo:a/../b']).invalid).toBe(
+      'a repo or worktree name is not a plain name',
+    );
+    for (const scope of [
+      ['repo:a', 'repo:b'],
+      ['repo:a', 'worktree:x', 'worktree:y'],
+      ['worktree:x'],
+      ['repo:a/../b'],
+    ]) {
+      expect(key(scope), scope.join(',')).toMatch(/^packet:/);
+    }
+  });
+});

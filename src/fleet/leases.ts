@@ -1391,7 +1391,11 @@ export function reconcile(
     });
     // A runner that may not have the work gets no fence either: the fence is the credential. The
     // lease stays in recovery, so it can still move to a runner that is eligible.
-    if (withheld !== undefined && lease.status === 'recovering') {
+    if (
+      withheld !== undefined &&
+      lease.status === 'recovering' &&
+      input.fence === lease.fence
+    ) {
       recordAudit(tx, runner.workspaceId, ctx.now().toISOString(), {
         kind: 'reconcile.withheld',
         runnerId: runner.id,

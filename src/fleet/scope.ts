@@ -34,7 +34,11 @@ function normalise(name: string): string | undefined {
     segments.pop();
   }
   const last = segments.length - 1;
-  segments[last] = (segments[last] ?? '').replace(/\.git$/, '');
+  let tail = segments[last] ?? '';
+  while (tail.endsWith('.git')) {
+    tail = tail.slice(0, -4);
+  }
+  segments[last] = tail;
   if (
     segments.join('/').length > 128 ||
     segments.length > 16 ||
