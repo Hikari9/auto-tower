@@ -676,6 +676,21 @@ export function deliverySeen(
   );
 }
 
+/** True when a body with this hash was already accepted, whatever delivery id it came under. */
+export function payloadSeen(
+  db: SqlDatabase,
+  workspaceId: string,
+  provider: string,
+  payloadHash: string,
+): boolean {
+  return (
+    db.get(
+      'SELECT 1 AS one FROM webhook_deliveries WHERE workspace_id = ? AND provider = ? AND payload_hash = ?',
+      [workspaceId, provider, payloadHash],
+    ) !== undefined
+  );
+}
+
 export function recordDelivery(
   db: SqlDatabase,
   workspaceId: string,
@@ -685,11 +700,12 @@ export function recordDelivery(
     event: string;
     outcome: string;
     at: string;
+    payloadHash?: string | undefined;
   },
 ): void {
   db.run(
-    `INSERT INTO webhook_deliveries (workspace_id, provider, delivery_id, event, outcome, received_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO webhook_deliveries (workspace_id, provider, delivery_id, event, outcome, received_at, payload_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
     [
       workspaceId,
       delivery.provider,
@@ -697,6 +713,7 @@ export function recordDelivery(
       delivery.event,
       delivery.outcome,
       delivery.at,
+      delivery.payloadHash ?? null,
     ],
   );
 }

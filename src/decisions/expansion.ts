@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto';
-import { MissionNotFoundError, PacketNotFoundError } from '../core/errors.js';
+import {
+  CommandNotAllowedError,
+  MissionNotFoundError,
+  PacketNotFoundError,
+} from '../core/errors.js';
 import type { CompletionGuardRegistry } from '../core/guards.js';
 import { loadMission } from '../core/projection.js';
 import { createMissionService } from '../core/service.js';
@@ -204,23 +208,39 @@ export function createExpansionRouter(
               mission,
             };
           }
-          const result = createMissionService({
-            db: tx,
-            guards: deps.guards,
-            ...(deps.clock === undefined ? {} : { clock: deps.clock }),
-          }).authorizePacket(
-            ctx,
-            request.missionId,
-            mission.version,
-            packet.id,
-            [evaluation.policyRef],
-          );
-          return {
-            tier: 2,
-            outcome: 'approved',
-            evaluation,
-            mission: result.mission,
-          };
+          // The request's own scope can be covered while another scope the packet declares is not,
+          // and the core checks them all. That refusal is a question for a person, not an error.
+          // The core appends before it checks, so the attempt gets a savepoint to undo that.
+          const waiting =
+            packet.status === 'pending' && packet.authorization === null;
+          tx.exec('SAVEPOINT approve_packet');
+          try {
+            const result = createMissionService({
+              db: tx,
+              guards: deps.guards,
+              ...(deps.clock === undefined ? {} : { clock: deps.clock }),
+            }).authorizePacket(
+              ctx,
+              request.missionId,
+              mission.version,
+              packet.id,
+              [evaluation.policyRef],
+            );
+            tx.exec('RELEASE approve_packet');
+            return {
+              tier: 2,
+              outcome: 'approved',
+              evaluation,
+              mission: result.mission,
+            };
+          } catch (error) {
+            // A packet that is no longer waiting is a stale request, not a scope question.
+            if (!(error instanceof CommandNotAllowedError) || !waiting) {
+              throw error;
+            }
+            tx.exec('ROLLBACK TO approve_packet');
+            tx.exec('RELEASE approve_packet');
+          }
         }
       }
 

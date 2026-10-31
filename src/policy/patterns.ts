@@ -36,6 +36,42 @@ export function matchesPattern(pattern: string, value: string): boolean {
   return p === pattern.length;
 }
 
+/**
+ * True when some string is matched by both patterns. Used where a request is itself a pattern, such
+ * as a cited rule's own action, so a deny rule for one member of it still counts. Cost is bounded by
+ * the product of the two lengths.
+ */
+export function patternsOverlap(a: string, b: string): boolean {
+  const seen = new Map<number, boolean>();
+  const walk = (i: number, j: number): boolean => {
+    if (i === a.length && j === b.length) {
+      return true;
+    }
+    const key = i * (b.length + 1) + j;
+    const known = seen.get(key);
+    if (known !== undefined) {
+      return known;
+    }
+    const aStar = a[i] === '*';
+    const bStar = b[j] === '*';
+    let result = false;
+    if (aStar && walk(i + 1, j)) {
+      result = true;
+    } else if (bStar && walk(i, j + 1)) {
+      result = true;
+    } else if (aStar && j < b.length && walk(i, j + 1)) {
+      result = true;
+    } else if (bStar && i < a.length && walk(i + 1, j)) {
+      result = true;
+    } else if (!aStar && !bStar && i < a.length && j < b.length) {
+      result = a[i] === b[j] && walk(i + 1, j + 1);
+    }
+    seen.set(key, result);
+    return result;
+  };
+  return walk(0, 0);
+}
+
 export function hasWildcard(pattern: string): boolean {
   return pattern.includes('*');
 }

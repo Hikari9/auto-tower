@@ -186,7 +186,13 @@ export const missionTools: readonly ToolDefinition[] = [
       return {
         data: {
           mission,
-          holds: authorityHoldsFor(db, now, ctx.caller.workspaceId, mission),
+          holds: authorityHoldsFor(
+            db,
+            now,
+            ctx.caller.workspaceId,
+            mission,
+            ctx.caller.actor.kind,
+          ),
         },
       };
     },

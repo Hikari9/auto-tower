@@ -7,6 +7,7 @@ import {
 import type { CompletionGuardRegistry } from '../core/guards.js';
 import { loadMission } from '../core/projection.js';
 import { createMissionService } from '../core/service.js';
+import { MISSION_TRANSITIONS } from '../core/transitions.js';
 import type { Actor, MissionState } from '../core/types.js';
 import { createEventLog, type EventLog } from '../events/event-log.js';
 import { AuthorityForbiddenError } from '../policy/errors.js';
@@ -117,7 +118,7 @@ export function createDecisionInbox(deps: DecisionInboxDeps): DecisionInbox {
   function inTransaction<T>(fn: (tx: SqlDatabase, log: EventLog) => T): T {
     return db.transaction((tx) => {
       const joined = joinTransaction(tx);
-      return fn(joined, createEventLog(joined));
+      return fn(joined, createEventLog(joined, clock));
     });
   }
 
@@ -300,6 +301,35 @@ export function createDecisionInbox(deps: DecisionInboxDeps): DecisionInbox {
       throw error;
     }
     return { status: 'resumed', reason: null };
+  }
+
+  /** Moves a live mission to needs-attention. A mission already there, cancelled or gone is left alone. */
+  function flagMission(
+    tx: SqlDatabase,
+    ctx: DecisionContext,
+    missionId: string,
+    reason: string,
+  ): void {
+    const mission = loadMission(tx, ctx.workspaceId, missionId);
+    if (
+      mission === undefined ||
+      !MISSION_TRANSITIONS[mission.state].includes('needs-attention')
+    ) {
+      return;
+    }
+    createMissionService({ db: tx, guards, clock }).transitionMission(
+      {
+        workspaceId: ctx.workspaceId,
+        actor: ctx.actor,
+        ...(ctx.correlationId === undefined
+          ? {}
+          : { correlationId: ctx.correlationId }),
+      },
+      missionId,
+      mission.version,
+      'needs-attention',
+      reason,
+    );
   }
 
   function setLink(
@@ -560,6 +590,29 @@ export function createDecisionInbox(deps: DecisionInboxDeps): DecisionInbox {
             ...authority.policyRefs,
           ];
           for (const link of decision.links) {
+            if (link.status === 'resumed' && !alternative.resumes) {
+              // A branch already resumed under an earlier approval keeps its authorized packet,
+              // which this answer cannot take back. A person has to look at the mission.
+              const reason = `answered "${answer.choice}" at version ${answer.version} after an approval`;
+              flagMission(tx, ctx, link.missionId, reason);
+              setLink(
+                tx,
+                ctx.workspaceId,
+                decisionId,
+                link,
+                'declined',
+                reason,
+                answer.version,
+                at,
+              );
+              branches.push({
+                missionId: link.missionId,
+                packetId: link.packetId,
+                status: 'declined',
+                reason,
+              });
+              continue;
+            }
             if (link.status !== 'blocked' && link.status !== 'declined') {
               continue;
             }

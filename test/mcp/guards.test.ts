@@ -51,6 +51,7 @@ describe('completion guards on every MCP path', () => {
     h.github.issue(ISSUE_URL).state = 'closed';
     const report = await s.ok('request_reconciliation', {
       missionId: driver.id,
+      confirm: true,
       idempotencyKey: key('reconcile'),
     });
     expect(report.report.satisfied).toBe(true);
@@ -68,6 +69,7 @@ describe('completion guards on every MCP path', () => {
     const s = new McpClient((path, init) => api.raw(path, init), api.owner);
     const args = {
       missionId: driver.id,
+      confirm: true,
       idempotencyKey: key('concurrent'),
     };
     const reads = h.github.getCalls;
@@ -94,6 +96,7 @@ describe('completion guards on every MCP path', () => {
     const s = new McpClient((path, init) => api.raw(path, init), api.owner);
     const report = await s.ok('request_reconciliation', {
       missionId: driver.id,
+      confirm: true,
       idempotencyKey: key('reconcile'),
     });
     expect(report.report.satisfied).toBe(false);

@@ -1,5 +1,7 @@
+import type { PrincipalKind } from '../auth/principals.js';
 import type { RunnerPool } from '../core/scheduler.js';
 import type { MissionState, WorkPacket } from '../core/types.js';
+import { isHalted } from '../ops/halt.js';
 import { refusalForPolicyRefs } from '../policy/packet-refs.js';
 import { hasTraversal, matchesPattern } from '../policy/patterns.js';
 import { createPolicyService } from '../policy/service.js';
@@ -297,6 +299,13 @@ function recordClaimRefusal(
   );
 }
 
+/** Rule ids and policy refs name standing rules. Only a person or chief of staff is shown them. */
+export function withoutRuleIds(text: string): string {
+  return text
+    .replace(/policy:v\d+:rule:[^\s@]+@\d+/g, 'a policy rule')
+    .replace(/\brul_[A-Za-z0-9_-]+/g, 'a rule');
+}
+
 /** A refusal still standing on an offer a runner has not yet been granted, for the API. */
 export interface AuthorityHold {
   attemptId: string;
@@ -318,7 +327,15 @@ export function authorityHoldsFor(
   clock: () => Date,
   workspaceId: string,
   mission: MissionState,
+  /**
+   * Who is reading. Rule ids are shown to a person or a chief of staff only: for a runner or a
+   * provider they are removed. Every caller must pass it. It is optional only until the HTTP route
+   * does (see DEFERRED.md), and a caller that leaves it out sees everything.
+   */
+  viewer?: PrincipalKind,
 ): AuthorityHold[] {
+  const seesRules =
+    viewer === undefined || viewer === 'human' || viewer === 'chief_of_staff';
   const refused = db.all<{
     attempt_id: string;
     packet_id: string;
@@ -359,7 +376,7 @@ export function authorityHoldsFor(
       holds.push({
         attemptId,
         packetId: packet_id,
-        reason,
+        reason: seesRules ? reason : withoutRuleIds(reason),
         policyVersion,
         at,
       });
@@ -489,6 +506,10 @@ export function createFleetPool(deps: {
 }): RunnerPool {
   return {
     findEligible({ workspaceId, mission, packet }) {
+      // An emergency halt dispatches nothing new. Work waits as it is, and resumes with the halt lifted.
+      if (isHalted(deps.db, workspaceId)) {
+        return undefined;
+      }
       const runner = pickRunner(deps.db, deps.config, {
         workspaceId,
         missionId: mission.id,

@@ -62,6 +62,7 @@ import {
   loadPendingEchoOp,
   markEchoSeen,
   missionsNeedingAttention,
+  payloadSeen,
   recordDelivery,
   resolveDiscrepancies,
   updateLink,
@@ -214,6 +215,15 @@ interface Applied {
   retryNotBefore: string | null;
 }
 
+export interface CloseOptions {
+  /**
+   * Closes a link although the provider could not say whether open issues block it. Only a person
+   * may ask: the choice is recorded on each link with their identity. A known blocker still stops
+   * the close, and so does every other check.
+   */
+  overrideUnknownBlockers?: boolean;
+}
+
 export interface IssueService {
   getSyncConfigs(workspaceId: string): SyncConfig[];
   setSyncConfig(ctx: CommandContext, input: SyncConfigInput): SyncConfig;
@@ -259,6 +269,7 @@ export interface IssueService {
     ctx: CommandContext,
     missionId: string,
     urls?: readonly string[],
+    options?: CloseOptions,
   ): Promise<MissionReport>;
   /** Fallback for missed webhooks: reads links that hold live missions open, least recently polled first, and reconciles. */
   poll(
@@ -272,6 +283,11 @@ export interface IssueService {
     deliveryId: string;
     event: string;
     observation: WebhookObservation | undefined;
+    /**
+     * Hash of the raw signed body. A body already accepted has no second effect under a new
+     * delivery id, since the signature covers the body and not the id.
+     */
+    payloadHash?: string | undefined;
   }): WebhookResult;
 
   requestExemption(
@@ -1008,6 +1024,7 @@ export function createIssueService(deps: IssueServiceDeps): IssueService {
     ctx: CommandContext,
     state: MissionState,
     link: IssueLinkRecord,
+    overrideUnknownBlockers: boolean,
   ): Promise<{ outcome: LinkOutcome; attention: boolean; resolved: number }> {
     const base = { url: link.url, linkId: link.id };
     const env: Env = {
@@ -1101,7 +1118,16 @@ export function createIssueService(deps: IssueServiceDeps): IssueService {
       };
     }
     const blockers = read.snapshotOpenBlockers ?? null;
-    if (blockers === null || blockers > 0) {
+    const overridden = blockers === null && overrideUnknownBlockers;
+    if (overridden) {
+      db.transaction((tx) =>
+        history(tx, env, link, 'blockers_unknown_override', {
+          resource: request.resource,
+          by: ctx.actor.id,
+        }),
+      );
+    }
+    if ((blockers === null && !overridden) || (blockers ?? 0) > 0) {
       db.transaction((tx) =>
         addDiscrepancy(
           tx,
@@ -1479,8 +1505,12 @@ export function createIssueService(deps: IssueServiceDeps): IssueService {
       );
     },
 
-    async closeRequired(ctx, missionId, urls) {
+    async closeRequired(ctx, missionId, urls, options) {
       requireKind(ctx.actor, 'close issues', OPERATORS);
+      const override = options?.overrideUnknownBlockers === true;
+      if (override) {
+        requireKind(ctx.actor, 'override unknown blockers', ['human']);
+      }
       const state = mission(ctx.workspaceId, missionId);
       requireLive(state, 'Closing links');
       if (state.state !== 'verifying' && state.state !== 'reconciling') {
@@ -1498,6 +1528,7 @@ export function createIssueService(deps: IssueServiceDeps): IssueService {
           ctx,
           mission(ctx.workspaceId, missionId),
           link,
+          override,
         );
         results.push(outcome.outcome);
         attention ||= outcome.attention;
@@ -1615,12 +1646,23 @@ export function createIssueService(deps: IssueServiceDeps): IssueService {
     },
 
     handleWebhook(input) {
-      const { workspaceId, actor, provider, deliveryId, event, observation } =
-        input;
+      const {
+        workspaceId,
+        actor,
+        provider,
+        deliveryId,
+        event,
+        observation,
+        payloadHash,
+      } = input;
       const env: Env = { workspaceId, actorId: actor.id, source: 'webhook' };
       const touched = new Set<string>();
       const result = db.transaction((tx): WebhookResult => {
-        if (deliverySeen(tx, workspaceId, provider, deliveryId)) {
+        if (
+          deliverySeen(tx, workspaceId, provider, deliveryId) ||
+          (payloadHash !== undefined &&
+            payloadSeen(tx, workspaceId, provider, payloadHash))
+        ) {
           return { status: 'duplicate', echoes: 0, affected: 0 };
         }
         const log = (
@@ -1634,6 +1676,7 @@ export function createIssueService(deps: IssueServiceDeps): IssueService {
             event,
             outcome: status,
             at: nowIso(),
+            payloadHash,
           });
           return { status, echoes, affected };
         };

@@ -20,6 +20,10 @@ interface SessionRow {
 
 /** Open sessions one principal may hold. Opening another closes the least recently used. */
 export const MAX_OPEN_SESSIONS = 50;
+/** A session idle this long is closed on its next use, and refused. */
+export const SESSION_IDLE_TTL_MS = 60 * 60 * 1000;
+/** How long a closed session row is kept before it is purged. */
+export const CLOSED_SESSION_RETENTION_MS = 24 * 60 * 60 * 1000;
 /** How long a stored result can answer a retry. */
 export const IDEMPOTENCY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -35,6 +39,7 @@ export function openSession(
 ): SessionRecord {
   const id = newId('mcs');
   const at = input.now.toISOString();
+  purgeSessions(db, input.now);
   db.run(
     `UPDATE mcp_sessions SET closed_at = ?
      WHERE workspace_id = ? AND principal_id = ? AND closed_at IS NULL AND id IN (
@@ -73,6 +78,24 @@ export function openSession(
 }
 
 /**
+ * Closes every session idle past the TTL, then deletes closed rows past their retention. Nothing
+ * else refers to a session row, so a purge cannot orphan an audit entry: audit rows keep the id as text.
+ */
+export function purgeSessions(db: SqlDatabase, now: Date): void {
+  db.run(
+    'UPDATE mcp_sessions SET closed_at = ? WHERE closed_at IS NULL AND last_seen_at < ?',
+    [
+      now.toISOString(),
+      new Date(now.getTime() - SESSION_IDLE_TTL_MS).toISOString(),
+    ],
+  );
+  db.run(
+    'DELETE FROM mcp_sessions WHERE closed_at IS NOT NULL AND closed_at < ?',
+    [new Date(now.getTime() - CLOSED_SESSION_RETENTION_MS).toISOString()],
+  );
+}
+
+/**
  * The open session this caller owns, or undefined. A session id from another principal or
  * workspace is indistinguishable from an unknown one.
  */
@@ -82,12 +105,20 @@ export function findSession(
   caller: { workspaceId: string; principalId: string },
   now: Date,
 ): SessionRecord | undefined {
-  const row = db.get<SessionRow>(
-    `SELECT id, workspace_id, principal_id, protocol_version, closed_at FROM mcp_sessions
+  const row = db.get<SessionRow & { last_seen_at: string }>(
+    `SELECT id, workspace_id, principal_id, protocol_version, closed_at, last_seen_at FROM mcp_sessions
      WHERE id = ? AND workspace_id = ? AND principal_id = ?`,
     [id, caller.workspaceId, caller.principalId],
   );
   if (row === undefined || row.closed_at !== null) {
+    return undefined;
+  }
+  // An idle session ends. Closing it here, not only in the purge, keeps a stale id from reviving.
+  if (Date.parse(row.last_seen_at) < now.getTime() - SESSION_IDLE_TTL_MS) {
+    db.run('UPDATE mcp_sessions SET closed_at = ? WHERE id = ?', [
+      now.toISOString(),
+      id,
+    ]);
     return undefined;
   }
   db.run('UPDATE mcp_sessions SET last_seen_at = ? WHERE id = ?', [

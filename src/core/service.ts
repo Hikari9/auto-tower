@@ -255,11 +255,12 @@ export function createMissionService(deps: MissionServiceDeps): MissionService {
   const { db, guards } = deps;
   const ids = deps.newId ?? newId;
   const maxEvents = deps.maxEventsPerMission ?? DEFAULT_MAX_EVENTS_PER_MISSION;
+  const clock = deps.clock ?? (() => new Date());
 
   function inTransaction<T>(fn: (tx: SqlDatabase, log: EventLog) => T): T {
     return db.transaction((tx) => {
       const joined = joinTransaction(tx);
-      return fn(joined, createEventLog(joined));
+      return fn(joined, createEventLog(joined, clock));
     });
   }
 

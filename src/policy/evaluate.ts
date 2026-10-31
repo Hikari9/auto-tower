@@ -6,7 +6,7 @@ import {
   isSafeCleanup,
   isSensitive,
 } from './actions.js';
-import { hasWildcard, matchesPattern } from './patterns.js';
+import { hasWildcard, matchesPattern, patternsOverlap } from './patterns.js';
 import type {
   EvaluationCode,
   EvaluationEffect,
@@ -62,19 +62,26 @@ function activeAt(rule: PolicyRule, now: Date): boolean {
   );
 }
 
-/** Everything about a rule that is not its own lifecycle: who, what, where, which mission. */
+/**
+ * Everything about a rule that is not its own lifecycle: who, what, where, which mission. With
+ * `overlap`, the request's action, resource and scope are patterns, and the rule counts when it
+ * reaches any member of them. A deny rule uses that in citing mode, so a narrow deny (`a.b`) still
+ * stops a request for a broader pattern (`a.*`).
+ */
 function covers(
   rule: PolicyRule,
   input: EvaluationInput,
   principal: { id: string; kind: PrincipalKind },
+  overlap = false,
 ): boolean {
   const { grantee, limits } = rule;
+  const reaches = overlap ? patternsOverlap : matchesPattern;
   return (
     (grantee.kind === null || grantee.kind === principal.kind) &&
     (grantee.principalId === null || grantee.principalId === principal.id) &&
-    matchesPattern(rule.action, input.action) &&
-    matchesPattern(rule.resource, input.resource) &&
-    matchesPattern(rule.scope, input.scope) &&
+    reaches(rule.action, input.action) &&
+    reaches(rule.resource, input.resource) &&
+    reaches(rule.scope, input.scope) &&
     (limits.missionIds === null ||
       (input.missionId !== undefined &&
         limits.missionIds.includes(input.missionId)))
@@ -149,7 +156,7 @@ export function evaluate(input: EvaluationInput): PolicyEvaluation {
     (rule) =>
       rule.effect === 'deny' &&
       activeAt(rule, input.now) &&
-      covers(rule, input, principal),
+      covers(rule, input, principal, input.onlyRuleId !== undefined),
   );
   if (denied !== undefined) {
     return result(

@@ -9,6 +9,8 @@ import {
 } from '../flags.js';
 import type { ToolDefinition } from '../tool.js';
 
+const AUDIT_SOURCES = ['feature_flags', 'tool_calls'] as const;
+
 const ruleBody = {
   action: {
     type: 'string',
@@ -116,6 +118,66 @@ export const policyTools: readonly ToolDefinition[] = [
           ),
         },
       };
+    },
+  },
+  {
+    name: 'read_audit',
+    title: 'Read the audit trail',
+    description:
+      'Reads append-only history. `feature_flags` lists every flag change with who made it, the old and new setting and the rule it named. `tool_calls` lists MCP tool calls and their outcomes, without arguments or results. Pages by `afterSeq`.',
+    readOnly: true,
+    scopes: ['policy:read'],
+    properties: {
+      source: { enum: AUDIT_SOURCES },
+      afterSeq: { type: 'integer', minimum: 0 },
+      limit: { type: 'integer', minimum: 1, maximum: 200 },
+    },
+    required: ['source'],
+    run(ctx, args) {
+      const r = new InputReader(args);
+      const source = r.enum('source', AUDIT_SOURCES);
+      const afterSeq =
+        r.optInteger('afterSeq', { min: 0, max: Number.MAX_SAFE_INTEGER }) ?? 0;
+      const limit = r.optInteger('limit', { min: 1, max: 200 }) ?? 50;
+      r.finish();
+      const { workspaceId } = ctx.caller;
+      if (source === 'feature_flags') {
+        return {
+          data: {
+            source,
+            records: createFlagServiceFor(ctx.services).history(workspaceId, {
+              afterSeq,
+              limit,
+            }),
+          },
+        };
+      }
+      const records = ctx.services.db
+        .all<{
+          seq: number;
+          principal_id: string;
+          session_id: string | null;
+          tool: string;
+          mutating: number;
+          outcome: string;
+          error_code: string | null;
+          recorded_at: string;
+        }>(
+          `SELECT seq, principal_id, session_id, tool, mutating, outcome, error_code, recorded_at
+           FROM mcp_audit WHERE workspace_id = ? AND seq > ? ORDER BY seq LIMIT ?`,
+          [workspaceId, afterSeq, limit],
+        )
+        .map((row) => ({
+          seq: row.seq,
+          principalId: row.principal_id,
+          sessionId: row.session_id,
+          tool: row.tool,
+          mutating: row.mutating === 1,
+          outcome: row.outcome,
+          errorCode: row.error_code,
+          recordedAt: row.recorded_at,
+        }));
+      return { data: { source, records } };
     },
   },
   {

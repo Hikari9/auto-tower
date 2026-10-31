@@ -269,6 +269,7 @@ describe('tool declarations', () => {
       'grant_policy',
       'request_dispatch',
       'request_expansion',
+      'request_reconciliation',
       'revoke_policy',
       'set_feature_flag',
     ]);

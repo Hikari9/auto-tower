@@ -10,6 +10,7 @@ import {
   type EventLog,
   type StoredEvent,
 } from '../events/event-log.js';
+import { isHalted } from '../ops/halt.js';
 import { newId } from '../shared/ids.js';
 import type { SqlDatabase } from '../storage/database.js';
 import { ACTION_PATTERN } from './actions.js';
@@ -99,7 +100,7 @@ export interface PolicyService {
    */
   authorizeDelegate(
     request: Omit<AuthorizeRequest, 'principal'>,
-    options?: { escalate?: boolean },
+    options?: AuthorizeOptions,
   ): PolicyEvaluation;
   /**
    * Authorizes at the point of effect: records a receipt and throws unless the request is
@@ -184,7 +185,7 @@ export function createPolicyService(deps: PolicyServiceDeps): PolicyService {
   function inTransaction<T>(fn: (tx: SqlDatabase, log: EventLog) => T): T {
     return db.transaction((tx) => {
       const joined = joinTransaction(tx);
-      return fn(joined, createEventLog(joined));
+      return fn(joined, createEventLog(joined, clock));
     });
   }
 
@@ -619,6 +620,22 @@ export function createPolicyService(deps: PolicyServiceDeps): PolicyService {
     },
 
     guard(request) {
+      // An emergency halt stops every guarded effect, whatever the rules say.
+      if (isHalted(db, request.workspace)) {
+        const evaluation = service.authorize(request);
+        const halted = {
+          ...evaluation,
+          effect: 'deny' as const,
+          code: 'workspace_halted' as const,
+          reason: 'the workspace is halted',
+        };
+        service.record(request, halted);
+        throw new PolicyDeniedError(
+          'deny',
+          halted.reason,
+          `policy:v${evaluation.policyVersion}:halted`,
+        );
+      }
       const evaluation = service.authorize(request);
       if (evaluation.effect !== 'allow') {
         service.record(request, evaluation);

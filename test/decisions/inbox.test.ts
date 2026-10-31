@@ -574,6 +574,7 @@ describe('out-of-order answers', () => {
       effective: after?.effectiveAnswer,
       link: after?.links[0]?.status,
       authorized: packetStatus(a.driver, packetId).authorized,
+      missionState: a.driver.refresh().state,
       answers: inbox
         .answers('ws_test', decision.id)
         .map((x) => [x.version, x.choice]),
@@ -622,7 +623,19 @@ describe('out-of-order answers', () => {
     expect(inOrder.effective).toMatchObject({ version: 2, choice: 'decline' });
     // Authorizing a packet is an event in the mission's log, so a later decline cannot erase it.
     expect(inOrder.authorized).toBe(true);
-    expect(inOrder.link).toBe('resumed');
+    // The decline is recorded on the link, and a person is asked to look at the mission.
+    expect(inOrder.link).toBe('declined');
+    expect(inOrder.missionState).toBe('needs-attention');
+    expect(inOrder.results[1]?.branches[0]).toMatchObject({
+      status: 'declined',
+    });
+  });
+
+  it('leaves a mission alone when a decline arrives first', () => {
+    const reversed = run([2, 1], 'approve', 'decline');
+    expect(reversed.effective).toMatchObject({ version: 2, choice: 'decline' });
+    expect(reversed.authorized).toBe(false);
+    expect(reversed.missionState).not.toBe('needs-attention');
   });
 
   it('treats the same answer repeated as a replay and a different one as a conflict', () => {
