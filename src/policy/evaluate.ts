@@ -37,6 +37,10 @@ export interface EvaluationInput {
   missionId: string | undefined;
   /** Principals that produced the work, for independent review. */
   producers: ReadonlySet<string>;
+  /** True when the principal holds the live lease of the attempt the request names. */
+  holdsLease: boolean;
+  /** Count only this allow rule. Used to check a rule someone cites, so another rule cannot stand in for it. */
+  onlyRuleId?: string | undefined;
   /** Report `escalate` instead of `deny` when nothing covers the request and nothing forbids it. */
   escalate: boolean;
 }
@@ -176,7 +180,10 @@ export function evaluate(input: EvaluationInput): PolicyEvaluation {
   }
 
   const allows = input.rules.filter(
-    (rule) => rule.effect === 'allow' && covers(rule, input, principal),
+    (rule) =>
+      rule.effect === 'allow' &&
+      (input.onlyRuleId === undefined || rule.id === input.onlyRuleId) &&
+      covers(rule, input, principal),
   );
   const live = allows.filter(
     (rule) => activeAt(rule, input.now) && coversEffort(rule, input),
@@ -187,11 +194,17 @@ export function evaluate(input: EvaluationInput): PolicyEvaluation {
     return result('allow', 'granted', `allowed by rule ${grant.id}`, grant);
   }
 
-  if (isSafeCleanup(category)) {
+  if (
+    isSafeCleanup(
+      category,
+      input.resource,
+      principal.kind === 'human' || input.holdsLease,
+    )
+  ) {
     return result(
       'allow',
       'safe_cleanup',
-      'non-privileged cleanup is always allowed',
+      'non-privileged cleanup is allowed to a person or the attempt that holds the lease',
     );
   }
   const ranOut = [...allows]

@@ -269,7 +269,7 @@ export function createDecisionInbox(deps: DecisionInboxDeps): DecisionInbox {
     // answer with it, so the attempt gets a savepoint of its own.
     tx.exec('SAVEPOINT resume_branch');
     try {
-      createMissionService({ db: tx, guards }).authorizePacket(
+      createMissionService({ db: tx, guards, clock }).authorizePacket(
         {
           workspaceId: ctx.workspaceId,
           actor: ctx.actor,

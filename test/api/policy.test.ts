@@ -5,6 +5,7 @@ import {
   type Api,
   createApi,
   grant,
+  missionWith,
   request,
   ruleInput,
 } from '../policy/helpers.js';
@@ -620,6 +621,37 @@ describe('evaluating over HTTP', () => {
     expect(
       api.h.authority.policy.receipts('ws_test', { afterSeq: 0, limit: 10 }),
     ).toEqual([]);
+  });
+
+  it('allows grantless cleanup for the runner holding the attempt lease, as a dry run', async () => {
+    const api = createApi();
+    const { driver, ids } = missionWith(api.h, [
+      { title: 'one', scope: ['tmp/*'], authorized: true },
+    ]);
+    api.h.pool.online = [api.h.runner.id];
+    driver.tick();
+    const attemptId = driver.refresh().packets[0]?.activeAttemptId as string;
+    expect(ids).toHaveLength(1);
+    const cleanup = {
+      action: 'cleanup.release-lease',
+      resource: 'files:tmp',
+      scope: 'runner:a',
+      risk: 'low',
+      principalId: api.h.runner.id,
+      missionId: driver.id,
+    };
+    const ask = async (extra: object) =>
+      (
+        await api.call(api.owner.token, 'POST', '/policy/evaluations', {
+          ...cleanup,
+          ...extra,
+        })
+      ).body.evaluation;
+    expect(await ask({ attemptId })).toMatchObject({ code: 'safe_cleanup' });
+    expect(await ask({})).toMatchObject({ code: 'no_matching_grant' });
+    expect(await ask({ attemptId, resource: 'db:orders' })).toMatchObject({
+      code: 'no_matching_grant',
+    });
   });
 
   it('rejects a malformed request', async () => {

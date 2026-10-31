@@ -213,7 +213,7 @@ describe('explicit deny', () => {
       action: 'cleanup.release-lease',
       resource: 'lease:1',
       scope: 'runner:a',
-      principal: 'prn_runner',
+      principal: h.owner.id,
     });
     expect(policy.authorize(cleanup).code).toBe('safe_cleanup');
     h.authority.policy.createRule(
@@ -394,7 +394,9 @@ describe('revoking between dispatch and effect', () => {
       scope: 'branch:main',
       grantee: { kind: 'chief_of_staff', principalId: null },
     });
-    const { driver, ids } = missionWith(h, [{ title: 'one' }]);
+    const { driver, ids } = missionWith(h, [
+      { title: 'one', scope: ['branch:main'] },
+    ]);
     const dispatchCheck = request({
       action: 'land.merge',
       resource: 'repo:app',
@@ -434,6 +436,7 @@ describe('revoking between dispatch and effect', () => {
         resource: `mission:${driver.id}`,
         scope: 'runner:prn_runner',
         missionId: driver.id,
+        attemptId: driver.refresh().packets[0]?.activeAttemptId ?? undefined,
       }),
     );
     expect(cleanup.code).toBe('safe_cleanup');

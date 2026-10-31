@@ -68,6 +68,16 @@ export interface RuleResult {
   replayed: boolean;
 }
 
+export interface AuthorizeOptions {
+  escalate?: boolean;
+  /**
+   * Checks a rule someone cited instead of finding one. Only this allow rule can grant, deny rules
+   * still apply, and the action, resource and scope are read as the patterns a rule holds, so a
+   * packet's declared scope is tested for being inside the rule's rather than matched as one thing.
+   */
+  citing?: string;
+}
+
 export interface PolicyServiceDeps {
   db: SqlDatabase;
   clock?: () => Date;
@@ -81,7 +91,7 @@ export interface PolicyService {
    */
   authorize(
     request: AuthorizeRequest,
-    options?: { escalate?: boolean },
+    options?: AuthorizeOptions,
   ): PolicyEvaluation;
   /**
    * Decides as if any Chief of Staff asked, to learn whether a delegated rule covers the request
@@ -476,11 +486,14 @@ export function createPolicyService(deps: PolicyServiceDeps): PolicyService {
     }
   }
 
-  function producersOf(
+  /** What the mission records about who produced the work and who holds a live lease. */
+  function missionFacts(
     workspaceId: string,
     request: AuthorizeRequest,
-  ): Set<string> {
+    principalId: string,
+  ): { producers: Set<string>; holdsLease: boolean } {
     const producers = new Set<string>(request.producerIds ?? []);
+    let holdsLease = false;
     if (request.missionId !== undefined) {
       const mission = loadMission(db, workspaceId, request.missionId);
       for (const attempt of mission?.attempts ?? []) {
@@ -488,14 +501,18 @@ export function createPolicyService(deps: PolicyServiceDeps): PolicyService {
         if (attempt.report !== null) {
           producers.add(attempt.report.by);
         }
+        holdsLease ||=
+          attempt.id === request.attemptId &&
+          attempt.runnerId === principalId &&
+          (attempt.status === 'leased' || attempt.status === 'running');
       }
     }
-    return producers;
+    return { producers, holdsLease };
   }
 
-  function validateRequest(request: AuthorizeRequest): void {
+  function validateRequest(request: AuthorizeRequest, patterns = false): void {
     const issues = [];
-    if (!ACTION_PATTERN.test(request.action)) {
+    if (!patterns && !ACTION_PATTERN.test(request.action)) {
       issues.push({
         path: 'action',
         message: 'must be lower-case dotted segments',
@@ -504,7 +521,7 @@ export function createPolicyService(deps: PolicyServiceDeps): PolicyService {
     for (const key of ['resource', 'scope'] as const) {
       if (
         request[key] === '' ||
-        request[key].includes('*') ||
+        (!patterns && request[key].includes('*')) ||
         hasTraversal(request[key])
       ) {
         // A request names one thing. A `*` in it would be matched as literal text by a rule, and a
@@ -536,10 +553,14 @@ export function createPolicyService(deps: PolicyServiceDeps): PolicyService {
     request: AuthorizeRequest,
     principal: { id: string; kind: PrincipalKind } | undefined,
     principalDisabled: boolean,
-    escalate: boolean,
+    options: AuthorizeOptions | undefined,
   ): PolicyEvaluation {
     const workspaceId = request.workspace;
-    const producers = producersOf(workspaceId, request);
+    const { producers, holdsLease } = missionFacts(
+      workspaceId,
+      request,
+      principal?.id ?? '',
+    );
     // Rules and their version are separate reads. Read the version on both sides and go again if a
     // writer got in between, so the version named in the result is the one the rules came from.
     for (let attempt = 0; attempt < 4; attempt++) {
@@ -559,7 +580,9 @@ export function createPolicyService(deps: PolicyServiceDeps): PolicyService {
           amount: request.amount,
           missionId: request.missionId,
           producers,
-          escalate,
+          holdsLease,
+          onlyRuleId: options?.citing,
+          escalate: options?.escalate ?? false,
         });
       }
     }
@@ -569,7 +592,7 @@ export function createPolicyService(deps: PolicyServiceDeps): PolicyService {
 
   const service: PolicyService = {
     authorize(request, options) {
-      validateRequest(request);
+      validateRequest(request, options?.citing !== undefined);
       const workspaceId = request.workspace;
       const principalId =
         typeof request.principal === 'string'
@@ -585,19 +608,14 @@ export function createPolicyService(deps: PolicyServiceDeps): PolicyService {
           ? undefined
           : { id: principalId, kind: row.kind as PrincipalKind },
         row?.disabled_at != null,
-        options?.escalate ?? false,
+        options,
       );
     },
 
     authorizeDelegate(request, options) {
       const full = { ...request, principal: '' };
       validateRequest(full);
-      return decide(
-        full,
-        { id: '', kind: 'chief_of_staff' },
-        false,
-        options?.escalate ?? false,
-      );
+      return decide(full, { id: '', kind: 'chief_of_staff' }, false, options);
     },
 
     guard(request) {

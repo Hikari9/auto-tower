@@ -3,6 +3,7 @@ import { createApp } from '../../src/api/app.js';
 import { guarded } from '../../src/api/routes/missions.js';
 import { ForbiddenActorError } from '../../src/core/errors.js';
 import { createCore } from '../../src/core/index.js';
+import { createPolicyService } from '../../src/policy/service.js';
 import type { SqlDatabase } from '../../src/storage/database.js';
 import { FakeClock, FakePool, sequentialIds } from '../core/helpers.js';
 import {
@@ -1105,15 +1106,34 @@ describe('packet verification over HTTP', () => {
       api.cos.token,
       'POST',
       `/missions/${m.id}/work-packets`,
-      { expectedVersion: 2, title: 'a' },
+      { expectedVersion: 2, title: 'a', scope: ['env:staging'] },
     );
     const packetId = added.body.mission.packets[0].id as string;
-    await api.call(
+    // The chief of staff authorizes under a real grant, since a ref it makes up is refused.
+    const { rule } = createPolicyService({ db: api.db }).createRule(
+      {
+        workspaceId: 'ws_test',
+        actor: { id: api.owner.principalId, kind: 'human' },
+      },
+      {
+        effect: 'allow',
+        action: 'deploy.staging',
+        resource: 'repo:app',
+        scope: 'env:staging',
+        maxRisk: 'high',
+        grantee: { kind: 'chief_of_staff', principalId: null },
+        limits: { maxAmount: null, missionIds: null },
+        expiresAt: null,
+        note: null,
+      },
+    );
+    const authorized = await api.call(
       api.cos.token,
       'POST',
       `/missions/${m.id}/work-packets/${packetId}/authorize`,
-      { expectedVersion: 3, policyRefs: ['policy:1'] },
+      { expectedVersion: 3, policyRefs: [`policy:v1:rule:${rule.id}@1`] },
     );
+    expect(authorized.status).toBe(200);
     api.pool.online = [api.runner.principalId];
     await api.call(api.cos.token, 'POST', '/work/schedule');
     const mission = (await api.call(api.cos.token, 'GET', `/missions/${m.id}`))

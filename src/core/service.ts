@@ -4,6 +4,8 @@ import {
   type EventLog,
   type StoredEvent,
 } from '../events/event-log.js';
+import { refusalForPolicyRefs } from '../policy/packet-refs.js';
+import { createPolicyService } from '../policy/service.js';
 import { newId } from '../shared/ids.js';
 import type { SqlDatabase } from '../storage/database.js';
 import {
@@ -104,6 +106,8 @@ export interface MissionServiceDeps {
    * this many events. Cancelling is always allowed, so a full mission can still be closed.
    */
   maxEventsPerMission?: number;
+  /** Time source for evaluating the policy a chief of staff cites. Defaults to the system clock. */
+  clock?: () => Date;
 }
 
 export const DEFAULT_MAX_EVENTS_PER_MISSION = 5_000;
@@ -268,6 +272,15 @@ export function createMissionService(deps: MissionServiceDeps): MissionService {
       actor,
       guards,
       children: () => loadChildren(tx, state.workspaceId, state.id),
+      refusePolicyRefs: (mission, packet, policyRefs) =>
+        refusalForPolicyRefs(
+          createPolicyService({
+            db: tx,
+            ...(deps.clock === undefined ? {} : { clock: deps.clock }),
+          }),
+          { workspaceId: mission.workspaceId, actor, mission, packet },
+          policyRefs,
+        ),
     };
   }
 
