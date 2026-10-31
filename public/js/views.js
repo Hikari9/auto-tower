@@ -37,15 +37,6 @@ export function clearDecisionDrafts() {
   decisionDrafts.clear();
 }
 
-/** Keeps drafts only for decisions still open, so the map does not grow with every decision seen. */
-function pruneDecisionDrafts(openIds) {
-  for (const id of decisionDrafts.keys()) {
-    if (!openIds.has(id)) {
-      decisionDrafts.delete(id);
-    }
-  }
-}
-
 /**
  * True when the write may have applied: no server answer, a 5xx, or a 2xx body that did not parse.
  * Only a 4xx answer (other than 401 and 409, which reload) shows that nothing was written.
@@ -211,7 +202,7 @@ function confirmAction({
                   await ctx.refresh();
                   return;
                 }
-                // Cancel rebuilds the slot from `open`, so the trigger is locked too: no second write until reload.
+                // Cancel rebuilds the slot from `open`, so the trigger is locked too, until the view re-renders.
                 const uncertain = mayHaveApplied(caught);
                 confirm.disabled = uncertain;
                 open.disabled = uncertain;
@@ -267,7 +258,7 @@ export function describeWriteError(error) {
   if (error instanceof ApiError) {
     return describeError(error);
   }
-  return 'The request failed. Check the connection. The change may already have been applied, so reload before retrying.';
+  return 'The request failed. Check the connection. The change may already have been applied, so check the current state before retrying.';
 }
 
 /** A rejected token or a stale record is not fixed by retrying here. The view reloads instead. */
@@ -698,7 +689,6 @@ export function renderDecisions(ctx) {
     'Decision inbox',
     () => ctx.api.get('/decisions?status=open&limit=200'),
     ({ decisions }) => {
-      pruneDecisionDrafts(new Set(decisions.map((d) => d.id)));
       return h(
         'div',
         null,
@@ -869,6 +859,7 @@ function confirmButton(ctx, decision, alt, note, error, cancel, submit) {
         const button = /** @type {HTMLButtonElement} */ (event.currentTarget);
         button.disabled = true;
         cancel.disabled = true;
+        submit.disabled = true;
         error.textContent = '';
         try {
           await ctx.api.post(
@@ -888,7 +879,7 @@ function confirmButton(ctx, decision, alt, note, error, cancel, submit) {
             await ctx.refresh();
             return;
           }
-          // The answer may have applied, so Confirm and Answer… stay off until reload.
+          // The answer may have applied, so Confirm and Answer… stay off until the view re-renders.
           const uncertain = mayHaveApplied(caught);
           button.disabled = uncertain;
           submit.disabled = uncertain;

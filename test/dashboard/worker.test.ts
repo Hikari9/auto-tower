@@ -285,3 +285,24 @@ describe('Workers HEAD, malformed paths and the asset ignore list', () => {
     expect(ignore.split('\n').map((line) => line.trim())).toContain('*.d.ts');
   });
 });
+
+describe('Workers HEAD on an existing asset', () => {
+  it('answers HEAD for a dashboard file with its headers and no body', async () => {
+    const env = { ASSETS: assetsBinding() };
+    const get = await worker.fetch(
+      new Request(`${origin}/dashboard/js/app.js`),
+      env,
+    );
+    const head = await worker.fetch(
+      new Request(`${origin}/dashboard/js/app.js`, { method: 'HEAD' }),
+      env,
+    );
+
+    expect(head.status).toBe(get.status);
+    expect(head.headers.get('content-type')).toBe(
+      get.headers.get('content-type'),
+    );
+    expect(head.headers.get('content-security-policy')).toBe(EXPECTED_CSP);
+    expect(await head.text()).toBe('');
+  });
+});

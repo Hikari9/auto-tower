@@ -81,7 +81,7 @@ async function serveDashboard(
   // HEAD gets the same headers as GET and no body. The unread asset stream is cancelled.
   const head = request.method === 'HEAD';
   if (head) {
-    await upstream.body?.cancel();
+    await upstream.body?.cancel().catch(() => undefined);
   }
   return new Response(head ? null : upstream.body, {
     headers: {
