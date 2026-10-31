@@ -18,6 +18,12 @@ Token totals include the orchestrator, every Office executor, reviewer and plann
 | --- | --- | --- | --- | --- |
 | `89ad3c5d` | 0-5 (one run, one lane per phase) | 2026-10-31T02:58Z | | |
 
+## Landed phases
+
+| Phase | Landed (UTC) | office/v1 merge | Office revisions | Gate |
+| --- | --- | --- | --- | --- |
+| 0+1 | 2026-10-31T05:32Z | `91c73ba` | T1 R1, T2 R2, T3 R4 (`0260a5f`) | RECHECK (CoS policy-ref bypass) then APPROVED; 846 tests green |
+
 ## Notes
 
 - `gh issue edit 1 --add-assignee @me` first failed for lack of permission; it succeeded after Rico granted write access.
