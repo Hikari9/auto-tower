@@ -166,9 +166,18 @@ function denyApplies(rule: PolicyRule, principalId: string, missionId: string) {
   );
 }
 
-/** A scope a deny rule can be matched against: literal, with no wildcard, traversal or padding. */
+/**
+ * A scope a deny rule can be matched against: literal, with no wildcard, traversal, or whitespace,
+ * control or format characters (so padding such as a zero-width space cannot hide it from a rule).
+ */
+const UNCHECKABLE_CHARS = /[\s\p{Cc}\p{Cf}]/u;
+
 function checkableScope(scope: string): boolean {
-  return !scope.includes('*') && !hasTraversal(scope) && scope === scope.trim();
+  return (
+    !scope.includes('*') &&
+    !hasTraversal(scope) &&
+    !UNCHECKABLE_CHARS.test(scope)
+  );
 }
 
 /** The policy version now. Read inside the claim, so a refusal names the version it was decided under. */

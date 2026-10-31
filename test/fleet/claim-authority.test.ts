@@ -757,6 +757,32 @@ describe('claim-time authority: deny scope, effect, grantee and disabled coverag
 });
 
 describe('claim-time authority: scope spelling', () => {
+  it.each([
+    ['trailing zero-width space', 'env:prod\u200b'],
+    ['trailing no-break space', 'env:prod\u00a0'],
+  ])('refuses a human packet whose scope has a %s', async (_label, scope) => {
+    const { h, policy } = setup();
+    const padded = h.mission([{ title: 'hidden', scope: [scope] }]);
+    policy.createRule(
+      h.ctx(),
+      ruleInput({
+        effect: 'deny',
+        action: '*',
+        resource: '*',
+        scope: 'env:prod',
+        grantee: { kind: null, principalId: null },
+      }),
+    );
+    const runner = await h.runner({ maxConcurrent: 10 });
+    const claim = (await runner.claim()) as Claim;
+    expect(packetsGranted(claim)).not.toContain(padded.packetIds[0]);
+    expect(reasons(claim)).toContainEqual(
+      expect.stringMatching(
+        /declares a scope a deny rule cannot be checked against/,
+      ),
+    );
+  });
+
   it('refuses a human packet whose scope has padding, which a literal deny rule would miss', async () => {
     const { h, policy } = setup();
     const padded = h.mission([{ title: 'padded', scope: ['env:prod '] }]);
