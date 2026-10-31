@@ -5,25 +5,23 @@ import type { AppEnv, RouteSpec } from '../app.js';
 import { errorBody } from '../errors.js';
 
 /**
- * Serves the dashboard from `public/`. Only the files listed here are ever read,
- * so a request path cannot reach anything else on disk. The dashboard holds no
- * secrets: every data call goes through the API with the caller's own token.
+ * Files the dashboard serves from `public/`, keyed by their path under /dashboard.
+ * Only these are ever read, so a request path cannot reach anything else on disk.
+ * A Map, not an object, so names such as `constructor` never match an inherited key.
+ * The dashboard holds no secrets: every data call goes through the API with the caller's own token.
  */
-const ASSETS: Readonly<Record<string, string>> = {
-  '': 'text/html; charset=utf-8',
-  'index.html': 'text/html; charset=utf-8',
-  'styles.css': 'text/css; charset=utf-8',
-  'persona.json': 'application/json; charset=utf-8',
-  'js/app.js': 'text/javascript; charset=utf-8',
-  'js/api.js': 'text/javascript; charset=utf-8',
-  'js/boot.js': 'text/javascript; charset=utf-8',
-  'js/dom.js': 'text/javascript; charset=utf-8',
-  'js/status.js': 'text/javascript; charset=utf-8',
-  'js/views.js': 'text/javascript; charset=utf-8',
-};
-
-// `import.meta.dirname` rather than a URL, so the module also loads where `URL` is replaced (happy-dom tests).
-const PUBLIC_DIR = join(import.meta.dirname, '../../../public');
+export const DASHBOARD_ASSETS: ReadonlyMap<string, string> = new Map([
+  ['', 'text/html; charset=utf-8'],
+  ['index.html', 'text/html; charset=utf-8'],
+  ['styles.css', 'text/css; charset=utf-8'],
+  ['persona.json', 'application/json; charset=utf-8'],
+  ['js/app.js', 'text/javascript; charset=utf-8'],
+  ['js/api.js', 'text/javascript; charset=utf-8'],
+  ['js/boot.js', 'text/javascript; charset=utf-8'],
+  ['js/dom.js', 'text/javascript; charset=utf-8'],
+  ['js/status.js', 'text/javascript; charset=utf-8'],
+  ['js/views.js', 'text/javascript; charset=utf-8'],
+]);
 
 const CSP = [
   "default-src 'self'",
@@ -43,14 +41,17 @@ function readAsset(name: string): string {
   if (cached !== undefined) {
     return cached;
   }
-  const text = readFileSync(join(PUBLIC_DIR, name), 'utf8');
+  // Resolved on first read, not at import: `import.meta.dirname` is absent in some hosts,
+  // and a module-level read would fail the whole import rather than only this route.
+  const publicDir = join(import.meta.dirname, '../../../public');
+  const text = readFileSync(join(publicDir, name), 'utf8');
   cache.set(name, text);
   return text;
 }
 
 function serve(name: string) {
   return (c: Context<AppEnv>) => {
-    const type = ASSETS[name];
+    const type = DASHBOARD_ASSETS.get(name);
     if (type === undefined) {
       return c.json(errorBody('not_found', 'Route not found'), 404);
     }
@@ -66,7 +67,7 @@ function serve(name: string) {
   };
 }
 
-/** `/dashboard` and `/dashboard/` answer the shell. Everything else is looked up in `ASSETS`. */
+/** `/dashboard` and `/dashboard/` answer the shell. Everything else is looked up in `DASHBOARD_ASSETS`. */
 const shell: RouteSpec = {
   method: 'get',
   path: '/dashboard',
