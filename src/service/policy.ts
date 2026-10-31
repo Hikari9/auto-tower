@@ -32,13 +32,23 @@ export class PolicyService {
    * effect calls this at the point of effect, so a revoke applies to the next effect.
    */
   async evaluate(ws: string, req: PolicyRequest, envelope?: { authority: AuthorityEnvelope; risk: Risk }): Promise<PolicyEvaluation> {
-    const [workspace, rules] = await Promise.all([this.t.repo.workspace(ws), this.t.repo.rules(ws)]);
-    return evaluatePolicy(req, { rules, policyVersion: workspace.policyVersion, now: this.t.now(), halted: workspace.halted, ...(envelope ? { envelope } : {}) });
+    return (await this.authorize(ws, req, envelope)).evaluation;
   }
 
-  /** Count one use of a rule that just authorized an effect (enforces maxUses). */
-  recordUseTx(tx: UnitOfWork, rule: PolicyRule, context: Record<string, unknown>): void {
-    tx.save('rule', SPECS.rule, { ...rule, uses: rule.uses + 1 }, 'rule.used', { payload: context });
+  /** Evaluate and also return the exact rule row that allowed it, read in the same snapshot. */
+  async authorize(ws: string, req: PolicyRequest, envelope?: { authority: AuthorityEnvelope; risk: Risk }): Promise<{ evaluation: PolicyEvaluation; rule: PolicyRule | undefined }> {
+    const [workspace, rules] = await Promise.all([this.t.repo.workspace(ws), this.t.repo.rules(ws)]);
+    const evaluation = evaluatePolicy(req, { rules, policyVersion: workspace.policyVersion, now: this.t.now(), halted: workspace.halted, ...(envelope ? { envelope } : {}) });
+    return { evaluation, rule: evaluation.basis === 'rule' ? rules.find((r) => r.id === evaluation.ruleId) : undefined };
+  }
+
+  /**
+   * Count one use of the rule that authorized an effect. The save is guarded by
+   * the version that was evaluated, so a concurrent use (maxUses) or revocation
+   * makes this commit conflict instead of authorizing under stale policy.
+   */
+  recordUseTx(tx: UnitOfWork, evaluatedRule: PolicyRule, context: Record<string, unknown>): void {
+    tx.save('rule', SPECS.rule, { ...evaluatedRule, uses: evaluatedRule.uses + 1 }, 'rule.used', { payload: context });
   }
 
   async list(actor: Actor, includeRevoked = true) {

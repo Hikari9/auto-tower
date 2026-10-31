@@ -1,3 +1,4 @@
+import type { z } from 'zod';
 import {
   DISPATCH_CONTRACT,
   EffectSchema,
@@ -17,7 +18,8 @@ import { evaluateGate, isLandingAction, reviewProblems } from '../domain/gates.t
 import { assertPacketTransition } from '../domain/lifecycle.ts';
 import { envelopeCovers } from '../domain/policy.ts';
 import { redact } from '../domain/redact.ts';
-import type { Actor, Attempt, Checkpoint, FailureClass, Mission, Packet, PacketState, PolicyEvaluation, Runner } from '../domain/types.ts';
+import { RISK_ORDER } from '../domain/types.ts';
+import type { Actor, Attempt, Checkpoint, FailureClass, Mission, Packet, PacketState, PolicyEvaluation, PolicyRule, Risk, Runner } from '../domain/types.ts';
 import { SPECS } from '../store/codec.ts';
 import type { UnitOfWork } from '../store/uow.ts';
 import { requireKind, requireScope } from './auth.ts';
@@ -27,6 +29,12 @@ import type { Tower } from './tower.ts';
 export type Directive = { attemptId: string; action: 'continue' | 'stop' | 'cancel' | 'pause' | 'hold'; reason: string };
 
 const LIVE: Attempt['state'][] = ['leased', 'running'];
+/** Packet states in which its current attempt may keep (or resume) working. */
+const RESUMABLE: PacketState[] = ['leased', 'running', 'recovering', 'ready', 'held', 'paused'];
+
+export function maxRisk(stated: Risk | undefined, floor: Risk): Risk {
+  return stated && RISK_ORDER[stated] > RISK_ORDER[floor] ? stated : floor;
+}
 
 export function movePacket(tx: UnitOfWork, p: Packet, to: PacketState, type: string, patch: Partial<Packet> = {}, payload: unknown = {}): Packet {
   if (p.state !== to) assertPacketTransition(p.state, to);
@@ -106,13 +114,17 @@ export class RunnerService {
    */
   async heartbeat(actor: Actor, raw: unknown): Promise<{ status: Runner['status']; directives: Directive[]; leaseMs: number; serverTime: string }> {
     const input = HeartbeatSchema.parse(raw);
-    const runner = await this.self(actor);
-    const ws = runner.workspaceId;
+    const prior = await this.self(actor);
+    const ws = prior.workspaceId;
     const now = this.t.now();
-    const wasOffline = runner.status === 'offline';
-    const status: Runner['status'] = runner.status === 'quarantined' ? 'quarantined' : input.draining ? 'draining' : 'online';
+    const wasOffline = prior.status === 'offline';
     // Liveness is not work proof, so it is a plain projection update rather than an event.
-    await this.t.db.batch([{ sql: 'UPDATE runners SET last_seen_at = ?, status = ? WHERE id = ?', params: [now, status, runner.id] }]);
+    // It never touches a quarantined runner, even one quarantined a moment ago.
+    await this.t.db.batch([
+      { sql: "UPDATE runners SET last_seen_at = ?, status = ? WHERE id = ? AND status <> 'quarantined'", params: [now, input.draining ? 'draining' : 'online', prior.id] },
+    ]);
+    const runner = await this.t.repo.runner(ws, prior.id);
+    const status = runner.status;
     const directives: Directive[] = [];
     for (const rep of input.attempts) {
       directives.push(await this.t.retrying(() => this.reconcileAttempt(actor, runner, status, rep.attemptId, rep.fence, rep.phase, rep.localRunId)));
@@ -140,15 +152,22 @@ export class RunnerService {
 
     const lease = this.t.later(this.t.config.leaseMs);
     const packet = await this.t.repo.packet(ws, a.packetId);
-    if (a.state === 'lost') {
-      // Same-run recovery: the original runner reconnected and still holds the fence.
+    if (packet.currentAttemptId !== a.id || !RESUMABLE.includes(packet.state)) {
+      // Tower has moved on from this attempt (packet finished, cancelled or failed): stop it for good.
       const tx = this.t.uow(actor);
-      tx.save('attempt', SPECS.attempt, { ...a, state: 'running' as const, leaseExpiresAt: lease, ...(phase ? { phase } : {}), ...(localRunId ? { localRunId } : {}) }, 'attempt.recovered', {
-        missionId: a.missionId,
-      });
-      if (packet.state === 'recovering') movePacket(tx, packet, 'running', 'packet.recovered', { holdReason: null }, { attemptId: a.id });
+      tx.save('attempt', SPECS.attempt, { ...a, state: 'fenced' as const }, 'attempt.fenced', { missionId: a.missionId, payload: { reason: `packet is ${packet.state}` } });
+      this.releaseScopeTx(tx, a, lock);
+      await tx.commit(this.t.db);
+      return { attemptId, action: 'stop', reason: `packet is ${packet.state}; this attempt is no longer current` };
+    }
+    if (a.state === 'lost' || ['recovering', 'ready'].includes(packet.state)) {
+      // Same-run recovery: the original runner reconnected and still holds the fence, so it
+      // resumes, even if its packet had been made reassignable but nobody claimed it yet.
+      const tx = this.t.uow(actor);
+      this.recoverTx(tx, { ...a, leaseExpiresAt: lease, ...(phase ? { phase } : {}), ...(localRunId ? { localRunId } : {}) }, packet);
       await tx.commit(this.t.db);
       await this.t.missions.refresh(ws, a.missionId);
+      if (packet.state === 'held') return { attemptId, action: 'hold', reason: packet.holdReason ?? 'waiting for a decision' };
       return { attemptId, action: 'continue', reason: 'recovered: original run reconciled' };
     }
     await this.t.db.batch([{ sql: 'UPDATE attempts SET lease_expires_at = ? WHERE id = ? AND fence = ?', params: [lease, a.id, a.fence] }]);
@@ -158,14 +177,13 @@ export class RunnerService {
 
   /** Claim the best eligible packet for this runner, or null. Exactly one holder per execution scope. */
   async claim(actor: Actor): Promise<{ attempt: Attempt; contract: DispatchContract } | null> {
-    const runner = await this.self(actor);
-    const ws = runner.workspaceId;
-    const workspace = await this.t.repo.workspace(ws);
-    if (workspace.halted) return null;
-    if (runner.status !== 'online') return null;
-    const live = await this.t.repo.attemptsFor(ws, { runnerId: runner.id, states: LIVE });
-    if (live.length >= runner.maxConcurrency) return null;
     for (let i = 0; i < 4; i++) {
+      // Re-read every round: the runner's status, version and load may have changed.
+      const runner = await this.self(actor);
+      const ws = runner.workspaceId;
+      if ((await this.t.repo.workspace(ws)).halted || runner.status !== 'online') return null;
+      const live = await this.t.repo.attemptsFor(ws, { runnerId: runner.id, states: LIVE });
+      if (live.length >= runner.maxConcurrency) return null;
       try {
         return await this.claimOnce(actor, runner);
       } catch (err) {
@@ -203,6 +221,10 @@ export class RunnerService {
     const { packet, mission } = pick;
 
     const tx = this.t.uow(actor);
+    // Guard on the runner's version: a quarantine or a parallel claim by this runner
+    // (capacity check) commits first and this claim conflicts.
+    const runnerVersion = tx.event({ stream: 'runner', id: runner.id, expected: runner.version, type: 'runner.claimed', payload: { packetId: packet.id } });
+    tx.run('UPDATE runners SET version = ? WHERE id = ?', runnerVersion, runner.id);
     const lock = await this.t.repo.scopeLock(packet.execScope);
     const fence = (lock?.fence ?? 0) + 1;
     const scopeVersion = tx.event({ stream: 'scope', id: packet.execScope, expected: lock?.version ?? 0, type: 'scope.acquired', missionId: mission.id, payload: { fence, packetId: packet.id } });
@@ -282,6 +304,15 @@ export class RunnerService {
     };
   }
 
+  /** The current attempt resumes: attempt back to running, packet back to running unless it is held or paused. */
+  private recoverTx(tx: UnitOfWork, a: Attempt, packet: Packet): { attempt: Attempt; packet: Packet } {
+    const attempt = tx.save('attempt', SPECS.attempt, { ...a, state: 'running' as const }, 'attempt.recovered', { missionId: a.missionId });
+    const next = ['recovering', 'ready', 'leased'].includes(packet.state)
+      ? movePacket(tx, packet, 'running', 'packet.recovered', { holdReason: null, nextEligibleAt: null }, { attemptId: a.id })
+      : packet;
+    return { attempt, packet: next };
+  }
+
   /** Load an attempt the calling runner currently and exclusively holds, or fail as fenced. */
   private async held(runner: Runner, attemptId: string, fence: number): Promise<Attempt> {
     const a = await this.t.repo.attempt(runner.workspaceId, attemptId);
@@ -320,10 +351,13 @@ export class RunnerService {
     const ws = runner.workspaceId;
     let a = await this.held(runner, r.attemptId, r.fence);
     if (['succeeded', 'failed'].includes(a.state)) fail('conflict', `attempt already ${a.state}`);
-    const packet = await this.t.repo.packet(ws, a.packetId);
+    let packet = await this.t.repo.packet(ws, a.packetId);
+    if (packet.currentAttemptId !== a.id || !RESUMABLE.includes(packet.state)) fail('fenced', `packet is ${packet.state}; this attempt is no longer current`);
     const tx = this.t.uow(actor);
     const meta = { receiptId: r.receiptId, redactions };
     const lease = this.t.later(this.t.config.leaseMs);
+    const recovered = a.state === 'lost' || ['recovering', 'ready'].includes(packet.state);
+    if (recovered) ({ attempt: a, packet } = this.recoverTx(tx, { ...a, leaseExpiresAt: lease }, packet));
 
     if (r.kind === 'progress' || r.kind === 'checkpoint') {
       const checkpoint: Checkpoint | null = r.checkpoint ? { ...r.checkpoint, at: tx.now } : a.checkpoint;
@@ -334,11 +368,11 @@ export class RunnerService {
         r.kind === 'checkpoint' ? 'attempt.checkpoint' : 'attempt.progress',
         { missionId: a.missionId, payload: { ...meta, phase: r.phase, message: r.message, checkpoint: r.checkpoint } },
       );
-      // A progress receipt from a lost-but-unfenced attempt is also a same-run recovery.
-      if (packet.state === 'leased' || packet.state === 'recovering') movePacket(tx, packet, 'running', 'packet.running', { holdReason: null, ...(r.checkpoint ? { checkpoint } : {}) });
+      const started = packet.state === 'leased';
+      if (started) movePacket(tx, packet, 'running', 'packet.running', { holdReason: null, ...(r.checkpoint ? { checkpoint } : {}) });
       else if (r.checkpoint) tx.save('packet', SPECS.packet, { ...packet, checkpoint }, 'packet.checkpointed', { missionId: a.missionId, payload: r.checkpoint });
       await tx.commit(this.t.db);
-      if (packet.state === 'leased' || packet.state === 'recovering') await this.t.missions.refresh(ws, a.missionId);
+      if (started || recovered) await this.t.missions.refresh(ws, a.missionId);
       return { ok: true, attemptState: a.state };
     }
 
@@ -453,17 +487,24 @@ export class RunnerService {
   async authorizeEffect(actor: Actor, raw: unknown): Promise<PolicyEvaluation> {
     const runner = await this.self(actor);
     const input = EffectSchema.parse(raw);
+    // A concurrent rule use or revocation conflicts on the rule's version; re-evaluate.
+    return this.t.retrying(() => this.authorizeEffectOnce(actor, runner, input));
+  }
+
+  private async authorizeEffectOnce(actor: Actor, runner: Runner, input: z.infer<typeof EffectSchema>): Promise<PolicyEvaluation> {
     const ws = runner.workspaceId;
     const a = await this.held(runner, input.attemptId, input.fence);
     const m = await this.t.repo.mission(ws, a.missionId);
     const packet = await this.t.repo.packet(ws, a.packetId);
-    const risk = input.risk ?? packet.risk;
+    // A runner may raise the stated risk of an effect, never lower it below its packet's.
+    const risk = maxRisk(input.risk, packet.risk);
     let ev: PolicyEvaluation;
+    let rule: PolicyRule | undefined;
     if (m.state !== 'active' || ['paused', 'cancelled'].includes(packet.state) || a.control) {
       const ws0 = await this.t.repo.workspace(ws);
       ev = { allowed: false, basis: 'default_deny', policyVersion: ws0.policyVersion, reason: `mission is ${m.state} and packet is ${packet.state}; only non-privileged cleanup may continue` };
     } else {
-      ev = await this.t.policy.evaluate(ws, { grantee: 'runner', action: input.action, resource: input.resource, risk, missionId: m.id }, { authority: m.authority, risk: m.risk });
+      ({ evaluation: ev, rule } = await this.t.policy.authorize(ws, { grantee: 'runner', action: input.action, resource: input.resource, risk, missionId: m.id }, { authority: m.authority, risk: m.risk }));
       if (ev.allowed && isLandingAction(input.action) && (packet.reviewRequired || ['high', 'critical'].includes(packet.risk))) {
         const problems = reviewProblems(input.review, input.producerSessionId ?? '', input.review?.sha);
         if (!input.producerSessionId) problems.push('landing requests must name the producing session');
@@ -476,7 +517,7 @@ export class RunnerService {
       policy: ev,
       payload: { action: input.action, resource: input.resource, risk, review: input.review ?? null },
     });
-    if (ev.allowed && ev.basis === 'rule' && ev.ruleId) this.t.policy.recordUseTx(tx, await this.t.repo.rule(ws, ev.ruleId), { attemptId: a.id, action: input.action });
+    if (ev.allowed && rule) this.t.policy.recordUseTx(tx, rule, { attemptId: a.id, action: input.action });
     await tx.commit(this.t.db);
     if (!ev.allowed) throw new TowerError('policy_denied', ev.reason, { evaluation: ev });
     return ev;
@@ -520,7 +561,7 @@ export class RunnerService {
       const a = await this.held(runner, input.attemptId, input.fence);
       const m = await this.t.repo.mission(ws, a.missionId);
       const packet = await this.t.repo.packet(ws, a.packetId);
-      const risk = input.risk ?? packet.risk;
+      const risk = maxRisk(input.risk, packet.risk);
       const req = { action: input.action, resource: input.resource, risk, missionId: m.id };
       const asRunner = await this.t.policy.evaluate(ws, { grantee: 'runner', ...req }, { authority: m.authority, risk: m.risk });
       const tx = this.t.uow(actor);
@@ -617,7 +658,7 @@ export class RunnerService {
         movePacket(tx, p, 'ready', 'packet.retry_requested', { maxAttempts: p.attemptsCount + 1, nextEligibleAt: null });
       } else if (action === 'resume') {
         if (p.state !== 'paused') fail('invalid_transition', `packet is ${p.state}`);
-        movePacket(tx, p, 'pending', 'packet.resumed');
+        await this.resumePacketTx(tx, p);
       } else await this.controlPacketTx(tx, p, action);
       await tx.commit(this.t.db);
     });
@@ -645,14 +686,20 @@ export class RunnerService {
   }
 
   async unpauseMissionTx(tx: UnitOfWork, ws: string, missionId: string): Promise<void> {
-    for (const p of await this.t.repo.packets(ws, missionId)) {
-      if (p.state !== 'paused') continue;
-      const a = p.currentAttemptId ? await this.t.repo.attempt(ws, p.currentAttemptId) : null;
-      if (a?.control === 'pause' && ['leased', 'running'].includes(a.state)) {
-        tx.save('attempt', SPECS.attempt, { ...a, control: null }, 'attempt.unpaused', { missionId });
-        movePacket(tx, p, 'recovering', 'packet.resumed', { holdReason: 'waiting for the runner to resume' });
-      } else movePacket(tx, p, 'pending', 'packet.resumed');
-    }
+    for (const p of await this.t.repo.packets(ws, missionId)) if (p.state === 'paused') await this.resumePacketTx(tx, p);
+  }
+
+  /**
+   * Resume a paused packet. If its attempt is still alive (the runner has not yet
+   * acted on the pause), keep that attempt: clear the pause and let its next
+   * heartbeat resume it. Otherwise the packet goes back through dispatch.
+   */
+  private async resumePacketTx(tx: UnitOfWork, p: Packet): Promise<void> {
+    const a = p.currentAttemptId ? await this.t.repo.attempt(p.workspaceId, p.currentAttemptId) : null;
+    if (a?.control === 'pause' && ['leased', 'running', 'lost'].includes(a.state)) {
+      tx.save('attempt', SPECS.attempt, { ...a, control: null }, 'attempt.unpaused', { missionId: p.missionId });
+      movePacket(tx, p, 'recovering', 'packet.resumed', { holdReason: 'waiting for the runner to resume' });
+    } else movePacket(tx, p, 'pending', 'packet.resumed');
   }
 
   /** Preview who could take a mission's ready work, and why others cannot. */

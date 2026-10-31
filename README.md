@@ -15,7 +15,7 @@ Missions outlive tools, agents, sessions, machines, models and issue trackers. T
 
 ```sh
 pnpm install
-pnpm check        # typecheck + 65 contract tests
+pnpm check        # typecheck + 77 contract tests
 pnpm smoke        # real binaries end to end on localhost
 
 node bin/tower.ts init --workspace "My Tower" --owner "Me"   # prints the owner token once

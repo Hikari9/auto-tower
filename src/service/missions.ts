@@ -1,7 +1,7 @@
 import { execScopeFor } from '../domain/broker.ts';
 import { fail } from '../domain/errors.ts';
 import { assertMissionTransition, depsSatisfied, deriveActivity, workComplete } from '../domain/lifecycle.ts';
-import { envelopeCovers, isSensitive } from '../domain/policy.ts';
+import { envelopeCovers, mayMatchSensitive } from '../domain/policy.ts';
 import { RISK_ORDER } from '../domain/types.ts';
 import type { Actor, AuthorityEnvelope, DodItem, Mission, MissionState, NewPacketInput, Packet, Risk } from '../domain/types.ts';
 import { SPECS } from '../store/codec.ts';
@@ -67,7 +67,7 @@ export class MissionService {
       resources: dedupe(input.authority?.resources ?? []),
     };
     if (actor.principal.kind !== 'human') {
-      const sensitive = authority.actions.filter(isSensitive);
+      const sensitive = authority.actions.filter(mayMatchSensitive);
       if (sensitive.length) fail('policy_denied', `only a human can put sensitive actions in a mission envelope: ${sensitive.join(', ')}`);
     }
     if (input.parentId) await this.t.repo.mission(ws, input.parentId);
@@ -341,7 +341,7 @@ export class MissionService {
         });
       }
       // New work reopens a mission that was waiting on verification.
-      if (['verifying', 'needs_attention'].includes(mission.state)) {
+      if (['verifying', 'reconciling', 'needs_attention'].includes(mission.state)) {
         mission = tx.save('mission', SPECS.mission, { ...mission, state: 'active' as const, verification: null }, 'mission.reopened_for_work', { missionId });
       }
       const packet = tx.save('packet', SPECS.packet, this.buildPacket(mission, input, 'planned'), 'packet.created', { missionId, payload: { title: input.title, origin: 'planned' } });

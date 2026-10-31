@@ -1,7 +1,7 @@
 import { ProviderError, type IssueProvider, type IssueSnapshot, type ProviderContext } from '../adapters/issues/contract.ts';
 import { normalizeIssueUrl, untrustedText } from '../adapters/issues/url.ts';
 import { fail, TowerError } from '../domain/errors.ts';
-import { linksReconciled } from '../domain/lifecycle.ts';
+import { linksReconciled, workComplete } from '../domain/lifecycle.ts';
 import type { Actor, Blocker, Discrepancy, IssueLink, LinkRole, Mission, PolicyEvaluation } from '../domain/types.ts';
 import { SPECS } from '../store/codec.ts';
 import type { Integration } from '../store/repo.ts';
@@ -93,14 +93,9 @@ export class IssueService {
     requireScope(actor, 'decisions:answer');
     const ws = actor.principal.workspaceId;
     const l = await this.t.repo.link(ws, linkId);
-    const tx = this.t.uow(actor);
-    const saved = tx.save('link', SPECS.link, { ...l, observedState: state, observedAt: tx.now, observedSource: `human:${actor.principal.id}` }, 'link.attested', {
-      missionId: l.missionId,
-      payload: { state, note },
-    });
-    await tx.commit(this.t.db);
+    await this.applyObservation(ws, l.id, state, `human:${actor.principal.id}`, undefined, actor, note);
     await this.t.missions.refresh(ws, l.missionId);
-    return saved;
+    return this.t.repo.link(ws, linkId);
   }
 
   /** Approved exemption: the mission may complete while this required issue stays open. */
@@ -184,11 +179,19 @@ export class IssueService {
    * after completion moves the mission to needs_attention with a discrepancy;
    * the historical completion event stays in the log.
    */
-  async applyObservation(ws: string, linkId: string, state: 'open' | 'closed' | 'deleted' | 'transferred', source: string, snap?: IssueSnapshot): Promise<void> {
+  async applyObservation(
+    ws: string,
+    linkId: string,
+    state: 'open' | 'closed' | 'deleted' | 'transferred',
+    source: string,
+    snap?: IssueSnapshot,
+    actor: Actor = this.t.systemActor(ws),
+    note?: string,
+  ): Promise<void> {
     await this.t.retrying(async () => {
       const l = await this.t.repo.link(ws, linkId);
       const m = await this.t.repo.mission(ws, l.missionId);
-      const tx = this.t.uow(this.t.systemActor(ws));
+      const tx = this.t.uow(actor);
       const observed = state === 'closed' ? 'closed' : state === 'open' ? 'open' : 'unknown';
       const changed = observed !== l.observedState;
       tx.save(
@@ -203,8 +206,8 @@ export class IssueService {
           errorCount: 0,
           ...(snap ? { titleSnapshot: untrustedText(snap.title, 300) } : {}),
         },
-        changed ? 'link.state_changed' : 'link.observed',
-        { missionId: l.missionId, payload: { from: l.observedState, to: observed, source, raw: state } },
+        actor.principal.kind === 'human' ? 'link.attested' : changed ? 'link.state_changed' : 'link.observed',
+        { missionId: l.missionId, payload: { from: l.observedState, to: observed, source, raw: state, ...(note ? { note } : {}) } },
       );
       const regressed = l.role === 'required' && !l.exemption && observed !== 'closed' && (l.observedState === 'closed' || state === 'deleted' || state === 'transferred');
       if (regressed && m.state === 'completed') {
@@ -265,13 +268,19 @@ export class IssueService {
       const m = await this.t.repo.mission(ws, missionId);
       if (m.state !== 'reconciling') return m;
       const links = await this.t.repo.links(ws, missionId);
+      const work = workComplete(await this.t.repo.packets(ws, missionId), await this.t.repo.children(ws, missionId));
       const check = linksReconciled(links);
       const tx = this.t.uow(this.t.systemActor(ws));
-      if (check.ok) {
+      if (check.ok && work.ok) {
+        // Guard every required link at the version we judged: a concurrent reopen makes this commit conflict.
+        for (const l of links.filter((x) => x.role === 'required')) tx.save('link', SPECS.link, l, 'link.confirmed_for_completion', { missionId, payload: { state: l.observedState, exempt: Boolean(l.exemption) } });
         tx.save('mission', SPECS.mission, { ...m, state: 'completed' as const, activity: 'done' as const, blockers: [], completedAt: tx.now }, 'mission.completed', {
           missionId,
           payload: { verification: m.verification, links: links.map((l) => ({ url: l.url, role: l.role, state: l.observedState, exempt: Boolean(l.exemption) })) },
         });
+      } else if (!work.ok) {
+        // Work was added while reconciling: go back and finish it before completing.
+        tx.save('mission', SPECS.mission, { ...m, state: 'active' as const, verification: null }, 'mission.reopened_for_work', { missionId, payload: { missing: work.missing } });
       } else {
         const errored = links.filter((l) => l.role === 'required' && l.errorCount >= this.t.config.reconcileFailureLimit);
         if (failures > 0 && errored.length) {

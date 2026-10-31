@@ -28,6 +28,9 @@ export interface TowerConfig {
   reconcileFailureLimit: number;
 }
 
+/** Marker stored while a keyed request is running. */
+const PENDING = '__auto_tower_pending__';
+
 export const DEFAULT_CONFIG: TowerConfig = {
   leaseMs: 90_000,
   recoveryMs: 30 * 60_000,
@@ -117,25 +120,37 @@ export class Tower {
   async idempotent<T>(actor: Actor, key: string | undefined, request: unknown, fn: () => Promise<T>): Promise<T> {
     if (!key) return fn();
     const ws = actor.principal.workspaceId;
+    const pid = actor.principal.id;
     const hash = await sha256Hex(JSON.stringify(request ?? null));
-    const prior = await this.repo.idempotent(ws, actor.principal.id, key);
-    if (prior) {
+    const replay = (prior: { requestHash: string; response: unknown }): T => {
       if (prior.requestHash !== hash) fail('idempotency_mismatch', 'idempotency key reused for a different request');
+      if (prior.response === PENDING) fail('conflict', 'a request with this idempotency key is still in progress; retry shortly');
       return prior.response as T;
-    }
-    const result = await fn();
+    };
+    const prior = await this.repo.idempotent(ws, pid, key);
+    if (prior) return replay(prior);
+    // Reserve the key first so a concurrent duplicate cannot run the command too.
     try {
       await this.db.batch([
-        {
-          sql: 'INSERT INTO idempotency (workspace_id, principal_id, key, request_hash, response_json, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-          params: [ws, actor.principal.id, key, hash, JSON.stringify(result ?? null), this.now()],
-        },
+        { sql: 'INSERT INTO idempotency (workspace_id, principal_id, key, request_hash, response_json, created_at) VALUES (?, ?, ?, ?, ?, ?)', params: [ws, pid, key, hash, JSON.stringify(PENDING), this.now()] },
       ]);
     } catch (err) {
-      // A concurrent duplicate won the race; both produced the same business effect
-      // only if the command itself is idempotent, which every caller guarantees by state checks.
       if (!(err instanceof TowerError && err.code === 'conflict')) throw err;
+      const raced = await this.repo.idempotent(ws, pid, key);
+      if (raced) return replay(raced);
+      throw err;
     }
+    let result: T;
+    try {
+      result = await fn();
+    } catch (err) {
+      // Failed commands leave no effect, so release the key for a genuine retry.
+      await this.db.batch([{ sql: 'DELETE FROM idempotency WHERE workspace_id = ? AND principal_id = ? AND key = ?', params: [ws, pid, key] }]).catch(() => undefined);
+      throw err;
+    }
+    await this.db.batch([
+      { sql: 'UPDATE idempotency SET response_json = ? WHERE workspace_id = ? AND principal_id = ? AND key = ?', params: [JSON.stringify(result ?? null), ws, pid, key] },
+    ]);
     return result;
   }
 

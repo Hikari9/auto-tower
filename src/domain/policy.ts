@@ -25,6 +25,25 @@ export function envelopeCovers(env: AuthorityEnvelope, action: string, resource:
   return env.actions.some((a) => matchPattern(a, action)) && env.resources.some((r) => matchPattern(r, resource));
 }
 
+/** True when a pattern's literal prefix already names a sensitive action ("deploy.prod", "spend.*"). */
+export function namesSensitive(pattern: string): boolean {
+  return isSensitive(pattern.split('*')[0]!.replace(/[.:]$/, ''));
+}
+
+/** True when a pattern could match some sensitive action ("*", "deploy.*", "spe*"). */
+export function mayMatchSensitive(pattern: string): boolean {
+  return SENSITIVE_PREFIXES.some((p) => matchPattern(pattern, p) || matchPattern(pattern, `${p}.x`) || matchPattern(pattern, `${p}:x`) || isSensitive(pattern.split('*')[0]!));
+}
+
+/**
+ * Envelope authorization. A sensitive action is covered only by an envelope entry
+ * that names it explicitly; a wildcard such as "*" or "deploy.*" never reaches it.
+ */
+export function envelopeAuthorizes(env: AuthorityEnvelope, action: string, resource: string): boolean {
+  const sensitive = isSensitive(action);
+  return env.actions.some((a) => matchPattern(a, action) && (!sensitive || namesSensitive(a))) && env.resources.some((r) => matchPattern(r, resource));
+}
+
 /** True when `inner` adds no action or resource beyond `outer`. */
 export function envelopeWithin(inner: AuthorityEnvelope, outer: AuthorityEnvelope): boolean {
   return (
@@ -76,7 +95,7 @@ export function evaluatePolicy(req: PolicyRequest, ctx: EvaluationContext): Poli
   const deny = live.find((r) => r.effect === 'deny' && ruleCovers(r, req));
   if (deny) return { ...base, allowed: false, basis: 'deny_rule', ruleId: deny.id, reason: `denied by rule ${deny.id}` };
 
-  if (ctx.envelope && RISK_ORDER[req.risk] <= RISK_ORDER[ctx.envelope.risk] && envelopeCovers(ctx.envelope.authority, req.action, req.resource)) {
+  if (ctx.envelope && RISK_ORDER[req.risk] <= RISK_ORDER[ctx.envelope.risk] && envelopeAuthorizes(ctx.envelope.authority, req.action, req.resource)) {
     return { ...base, allowed: true, basis: 'envelope', reason: 'within the mission authority envelope' };
   }
 

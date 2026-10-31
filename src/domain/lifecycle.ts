@@ -28,7 +28,7 @@ export const MISSION_OPEN_STATES: MissionState[] = ['active', 'verifying', 'reco
 
 const PACKET_EDGES: Record<PacketState, PacketState[]> = {
   pending: ['ready', 'held', 'paused', 'cancelled'],
-  ready: ['leased', 'pending', 'held', 'paused', 'cancelled'],
+  ready: ['leased', 'running', 'pending', 'held', 'paused', 'cancelled'],
   leased: ['running', 'recovering', 'ready', 'failed', 'review_pending', 'done', 'held', 'paused', 'cancelled'],
   running: ['recovering', 'ready', 'failed', 'review_pending', 'done', 'held', 'paused', 'cancelled', 'running'],
   recovering: ['running', 'ready', 'held', 'failed', 'review_pending', 'done', 'paused', 'cancelled'],

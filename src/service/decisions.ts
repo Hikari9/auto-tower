@@ -1,5 +1,5 @@
 import { fail, TowerError } from '../domain/errors.ts';
-import type { Actor, Alternative, Decision, Mission, OnApprove, Packet, RequiredAuthority } from '../domain/types.ts';
+import type { Actor, Alternative, Decision, Mission, OnApprove, Packet, PolicyRule, RequiredAuthority } from '../domain/types.ts';
 import { SPECS } from '../store/codec.ts';
 import type { UnitOfWork } from '../store/uow.ts';
 import { requireScope } from './auth.ts';
@@ -161,8 +161,11 @@ export class DecisionService {
     const tx = this.t.uow(actor);
     let ruleRef: Decision['ruleRef'] = null;
     let policy;
+    let matchedRule: PolicyRule | undefined;
     if (!isHuman && input.approved) {
-      policy = await this.t.policy.evaluate(ws, { grantee: 'chief', ...d.requiredAuthority, missionId: d.missionId });
+      const auth = await this.t.policy.authorize(ws, { grantee: 'chief', ...d.requiredAuthority, missionId: d.missionId });
+      policy = auth.evaluation;
+      matchedRule = auth.rule;
       if (!policy.allowed || policy.basis !== 'rule' || !policy.ruleId) {
         tx.save('decision', SPECS.decision, { ...d, audience: 'human' as const }, 'decision.escalated', {
           missionId: d.missionId,
@@ -173,7 +176,7 @@ export class DecisionService {
         return { escalated: true, policy };
       }
       ruleRef = { ruleId: policy.ruleId, policyVersion: policy.policyVersion };
-      this.t.policy.recordUseTx(tx, await this.t.repo.rule(ws, policy.ruleId), { decisionId: d.id });
+      this.t.policy.recordUseTx(tx, matchedRule!, { decisionId: d.id });
     }
 
     const answer = { approved: input.approved, ...(input.alternativeId ? { alternativeId: input.alternativeId } : {}), ...(input.note ? { note: input.note } : {}) };
@@ -209,8 +212,11 @@ export class DecisionService {
       }
       const attempt = p.currentAttemptId ? await this.t.repo.attempt(ws, p.currentAttemptId) : null;
       const live = attempt && ['leased', 'running'].includes(attempt.state);
-      // A declined recovery keeps waiting for the original runner; anything else resumes.
-      const next = live ? 'running' : d.category === 'recovery' && !input.approved ? 'recovering' : 'ready';
+      const lost = attempt?.state === 'lost';
+      // Only an approved recovery decision may restart lost work elsewhere. Any other answer
+      // leaves lost work recovering: it waits for its runner or a portable checkpoint.
+      const restart = d.category === 'recovery' && input.approved;
+      const next = live ? 'running' : restart || (!lost && d.category !== 'recovery') ? 'ready' : 'recovering';
       tx.save('packet', SPECS.packet, { ...p, state: next as Packet['state'], holdReason: null, blockedBy: [] }, 'packet.released', {
         missionId: p.missionId,
         payload: { decisionId: d.id, approved: input.approved },

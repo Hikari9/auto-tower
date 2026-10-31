@@ -40,3 +40,6 @@ Mission and decision history, the policy store (grants, denies, versions), runne
 - The MCP confirmation token is a UX guard that makes a model show a preview before material changes. It is not a security boundary: the token holder can compute the confirmation.
 - Rate limiting is per Worker isolate. A distributed limiter (Durable Object) is deferred until load justifies it.
 - Backups contain token hashes; protect them like credentials.
+- Lease renewal is an unversioned projection update, so a full-row attempt save that read an older lease can shorten it by up to one lease interval. The worst case is an early `lost`, which the original runner recovers on its next heartbeat.
+- `scope_locks` is keyed by execution scope only. v1 allows a single workspace per database; add `workspace_id` to the key before enabling multiple workspaces.
+- Independent review (2026-10-31) found 11 defects in the first build (risk downgrade, wildcard envelopes, quarantine race, completion write-skew, stuck recovery, idempotency race and others). All are fixed and pinned by `test/review-regressions.test.ts`.
