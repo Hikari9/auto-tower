@@ -1,4 +1,5 @@
-import { createApp } from '../api/app.js';
+import { createApp, ROUTES } from '../api/app.js';
+import { dashboardRoutes } from '../api/routes/dashboard.js';
 import { applyMigrations } from '../storage/migrate.js';
 import {
   defaultMigrationsDir,
@@ -19,7 +20,7 @@ export function startHost(
     db,
     readMigrationFiles(defaultMigrationsDir()),
   );
-  const app = createApp({ db });
+  const app = createApp({ db }, [...ROUTES, ...dashboardRoutes]);
   return listenLoopback(app.fetch, port, (info) => {
     log(
       `Tower listening on http://${LOOPBACK_HOST}:${info.port} (db ${dbPath}, migrations applied now: ${applied.length})`,

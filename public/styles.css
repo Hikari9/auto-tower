@@ -1,0 +1,367 @@
+/* Control Tower dashboard. Mobile first; the layout widens at 720px. */
+
+:root {
+  --ink: #1d2433;
+  --muted: #4b5566;
+  --paper: #f7f8fb;
+  --panel: #ffffff;
+  --line: #d6dbe5;
+  --accent: #2456a6;
+  --focus: #ffb000;
+  --danger: #9b1c1c;
+  color-scheme: light;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  line-height: 1.45;
+}
+
+a {
+  color: var(--accent);
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.skip {
+  position: absolute;
+  left: -999px;
+}
+
+.skip:focus {
+  left: 1rem;
+  top: 1rem;
+  background: var(--panel);
+  padding: 0.5rem;
+}
+
+.site-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  background: var(--ink);
+  color: #fff;
+}
+
+.site-header a {
+  color: #fff;
+}
+
+.brand {
+  display: flex;
+  flex-direction: column;
+}
+
+.brand-tagline {
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
+
+.nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.nav a {
+  display: inline-block;
+  padding: 0.35rem 0.6rem;
+  border-radius: 4px;
+  text-decoration: none;
+}
+
+.nav a[aria-current="page"] {
+  background: #fff;
+  color: var(--ink);
+}
+
+main {
+  padding: 1rem;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+h1 {
+  font-size: 1.5rem;
+  margin: 0.5rem 0 0.75rem;
+}
+
+h2 {
+  font-size: 1.1rem;
+  margin: 0 0 0.5rem;
+}
+
+.tagline,
+.meta {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.panel,
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.9rem;
+  margin-bottom: 1rem;
+}
+
+.card {
+  list-style: none;
+}
+
+.cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.blocked {
+  border-left: 4px solid var(--danger);
+}
+
+/* Tones carry a text label as well as color, so meaning survives without color. */
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.tone-neutral {
+  color: #39414f;
+  background: #eceff4;
+}
+
+.tone-active {
+  color: #1b4f9c;
+  background: #e4edfb;
+}
+
+.tone-waiting {
+  color: #6b4700;
+  background: #fff4d6;
+  border-style: dashed;
+}
+
+.tone-blocked {
+  color: #7a2b00;
+  background: #ffe9dc;
+}
+
+.tone-verify {
+  color: #5c3d8f;
+  background: #efe8fb;
+  border-style: dotted;
+}
+
+.tone-done {
+  color: #14532d;
+  background: #dcf5e4;
+}
+
+.tone-alert {
+  color: #7f1d1d;
+  background: #fde2e2;
+  font-weight: 600;
+}
+
+.tone-muted {
+  color: #5b6370;
+  background: #f1f2f4;
+}
+
+/* Self-reported evidence is hollow and dashed; Tower-verified evidence is solid. */
+[data-evidence="self-reported"] {
+  border-style: dashed;
+  background: transparent;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  font-size: 0.92rem;
+}
+
+caption {
+  text-align: left;
+  font-weight: 600;
+  padding: 0.4rem 0;
+}
+
+th,
+td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.5rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.table-wrap {
+  overflow-x: auto;
+  margin-bottom: 1rem;
+}
+
+.empty {
+  color: var(--muted);
+}
+
+.error {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+button,
+input[type="submit"] {
+  font: inherit;
+  padding: 0.5rem 0.9rem;
+  min-height: 2.5rem;
+  border-radius: 4px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+button.secondary {
+  background: #fff;
+  color: var(--accent);
+}
+
+button.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
+
+.confirm {
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  padding: 0.6rem;
+  margin: 0.5rem 0;
+}
+
+.confirm-question {
+  font-weight: 600;
+  margin: 0 0 0.25rem;
+}
+
+input[type="password"],
+input[type="text"],
+textarea {
+  display: block;
+  width: 100%;
+  font: inherit;
+  padding: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  margin-bottom: 0.5rem;
+}
+
+label {
+  font-weight: 600;
+}
+
+fieldset {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  margin: 0.5rem 0;
+}
+
+.radio {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  padding: 0.2rem 0;
+}
+
+.radio label {
+  font-weight: 400;
+}
+
+.facts {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.facts dt {
+  font-weight: 600;
+}
+
+.facts dd {
+  margin: 0 0 0.25rem;
+}
+
+.checklist,
+.timeline {
+  padding-left: 1.2rem;
+}
+
+.checklist {
+  list-style: none;
+  padding-left: 0;
+}
+
+.check {
+  font-family: ui-monospace, Menlo, monospace;
+}
+
+.summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  list-style: none;
+  padding: 0;
+}
+
+@media (min-width: 720px) {
+  main {
+    padding: 1.5rem;
+  }
+
+  .facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .site-header {
+    flex-wrap: nowrap;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none;
+    animation: none;
+  }
+}
