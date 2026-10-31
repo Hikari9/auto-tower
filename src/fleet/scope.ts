@@ -19,7 +19,9 @@ export interface PacketRequirements {
   invalid: string | undefined;
 }
 
-const SEGMENT = /^[a-z0-9][a-z0-9._-]*$/;
+// A segment may start with a dot (`.github`) but not end with one, which also rules out `.` and
+// `..`, and a name that ends in a dot is the same directory on filesystems that drop it.
+const SEGMENT = /^[a-z0-9._-]*[a-z0-9_-]$/;
 
 /**
  * `Repo`, `repo/` and `repo.git` are one repository. Returns undefined for a name that is not a
@@ -34,6 +36,7 @@ function normalise(name: string): string | undefined {
   const last = segments.length - 1;
   segments[last] = (segments[last] ?? '').replace(/\.git$/, '');
   if (
+    segments.join('/').length > 128 ||
     segments.length > 16 ||
     segments.some((segment) => segment === '..' || !SEGMENT.test(segment))
   ) {
@@ -42,11 +45,19 @@ function normalise(name: string): string | undefined {
   return segments.join('/');
 }
 
-/** The part of an entry after `prefix`, matching the prefix whatever its case. */
-function after(entry: string, prefix: string): string | undefined {
-  return entry.slice(0, prefix.length).toLowerCase() === prefix
-    ? entry.slice(prefix.length)
-    : undefined;
+const PREFIXED = /^\s*(cap|repo|worktree)\s*:([\s\S]*)$/i;
+
+/** The kind and value of a `cap:`, `repo:` or `worktree:` entry, whatever its case or spacing. */
+function prefixed(
+  entry: string,
+): { kind: 'cap' | 'repo' | 'worktree'; value: string } | undefined {
+  const match = PREFIXED.exec(entry);
+  return match === null
+    ? undefined
+    : {
+        kind: (match[1] ?? '').toLowerCase() as 'cap' | 'repo' | 'worktree',
+        value: match[2] ?? '',
+      };
 }
 
 export function requirementsOf(
@@ -59,23 +70,20 @@ export function requirementsOf(
   const worktrees = new Set<string>();
   let invalid: string | undefined;
   for (const entry of packet.scope) {
-    const capability = after(entry, 'cap:');
-    if (capability !== undefined) {
-      capabilities.push(capability);
+    const found = prefixed(entry);
+    if (found?.kind === 'cap') {
+      capabilities.push(found.value);
       continue;
     }
     scopes.push(entry);
-    const repo = after(entry, 'repo:');
-    const worktree = after(entry, 'worktree:');
-    const name = repo ?? worktree;
-    if (name === undefined) {
+    if (found === undefined) {
       continue;
     }
-    const plain = normalise(name);
+    const plain = normalise(found.value);
     if (plain === undefined) {
       invalid = 'a repo or worktree name is not a plain name';
     } else {
-      (repo === undefined ? worktrees : repos).add(plain);
+      (found.kind === 'repo' ? repos : worktrees).add(plain);
     }
   }
   if (invalid === undefined) {

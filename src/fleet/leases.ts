@@ -1369,28 +1369,37 @@ export function reconcile(
       checkpoint:
         latestCheckpoint(tx, runner.workspaceId, lease.attemptId) ?? null,
     };
-    const answer = (current: Lease): ReconcileResult => {
-      const mission = missionsIn(ctx, tx).getMission(
-        runner.workspaceId,
-        current.missionId,
-      );
-      const found =
-        mission === undefined ? undefined : findPacket(mission, current);
-      // The work goes back only to a runner that could be sent it on a claim.
-      const withheld =
-        mission === undefined || found === undefined
-          ? 'the attempt is no longer part of its mission'
-          : withholdReason(ctx, tx, runner, mission, found.packet);
-      return {
-        lease: viewOf(tx, current, runner),
-        assignment:
-          mission === undefined || found === undefined || withheld !== undefined
-            ? null
-            : assignmentOf(ctx, tx, runner, current, mission, found.packet),
-        withheld: withheld ?? null,
-        resume,
-      };
-    };
+    // Whether the runner could be sent this work on a claim, decided before it is given anything.
+    const mission = missionsIn(ctx, tx).getMission(
+      runner.workspaceId,
+      lease.missionId,
+    );
+    const found =
+      mission === undefined ? undefined : findPacket(mission, lease);
+    const withheld =
+      mission === undefined || found === undefined
+        ? 'the attempt is no longer part of its mission'
+        : withholdReason(ctx, tx, runner, mission, found.packet);
+    const answer = (current: Lease): ReconcileResult => ({
+      lease: viewOf(tx, current, runner),
+      assignment:
+        mission === undefined || found === undefined || withheld !== undefined
+          ? null
+          : assignmentOf(ctx, tx, runner, current, mission, found.packet),
+      withheld: withheld ?? null,
+      resume,
+    });
+    // A runner that may not have the work gets no fence either: the fence is the credential. The
+    // lease stays in recovery, so it can still move to a runner that is eligible.
+    if (withheld !== undefined && lease.status === 'recovering') {
+      recordAudit(tx, runner.workspaceId, ctx.now().toISOString(), {
+        kind: 'reconcile.withheld',
+        runnerId: runner.id,
+        leaseId: lease.id,
+        detail: { reason: withheld, presentedFence: input.fence },
+      });
+      return answer(lease);
+    }
     // A retry whose answer was lost presents the fence this reconcile replaced.
     if (lease.status === 'held' && lease.reconciledFrom === input.fence) {
       return answer(lease);

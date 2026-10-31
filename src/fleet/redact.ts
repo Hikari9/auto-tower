@@ -7,7 +7,7 @@ const SECRET_WORDS =
   'secret|token|passw(?:or)?d|passwd|pwd|passphrase|api[_-]?key|private[_-]?key|credential';
 
 // An optional closing quote of the name (JSON text may escape it), then the separator.
-const KEY_SEPARATOR = '(?:\\\\?["\'])?\\s{0,20}[:=]\\s{0,20}';
+const KEY_SEPARATOR = '(?:\\\\?["\'])?\\s{0,20}(?:=>|[:=])\\s{0,20}';
 
 /**
  * A quoted value, whole, with escaped quotes inside it. A quote that never closes takes the rest
@@ -17,8 +17,12 @@ const KEY_SEPARATOR = '(?:\\\\?["\'])?\\s{0,20}[:=]\\s{0,20}';
 const QUOTED =
   '\\\\?"(?:[^"\\\\]|\\\\.)*"|\\\\?\'(?:[^\'\\\\]|\\\\.)*\'|\\\\?"[\\s\\S]*|\\\\?\'[\\s\\S]*';
 
-/** An unquoted value. It has no length cap, since a cap would leave the tail of a long secret stored. */
-const BARE = '[^\\s"\',;\\\\]+';
+/**
+ * An unquoted value, up to whitespace or a quote. It has no length cap, since a cap would leave the
+ * tail of a long secret stored, and it takes commas, semicolons and backslashes, which real
+ * passwords contain. A backslash directly before a quote ends it, so escaped JSON text stops there.
+ */
+const BARE = '(?:[^\\s"\'\\\\]|\\\\(?!["\']))+';
 
 /**
  * Secret shapes scanned in every string Tower stores from a runner. Best effort: it catches
@@ -50,12 +54,17 @@ const PATTERNS: readonly RegExp[] = [
   // Signed-URL and query-string credentials.
   /[?&](?:sig|signature|x-amz-signature|x-amz-security-token|x-amz-credential|access_token|api_key|apikey|token)=[^&\s"']+/gi,
   // Credentials inside a URL.
-  /\b[a-z][a-z0-9+.-]{0,31}:\/\/[^\s/:@]{1,200}:[^\s/@]{1,200}@/gi,
+  /\b[a-z][a-z0-9+.-]{0,31}:\/\/[^\s/:@]{0,200}:[^\s/]{1,200}@/gi,
   // Bearer and Basic credentials. A Basic value must look like base64, so prose is left alone.
   /\bBearer[\s:]+[A-Za-z0-9._~+/=-]{12,}/gi,
-  /\bBasic\s+(?=[A-Za-z0-9+/]{0,200}[0-9+/=])[A-Za-z0-9+/]{8,}={0,2}/gi,
+  /\bBasic\s+[A-Za-z0-9+/]{16,}={0,2}/g,
   // An Authorization header: the whole value, scheme included, to the end of the line.
   new RegExp(`authorization${KEY_SEPARATOR}(?:${QUOTED}|[^\\n"']+)`, 'gi'),
+  // Cookie header lines, whole.
+  /\b(?:set-)?cookie\s{0,5}:[^\n]*/gi,
+  // Command-line flags that carry a secret, and curl's user:password.
+  /--(?:password|passwd|pass|token|secret|api-?key|auth-?token|access-?token|private-?key|credentials?)(?:[=\s]+)(?:"[^"]*"|'[^']*'|\S+)/gi,
+  /(?:^|\s)(?:-u|--user)[=\s]+[^\s:]{0,100}:\S+/g,
   // name = value or name: value, where the name says it is a secret.
   new RegExp(
     `(?:${SECRET_WORDS})[\\w.-]{0,40}${KEY_SEPARATOR}(?:${QUOTED}|${BARE})`,
