@@ -1,0 +1,7 @@
+# Cloudflare Workers entry for the Tower control plane.
+# Nothing here requires a Cloudflare login: `pnpm dev` runs the Node host.
+# The D1 binding and deploy steps are deferred; see DEFERRED.md.
+name = "auto-tower"
+main = "src/hosting/worker.ts"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat"]
