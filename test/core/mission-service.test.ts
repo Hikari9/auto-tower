@@ -12,7 +12,9 @@ import {
   VersionConflictError,
 } from '../../src/events/errors.js';
 import { createEventLog } from '../../src/events/event-log.js';
+import { createPolicyService } from '../../src/policy/service.js';
 import { TEST_WORKSPACE } from '../helpers/tower.js';
+import { ruleInput } from '../policy/helpers.js';
 import {
   createHarness,
   MissionDriver,
@@ -485,17 +487,206 @@ describe('work packets', () => {
     expect(() => m.authorize('pkt_nope')).toThrow(PacketNotFoundError);
   });
 
-  it('requires a chief of staff to cite a policy when authorizing', () => {
-    const h = createHarness();
-    const m = MissionDriver.create(h);
-    const a = m.addPacket('A');
+  describe('a chief of staff authorizing a packet', () => {
+    function setup(
+      scope: string[] = ['env:staging'],
+      risk = 'medium' as const,
+    ) {
+      const h = createHarness();
+      const m = MissionDriver.create(h, mission({ risk }));
+      m.go('ready');
+      m.state = h.core.missions.addPacket(h.ctx(), m.id, m.state.version, {
+        title: 'A',
+        instructions: '',
+        scope,
+        required: true,
+        dependsOn: [],
+      }).mission;
+      const id = m.state.packets[0]?.id as string;
+      const policy = createPolicyService({ db: h.db, clock: h.clock.now });
+      const rule = (overrides: Parameters<typeof ruleInput>[0] = {}) =>
+        policy.createRule(h.ctx(h.owner), ruleInput(overrides)).rule;
+      const unauthorized = () =>
+        expect(m.refresh().packets[0]?.authorization).toBeNull();
+      return { h, m, id, policy, rule, unauthorized };
+    }
 
-    expect(() => m.authorize(a, h.cos)).toThrow(/cite the policy/);
-    m.authorize(a, h.cos, ['policy:v2']);
+    it('must cite a policy rule', () => {
+      const { h, m, id, unauthorized } = setup();
+      expect(() => m.authorize(id, h.cos)).toThrow(/cite the policy/);
+      // A decision link is audit context. It is not a policy.
+      expect(() => m.authorize(id, h.cos, ['decision:dec_1@1'])).toThrow(
+        /cite the policy/,
+      );
+      unauthorized();
+    });
 
-    expect(m.state.packets[0]?.authorization).toMatchObject({
-      by: 'prn_cos',
-      policyRefs: ['policy:v2'],
+    it('is allowed under a current rule that covers the packet, and records the cited ref', () => {
+      const { h, m, id, rule } = setup();
+      const granted = rule();
+      const ref = `policy:v1:rule:${granted.id}@1`;
+      m.authorize(id, h.cos, [ref, 'decision:dec_1@1']);
+      expect(m.state.packets[0]?.authorization).toMatchObject({
+        by: 'prn_cos',
+        policyRefs: [ref, 'decision:dec_1@1'],
+      });
+    });
+
+    it.each([
+      ['a fabricated ref', 'policy:v1:rule:rul_fabricated@1'],
+      ['a bare label', 'policy:1'],
+      ['a ref that names no rule', 'policy:v1:no_matching_grant'],
+    ])('is refused for %s, and the packet stays unauthorized', (_name, ref) => {
+      const { h, m, id, rule, unauthorized } = setup();
+      rule();
+      expect(() => m.authorize(id, h.cos, [ref])).toThrow(
+        CommandNotAllowedError,
+      );
+      unauthorized();
+    });
+
+    it('is refused when one of several cited refs is fabricated', () => {
+      const { h, m, id, rule, unauthorized } = setup();
+      const granted = rule();
+      expect(() =>
+        m.authorize(id, h.cos, [
+          `policy:v1:rule:${granted.id}@1`,
+          'policy:v1:rule:rul_fabricated@1',
+        ]),
+      ).toThrow(CommandNotAllowedError);
+      unauthorized();
+    });
+
+    it('is refused once the rule is revoked, even with a second rule that would allow it', () => {
+      const { h, m, id, rule, policy, unauthorized } = setup();
+      const first = rule();
+      rule();
+      policy.revokeRule(h.ctx(h.owner), first.id, 1, 'test');
+      expect(() =>
+        m.authorize(id, h.cos, [`policy:v2:rule:${first.id}@2`]),
+      ).toThrow(/revoked/);
+      unauthorized();
+    });
+
+    it('is refused once the rule has expired', () => {
+      const { h, m, id, rule, unauthorized } = setup();
+      const granted = rule({
+        expiresAt: new Date(h.clock.now().getTime() + 1000).toISOString(),
+      });
+      h.clock.advance(2000);
+      expect(() =>
+        m.authorize(id, h.cos, [`policy:v1:rule:${granted.id}@1`]),
+      ).toThrow(/expired/);
+      unauthorized();
+    });
+
+    it('is refused for a version of the rule that is not current', () => {
+      const { h, m, id, rule, policy, unauthorized } = setup();
+      const granted = rule();
+      policy.amendRule(h.ctx(h.owner), granted.id, 1, { note: 'tightened' });
+      expect(() =>
+        m.authorize(id, h.cos, [`policy:v1:rule:${granted.id}@1`]),
+      ).toThrow(/does not name a current rule/);
+      unauthorized();
+      m.authorize(id, h.cos, [`policy:v2:rule:${granted.id}@2`]);
+    });
+
+    it('is refused when a deny rule covers the rule it cites', () => {
+      const { h, m, id, rule, unauthorized } = setup();
+      const granted = rule();
+      rule({ effect: 'deny', grantee: { kind: null, principalId: null } });
+      expect(() =>
+        m.authorize(id, h.cos, [`policy:v2:rule:${granted.id}@1`]),
+      ).toThrow(/denied by rule/);
+      unauthorized();
+    });
+
+    it('is refused when the cited rule is itself a deny rule', () => {
+      const { h, m, id, rule, unauthorized } = setup();
+      const deny = rule({
+        effect: 'deny',
+        grantee: { kind: null, principalId: null },
+      });
+      expect(() =>
+        m.authorize(id, h.cos, [`policy:v1:rule:${deny.id}@1`]),
+      ).toThrow(/names a deny rule/);
+      unauthorized();
+    });
+
+    it.each([
+      [
+        'held by another principal',
+        { grantee: { kind: null, principalId: 'prn_runner' } },
+      ],
+      [
+        'for a runner',
+        { grantee: { kind: 'runner' as const, principalId: null } },
+      ],
+      [
+        'for other missions',
+        { limits: { maxAmount: null, missionIds: ['msn_x'] } },
+      ],
+      ['capped below the mission risk', { maxRisk: 'low' as const }],
+      ['for another scope', { scope: 'env:production' }],
+      ['for a narrower scope than the packet', { scope: 'env:stag' }],
+    ])('is refused under a rule %s', (_name, overrides) => {
+      const { h, m, id, rule, unauthorized } = setup();
+      const granted = rule(overrides);
+      expect(() =>
+        m.authorize(id, h.cos, [`policy:v1:rule:${granted.id}@1`]),
+      ).toThrow(CommandNotAllowedError);
+      unauthorized();
+    });
+
+    it('is refused when a rule covers only part of what the packet declares', () => {
+      const { h, m, id, rule, unauthorized } = setup([
+        'env:staging',
+        'env:production',
+      ]);
+      const granted = rule();
+      expect(() =>
+        m.authorize(id, h.cos, [`policy:v1:rule:${granted.id}@1`]),
+      ).toThrow(/env:production/);
+      unauthorized();
+    });
+
+    it('is refused for a packet that declares no scope', () => {
+      const { h, m, id, rule, unauthorized } = setup([]);
+      const granted = rule({ scope: '*' });
+      expect(() =>
+        m.authorize(id, h.cos, [`policy:v1:rule:${granted.id}@1`]),
+      ).toThrow(/declares no scope/);
+      unauthorized();
+    });
+
+    it('checks the rule again on each call, so a revocation after a dry run still bites', () => {
+      const { h, m, id, rule, policy, unauthorized } = setup();
+      const granted = rule();
+      const dry = policy.authorize(
+        {
+          workspace: TEST_WORKSPACE,
+          principal: h.cos.id,
+          action: granted.action,
+          resource: granted.resource,
+          scope: 'env:staging',
+          risk: 'medium',
+        },
+        { escalate: true },
+      );
+      expect(dry.effect).toBe('allow');
+      policy.revokeRule(h.ctx(h.owner), granted.id, 1, 'test');
+      expect(() => m.authorize(id, h.cos, [dry.policyRef])).toThrow(
+        CommandNotAllowedError,
+      );
+      unauthorized();
+    });
+
+    it('does not apply to a human, who needs no citation', () => {
+      const { m, id } = setup();
+      m.authorize(id);
+      expect(m.state.packets[0]?.authorization).toMatchObject({
+        by: 'prn_owner',
+      });
     });
   });
 

@@ -640,20 +640,25 @@ describe('packets that declare nothing, and housekeeping names', () => {
     const ask = (action: string, extra: object = {}) =>
       h.authority.policy.authorize({
         workspace: 'ws_test',
-        principal: h.runner.id,
+        principal: h.owner.id,
         action,
-        resource: 'db:prod',
+        resource: 'files:tmp',
         scope: 'prod',
         risk: 'high',
         ...extra,
       });
     expect(ask('cleanup.tmp').code).toBe('safe_cleanup');
-    expect(ask('cleanup.drop-prod-db').effect).toBe('deny');
+    expect(ask('cleanup.drop').effect).toBe('deny');
     expect(ask('cleanup.spend.refund', { amount: 1_000_000 }).effect).toBe(
       'deny',
     );
     expect(ask('cleanup.spend.refund').code).toBe('amount_required');
     expect(ask('cleanup.deploy.prod').effect).toBe('deny');
+    expect(ask('cleanup.issue.close').effect).toBe('deny');
+    // The resource decides too: grantless cleanup never touches a destructive one.
+    expect(ask('cleanup.tmp', { resource: 'db:prod' }).code).toBe(
+      'no_matching_grant',
+    );
   });
 
   it('ignores branches that already resumed when it checks a Chief of Staff answer', () => {

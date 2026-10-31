@@ -12,7 +12,9 @@ import { applyEvent, replay } from '../../src/core/reducer.js';
 import type { MissionState } from '../../src/core/types.js';
 import { VersionConflictError } from '../../src/events/errors.js';
 import { createEventLog } from '../../src/events/event-log.js';
+import { createPolicyService } from '../../src/policy/service.js';
 import { TEST_WORKSPACE } from '../helpers/tower.js';
+import { ruleInput } from '../policy/helpers.js';
 import {
   createHarness,
   type Harness,
@@ -394,8 +396,20 @@ describe('refs are recorded on events and state', () => {
     h.pool.online = ['prn_runner'];
     const m = MissionDriver.create(h, mission({ policyRefs: ['policy:v1'] }));
     m.go('ready');
-    const a = m.addPacket('A');
-    m.authorize(a, h.cos, ['policy:v2']);
+    m.state = h.core.missions.addPacket(h.ctx(), m.id, m.state.version, {
+      title: 'A',
+      instructions: '',
+      scope: ['env:staging'],
+      required: true,
+      dependsOn: [],
+    }).mission;
+    const a = m.state.packets[0]?.id as string;
+    const { rule } = createPolicyService({
+      db: h.db,
+      clock: h.clock.now,
+    }).createRule(h.ctx(h.owner), ruleInput());
+    const ref = `policy:v1:rule:${rule.id}@1`;
+    m.authorize(a, h.cos, [ref]);
     m.tick();
     m.runAttempt(a);
     m.verifyPacket(a);
@@ -413,7 +427,7 @@ describe('refs are recorded on events and state', () => {
       correlationId: expect.any(String),
     });
     expect(of('packet.authorized')).toMatchObject({
-      policyRefs: ['policy:v2'],
+      policyRefs: [ref],
       actorId: 'prn_cos',
     });
     expect(of('packet.verified')?.evidenceRefs).toEqual(['ev:packet']);
@@ -425,7 +439,7 @@ describe('refs are recorded on events and state', () => {
       outcomeVerification: { evidenceRefs: ['ev:outcome'] },
     });
     expect(m.state.packets[0]).toMatchObject({
-      authorization: { by: 'prn_cos', policyRefs: ['policy:v2'] },
+      authorization: { by: 'prn_cos', policyRefs: [ref] },
       verification: { evidenceRefs: ['ev:packet'] },
     });
   });

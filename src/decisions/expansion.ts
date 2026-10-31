@@ -207,6 +207,7 @@ export function createExpansionRouter(
           const result = createMissionService({
             db: tx,
             guards: deps.guards,
+            ...(deps.clock === undefined ? {} : { clock: deps.clock }),
           }).authorizePacket(
             ctx,
             request.missionId,

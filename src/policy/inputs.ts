@@ -81,6 +81,7 @@ export interface EvaluationQuery {
   risk: Risk;
   amount: number | undefined;
   missionId: string | undefined;
+  attemptId: string | undefined;
   principalId: string | undefined;
 }
 
@@ -334,6 +335,7 @@ export function parseEvaluation(body: unknown): EvaluationQuery {
     risk: r.enum('risk', RISKS),
     amount: readAmount(r, 'amount'),
     missionId: r.optString('missionId', ID),
+    attemptId: r.optString('attemptId', ID),
     principalId: r.optString('principalId', ID),
   };
   if (!ACTION_PATTERN.test(input.action)) {
