@@ -35,6 +35,32 @@ BEGIN
   SELECT RAISE(ABORT, 'halt history is append-only');
 END;
 
+-- Credential revocations made through the ops tool: which token or principal, by whom, why, when.
+-- A revoked token and a disabled principal are visible on their own rows. This is the record of who
+-- did it and why, which those rows do not hold. Append only.
+CREATE TABLE ops_revocations (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  kind TEXT NOT NULL CHECK (kind IN ('token', 'principal')),
+  target_id TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  reason TEXT,
+  recorded_at TEXT NOT NULL,
+  FOREIGN KEY (actor_id, workspace_id) REFERENCES principals (id, workspace_id)
+);
+
+CREATE INDEX ops_revocations_ws_idx ON ops_revocations (workspace_id, seq);
+
+CREATE TRIGGER ops_revocations_no_update BEFORE UPDATE ON ops_revocations
+BEGIN
+  SELECT RAISE(ABORT, 'revocations are append-only');
+END;
+
+CREATE TRIGGER ops_revocations_no_delete BEFORE DELETE ON ops_revocations
+BEGIN
+  SELECT RAISE(ABORT, 'revocations are append-only');
+END;
+
 -- Every change to a feature flag: who, the old and new setting, the rule it named, and when.
 -- feature_flags holds only the latest row, so this is the record of how it got there. Append only.
 CREATE TABLE feature_flag_history (

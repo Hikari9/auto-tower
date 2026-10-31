@@ -151,11 +151,23 @@ describe('a halt stops new dispatch and keeps everything else', () => {
     ]);
     // The poll's heartbeat may be recorded, but no work state moved.
     expect(workState(h)).toBe(before);
+    // Not even the scheduler's own bookkeeping ran: a packet that was waiting stays waiting.
+    const { id: second } = h.mission([{ scope: ['repo:other'] }]);
+    h.db.run(
+      "UPDATE work_packets SET status = 'pending' WHERE mission_id = ?",
+      [second],
+    );
+    const frozen = workState(h);
+    await runner.claim();
+    expect(workState(h)).toBe(frozen);
 
     resume(h);
     const resumed = await runner.claim();
-    expect(resumed.body.assignments).toHaveLength(1);
-    expect(resumed.body.assignments[0].attemptId).toBe(attempts[0]?.id);
+    // The packet that was waiting before the halt, and the one added during it, both run now.
+    expect(
+      resumed.body.assignments.map((a: { attemptId: string }) => a.attemptId),
+    ).toContain(attempts[0]?.id);
+    expect(resumed.body.assignments).toHaveLength(2);
   });
 
   it('dispatches nothing new from the scheduler, and dispatches the waiting work once lifted', async () => {

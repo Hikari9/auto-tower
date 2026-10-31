@@ -657,6 +657,11 @@ export function heartbeat(
 // --------------------------------------------------------------------- claim
 
 function scheduleWorkspace(ctx: FleetContext, workspaceId: string): void {
+  // A halted workspace is not scheduled at all, so a poll cannot move a packet from pending to ready
+  // or a mission to another state. The halt keeps every row as it was.
+  if (isHalted(ctx.db, workspaceId)) {
+    return;
+  }
   try {
     const actor = systemActor(ctx.db, workspaceId, ctx.now().toISOString());
     ctx.core.scheduler.tick(workspaceId, actor, ctx.ids('cor'));

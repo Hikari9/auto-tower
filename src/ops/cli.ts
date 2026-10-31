@@ -15,6 +15,11 @@ import {
 } from './backup.js';
 import { engageHalt, HaltForbiddenError, liftHalt } from './halt.js';
 import { healthReport } from './health.js';
+import {
+  disablePrincipal,
+  RevocationError,
+  revokeTokenById,
+} from './revoke.js';
 
 const DEFAULT_DB_PATH = '.tower/tower.sqlite';
 const DEFAULT_WORKSPACE = 'default';
@@ -29,6 +34,9 @@ const USAGE = [
   '          Restores into a database that does not exist yet, then migrates it forward.',
   '  halt    --actor <human principal id> [--reason <text>] [--workspace <id>] [--db <path>]',
   '  resume  --actor <human principal id> [--reason <text>] [--workspace <id>] [--db <path>]',
+  '  revoke-token     --actor <human principal id> --token-id <id> [--reason <text>] [--workspace <id>] [--db <path>]',
+  '  disable-principal --actor <human principal id> --principal <id> [--reason <text>] [--workspace <id>] [--db <path>]',
+  '          Revokes every token the principal holds and refuses its credentials from the next request.',
   '  status  [--workspace <id>] [--db <path>]',
   '',
   'Defaults: --db $TOWER_DB_PATH or .tower/tower.sqlite, --workspace $TOWER_WORKSPACE or "default".',
@@ -46,6 +54,8 @@ const OPTIONS = {
   actor: { type: 'string' },
   reason: { type: 'string' },
   workspace: { type: 'string' },
+  'token-id': { type: 'string' },
+  principal: { type: 'string' },
   'include-token-digests': { type: 'boolean' },
 } as const;
 
@@ -211,6 +221,59 @@ export function runOpsCli(
         }
         return 0;
       }
+      case 'revoke-token':
+      case 'disable-principal': {
+        const actorId = need(values.actor, 'actor');
+        const targetFlag =
+          command === 'revoke-token' ? 'token-id' : 'principal';
+        const target = need(
+          command === 'revoke-token' ? values['token-id'] : values.principal,
+          targetFlag,
+        );
+        if (actorId === undefined || target === undefined) {
+          return 2;
+        }
+        if (!existsSync(dbPath)) {
+          io.stderr(`No database at ${dbPath}`);
+          return 1;
+        }
+        const db = openSqliteDatabase(dbPath);
+        try {
+          applyMigrations(db, readMigrationFiles(defaultMigrationsDir()));
+          const principal = getPrincipal(db, actorId);
+          if (
+            principal === undefined ||
+            principal.workspaceId !== workspaceId
+          ) {
+            io.stderr(`No principal ${actorId} in workspace ${workspaceId}`);
+            return 1;
+          }
+          const common = {
+            workspaceId,
+            actor: { id: principal.id, kind: principal.kind },
+            reason: values.reason ?? null,
+          };
+          if (command === 'revoke-token') {
+            const result = revokeTokenById(db, { ...common, tokenId: target });
+            io.stdout(
+              result.revoked
+                ? `Token ${target} is revoked`
+                : `Token ${target} was already revoked`,
+            );
+          } else {
+            const result = disablePrincipal(db, {
+              ...common,
+              principalId: target,
+            });
+            io.stdout(
+              `Principal ${target} is disabled; ${result.tokensRevoked} token(s) revoked`,
+            );
+          }
+        } finally {
+          db.close();
+        }
+        return 0;
+      }
       case 'status': {
         if (!existsSync(dbPath)) {
           io.stderr(`No database at ${dbPath}`);
@@ -229,7 +292,11 @@ export function runOpsCli(
         return command === undefined || command === 'help' ? 0 : 2;
     }
   } catch (error) {
-    if (error instanceof BackupError || error instanceof HaltForbiddenError) {
+    if (
+      error instanceof BackupError ||
+      error instanceof HaltForbiddenError ||
+      error instanceof RevocationError
+    ) {
       io.stderr(error.message);
       return 1;
     }
