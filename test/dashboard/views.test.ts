@@ -5,6 +5,7 @@ import {
   mountDashboard,
   TOKEN_KEY,
 } from '../../public/js/app.js';
+import { loadPersona } from '../../public/js/boot.js';
 import {
   addPacket,
   createMission,
@@ -20,6 +21,8 @@ import {
 type El = any;
 // biome-ignore lint/suspicious/noExplicitAny: provided by the happy-dom environment
 declare const document: any;
+// biome-ignore lint/suspicious/noExplicitAny: provided by the happy-dom environment
+declare const window: any;
 
 const PERSONA = {
   name: 'Pilot Desk',
@@ -386,10 +389,11 @@ describe('Decision Inbox', () => {
     ).click();
 
     await vi.waitFor(() =>
-      expect(
-        root.querySelector('[role="group"] [role="alert"]')?.textContent,
-      ).toContain('changed since it was loaded'),
+      expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+        'changed since it was loaded',
+      ),
     );
+    expect(root.querySelector('[role="group"]')).toBeNull();
     expect(text(root)).toContain('Stale answer?');
   });
 });
@@ -668,6 +672,7 @@ describe('evidence and state labels', () => {
     );
     expect(verified).not.toBe(reported);
     expect(text(root)).toContain('Looks done');
+    expect(text(root)).toContain('succeeded (self-reported): Looks done');
   });
 
   it('shows paused and quarantined runners with their own labels', async () => {
@@ -752,5 +757,955 @@ describe('evidence and state labels', () => {
     );
     expect(safe?.getAttribute('rel')).toBe('noopener noreferrer');
     expect(safe?.getAttribute('target')).toBe('_blank');
+  });
+});
+
+// --- Hardening: one test per self-review finding ----------------------------
+
+/** The value next to a `<dt>` in a facts list. */
+function factValue(root: El, term: string): string | undefined {
+  const dt = ([...root.querySelectorAll('dt')] as El[]).find(
+    (el) => el.textContent === term,
+  );
+  return dt?.nextElementSibling?.textContent ?? undefined;
+}
+
+function buttonNamed(root: El, label: string): El {
+  const found = ([...root.querySelectorAll('button')] as El[]).find(
+    (b) => b.textContent === label,
+  );
+  if (found === undefined) {
+    throw new Error(`no button "${label}"`);
+  }
+  return found;
+}
+
+/** Records every request, so a test can check what was sent and not only what was shown. */
+function recorder(
+  tower: Tower,
+  respond?: (
+    path: string,
+    init: RequestInit,
+  ) => Response | Promise<Response> | undefined,
+) {
+  const requests: { path: string; init: RequestInit }[] = [];
+  const base = tower.fetchFor(null);
+  return {
+    requests,
+    fetchImpl: async (path: string, init: RequestInit) => {
+      requests.push({ path, init });
+      const custom = await respond?.(path, init);
+      return custom ?? base(path, init);
+    },
+  };
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+describe('proposal acceptance shows what it grants', () => {
+  it('names scope, grantee and limits on the card and in the confirmation', async () => {
+    const tower = seededTower();
+    const proposal = {
+      id: 'prp_show',
+      status: 'pending',
+      action: 'repo.read',
+      resource: 'repo:app',
+      scope: 'repo:app',
+      maxRisk: 'low',
+      granteeKind: 'chief_of_staff',
+      limits: { maxAmount: 50, missionIds: ['msn_1'] },
+      evidence: [],
+      approvals: 3,
+      createdAt: '2026-10-31T00:00:00.000Z',
+      resolvedAt: null,
+      resolvedBy: null,
+      resolutionNote: null,
+      resultingRuleId: null,
+    };
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: overrideGet(tower, '/policy', (body) => ({
+        ...body,
+        proposals: [proposal],
+      })),
+    });
+
+    await dashboard.show('#/policy');
+    expect(text(root)).toContain(
+      'Scope repo:app, grantee chief_of_staff, max risk low. Limits: up to 50; missions msn_1.',
+    );
+    buttonNamed(root, 'Accept…').click();
+
+    const group = root.querySelector('[role="group"]');
+    expect(group?.textContent).toContain('scope repo:app');
+    expect(group?.textContent).toContain('grantee chief_of_staff');
+    expect(group?.textContent).toContain('missions msn_1');
+  });
+
+  it('declines a proposal only after confirmation', async () => {
+    const tower = seededTower();
+    const proposal = {
+      id: 'prp_decline',
+      status: 'pending',
+      action: 'repo.read',
+      resource: 'repo:app',
+      scope: 'repo:app',
+      maxRisk: 'low',
+      granteeKind: 'chief_of_staff',
+      limits: { maxAmount: null, missionIds: null },
+      evidence: [],
+      approvals: 3,
+      createdAt: '2026-10-31T00:00:00.000Z',
+      resolvedAt: null,
+      resolvedBy: null,
+      resolutionNote: null,
+      resultingRuleId: null,
+    };
+    const rec = recorder(tower, (_path, init) =>
+      init.method === 'POST' ? jsonResponse({ ok: true }) : undefined,
+    );
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) => {
+        if (path === '/policy' && init.method === 'GET') {
+          const real = (await (
+            await tower.fetchFor(null)(path, init)
+          ).json()) as Record<string, unknown>;
+          return jsonResponse({ ...real, proposals: [proposal] });
+        }
+        return rec.fetchImpl(path, init);
+      },
+    });
+
+    await dashboard.show('#/policy');
+    buttonNamed(root, 'Decline…').click();
+    expect(rec.requests.filter((r) => r.init.method === 'POST')).toHaveLength(
+      0,
+    );
+    buttonNamed(root, 'Decline proposal').click();
+
+    await vi.waitFor(() =>
+      expect(
+        rec.requests.filter((r) => r.init.method === 'POST').map((r) => r.path),
+      ).toEqual(['/policy/proposals/prp_decline/decline']),
+    );
+  });
+});
+
+describe('health reports real counts', () => {
+  it('counts every open decision, not just the first one returned', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const packetId = await addPacket(tower, missionId, 'Draft spec');
+    for (const key of ['one', 'two', 'three']) {
+      await tower.call('POST', '/decisions', {
+        dedupeKey: key,
+        category: 'scope_expansion',
+        urgency: 'normal',
+        question: `Question ${key}?`,
+        recommendation: { alternativeId: 'approve', rationale: 'Low risk.' },
+        consequences: 'x',
+        evidence: [],
+        affectedScope: [],
+        advisory: { confidencePercent: 80 },
+        branches: [{ missionId, packetId }],
+      });
+    }
+    const { root, dashboard } = mountFor(tower);
+
+    await dashboard.show('#/health');
+
+    expect(factValue(root, 'Open decisions')).toBe('3');
+    expect(factValue(root, 'Missions')).toBe('1');
+  });
+
+  it('shows only the health status, not extra fields the API might return', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: overrideGet(tower, '/health', () => ({
+        status: 'ok',
+        workspace: 'ws_leak',
+        storage: '/secret/path',
+      })),
+    });
+
+    await dashboard.show('#/health');
+
+    expect(factValue(root, 'API')).toBe('ok');
+    expect(text(root)).not.toContain('ws_leak');
+    expect(text(root)).not.toContain('/secret/path');
+  });
+});
+
+describe('malformed input and partial responses', () => {
+  it('treats a malformed percent-encoded mission id as not found, without rejecting', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower);
+
+    await expect(dashboard.show('#/missions/100%')).resolves.toBeUndefined();
+    expect(root.querySelector('h1')?.textContent).toBe('Page not found');
+  });
+
+  it('renders a mission whose optional arrays are absent instead of failing the page', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const spec = await addPacket(tower, missionId, 'Draft spec');
+    await addPacket(tower, missionId, 'Build it', [spec]);
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: overrideGet(tower, `/missions/${missionId}`, (body) => {
+        const { constraints, definitionOfDone, evidenceRefs, ...rest } =
+          body.mission;
+        const packets = rest.packets.map((p: Record<string, unknown>) => {
+          const { dependsOn, ...packet } = p;
+          return packet;
+        });
+        return { mission: { ...rest, packets } };
+      }),
+    });
+
+    await dashboard.show(`#/missions/${missionId}`);
+
+    expect(root.querySelector('[role="alert"]')).toBeNull();
+    expect(root.querySelector('h1')?.textContent).toBe('Ship the pilot');
+  });
+
+  it('keeps the token out of URLs and sends it only as a bearer header', async () => {
+    const tower = seededTower();
+    await createMission(tower);
+    const rec = recorder(tower);
+    const { dashboard } = mountFor(tower, { fetchImpl: rec.fetchImpl });
+
+    await dashboard.show('#/missions');
+    await dashboard.show(`#/missions`);
+
+    expect(rec.requests.length).toBeGreaterThan(0);
+    for (const { path, init } of rec.requests) {
+      expect(path).not.toContain(tower.token);
+      expect((init.headers as Record<string, string>).authorization).toBe(
+        `Bearer ${tower.token}`,
+      );
+    }
+  });
+});
+
+describe('failed writes return the user to a usable screen', () => {
+  it('shows sign-in with a message when a write is rejected as unauthorized', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const packetId = await addPacket(tower, missionId, 'Draft spec');
+    await tower.call('POST', '/decisions', {
+      dedupeKey: 'expired',
+      category: 'scope_expansion',
+      urgency: 'normal',
+      question: 'Expired session?',
+      recommendation: { alternativeId: 'approve', rationale: 'Low risk.' },
+      consequences: 'x',
+      evidence: [],
+      affectedScope: [],
+      advisory: { confidencePercent: 80 },
+      branches: [{ missionId, packetId }],
+    });
+    const { root, dashboard, storage } = mountFor(tower, {
+      fetchImpl: async (path, init) => {
+        if (init.method === 'POST') {
+          return jsonResponse(
+            {
+              error: {
+                code: 'unauthenticated',
+                message: 'A valid bearer token is required',
+              },
+            },
+            401,
+          );
+        }
+        return tower.fetchFor(null)(path, init);
+      },
+    });
+
+    await dashboard.show('#/decisions');
+    buttonNamed(root, 'Answer…').click();
+    buttonNamed(root, 'Confirm answer').click();
+
+    await vi.waitFor(() =>
+      expect(root.querySelector('input[type="password"]')).not.toBeNull(),
+    );
+    expect(storage.getItem(TOKEN_KEY)).toBeNull();
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+      'Your session token was rejected',
+    );
+  });
+
+  it('disables Cancel while an answer is in flight', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const packetId = await addPacket(tower, missionId, 'Draft spec');
+    await tower.call('POST', '/decisions', {
+      dedupeKey: 'inflight',
+      category: 'scope_expansion',
+      urgency: 'normal',
+      question: 'Slow answer?',
+      recommendation: { alternativeId: 'approve', rationale: 'Low risk.' },
+      consequences: 'x',
+      evidence: [],
+      affectedScope: [],
+      advisory: { confidencePercent: 80 },
+      branches: [{ missionId, packetId }],
+    });
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) => {
+        if (init.method === 'POST') {
+          return new Promise<Response>(() => {});
+        }
+        return tower.fetchFor(null)(path, init);
+      },
+    });
+
+    await dashboard.show('#/decisions');
+    buttonNamed(root, 'Answer…').click();
+    buttonNamed(root, 'Confirm answer').click();
+
+    expect(buttonNamed(root, 'Cancel').disabled).toBe(true);
+    expect(buttonNamed(root, 'Confirm answer').disabled).toBe(true);
+  });
+
+  it('sends the chosen alternative, the version and the trimmed note', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const packetId = await addPacket(tower, missionId, 'Draft spec');
+    await tower.call('POST', '/decisions', {
+      dedupeKey: 'choose',
+      category: 'scope_expansion',
+      urgency: 'normal',
+      question: 'Which way?',
+      recommendation: { alternativeId: 'approve', rationale: 'Low risk.' },
+      consequences: 'x',
+      evidence: [],
+      affectedScope: [],
+      advisory: { confidencePercent: 80 },
+      branches: [{ missionId, packetId }],
+    });
+    const rec = recorder(tower);
+    const { root, dashboard } = mountFor(tower, { fetchImpl: rec.fetchImpl });
+
+    await dashboard.show('#/decisions');
+    const decline = root.querySelector('input[value="decline"]') as El;
+    decline.checked = true;
+    (root.querySelector('textarea') as El).value = '  ship it  ';
+    buttonNamed(root, 'Answer…').click();
+    buttonNamed(root, 'Confirm answer').click();
+
+    await vi.waitFor(() =>
+      expect(rec.requests.some((r) => r.init.method === 'POST')).toBe(true),
+    );
+    const post = rec.requests.find((r) => r.init.method === 'POST') as {
+      path: string;
+      init: RequestInit;
+    };
+    expect(post.path).toMatch(/\/decisions\/dec_[0-9a-f]+\/answers$/);
+    expect(JSON.parse(String(post.init.body))).toEqual({
+      version: 1,
+      choice: 'decline',
+      note: 'ship it',
+    });
+  });
+
+  it('signs out, clears the token and moves the URL back to the overview', async () => {
+    const tower = seededTower();
+    const { root, dashboard, storage } = mountFor(tower);
+
+    await dashboard.show('#/decisions');
+    buttonNamed(root, 'Sign out').click();
+
+    await vi.waitFor(() =>
+      expect(root.querySelector('input[type="password"]')).not.toBeNull(),
+    );
+    expect(storage.getItem(TOKEN_KEY)).toBeNull();
+    expect((root.querySelector('.site-header button') as El).hidden).toBe(true);
+    expect(window.location.hash).toBe('#/missions');
+  });
+});
+
+describe('sign-in form', () => {
+  it('stores the trimmed token and shows the overview when it is valid', async () => {
+    const tower = seededTower();
+    const { root, dashboard, storage } = mountFor(tower, {
+      storage: memoryStorage(null),
+    });
+
+    await dashboard.show('#/missions');
+    const input = root.querySelector('input[type="password"]') as El;
+    input.value = `  ${tower.token}  `;
+    (root.querySelector('form') as El).dispatchEvent(
+      new Event('submit', { cancelable: true }),
+    );
+
+    await vi.waitFor(() =>
+      expect(root.querySelector('h1')?.textContent).toBe('Mission overview'),
+    );
+    expect(storage.getItem(TOKEN_KEY)).toBe(tower.token);
+  });
+
+  it('ignores a blank token', async () => {
+    const tower = seededTower();
+    const { root, dashboard, storage } = mountFor(tower, {
+      storage: memoryStorage(null),
+    });
+
+    await dashboard.show('#/missions');
+    (root.querySelector('input[type="password"]') as El).value = '   ';
+    (root.querySelector('form') as El).dispatchEvent(
+      new Event('submit', { cancelable: true }),
+    );
+
+    expect(storage.getItem(TOKEN_KEY)).toBeNull();
+    expect(root.querySelector('input[type="password"]')).not.toBeNull();
+  });
+});
+
+describe('storage and error paths', () => {
+  it('reads the session token from sessionStorage when no storage is passed', async () => {
+    const tower = seededTower();
+    window.sessionStorage.setItem(TOKEN_KEY, tower.token);
+    try {
+      const root = document.createElement('div');
+      document.body.append(root);
+      const dashboard = mountDashboard({
+        root,
+        fetchImpl: tower.fetchFor(null),
+      });
+
+      await dashboard.show('#/missions');
+
+      expect(root.querySelector('h1')?.textContent).toBe('Mission overview');
+    } finally {
+      window.sessionStorage.removeItem(TOKEN_KEY);
+    }
+  });
+
+  it('shows the scope message for a 403 instead of a blank page', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) =>
+        path.startsWith('/missions') && init.method === 'GET'
+          ? jsonResponse({ error: { code: 'forbidden', message: 'x' } }, 403)
+          : tower.fetchFor(null)(path, init),
+    });
+
+    await dashboard.show('#/missions');
+
+    expect(root.querySelector('h1')?.textContent).toBe('Mission overview');
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+      'lacks the scope',
+    );
+  });
+
+  it('shows an alert with the heading for a server error', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) =>
+        path.startsWith('/missions') && init.method === 'GET'
+          ? jsonResponse(
+              {
+                error: {
+                  code: 'internal_error',
+                  message: 'Internal server error',
+                },
+              },
+              500,
+            )
+          : tower.fetchFor(null)(path, init),
+    });
+
+    await dashboard.show('#/missions');
+
+    expect(root.querySelector('h1')?.textContent).toBe('Mission overview');
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+      'Internal server error',
+    );
+  });
+
+  it('explains a network failure as a connection problem', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async () => {
+        throw new TypeError('fetch failed');
+      },
+    });
+
+    await dashboard.show('#/missions');
+
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+      'Check the connection',
+    );
+  });
+});
+
+describe('links, markup and persona', () => {
+  it('renders only http and https issue links, whatever the scheme spelling', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const hostile = [
+      'javascript:alert(1)',
+      'data:text/html,<script>1</script>',
+      'vbscript:msgbox(1)',
+      ' JaVaScRiPt:alert(1)',
+    ];
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: overrideGet(
+        tower,
+        `/missions/${missionId}/issue-links`,
+        () => ({
+          links: [
+            ...hostile.map((url, i) => ({
+              id: `lnk_${i}`,
+              url,
+              observedState: 'unknown',
+              observedSource: null,
+              polledAt: null,
+            })),
+            {
+              id: 'lnk_ok',
+              url: 'https://example.org/issues/2',
+              observedState: 'open',
+              observedSource: 'poll',
+              polledAt: null,
+            },
+          ],
+          discrepancies: [],
+        }),
+      ),
+    });
+
+    await dashboard.show(`#/missions/${missionId}`);
+
+    const hrefs = [...root.querySelectorAll('a')].map(
+      (a) => (a as El).getAttribute('href') ?? '',
+    );
+    expect(
+      hrefs.some((href) => /^\s*(javascript|data|vbscript):/i.test(href)),
+    ).toBe(false);
+    expect(hrefs).toContain('https://example.org/issues/2');
+    expect(text(root)).toContain('data:text/html,<script>1</script>');
+  });
+
+  it('renders markup in every free-text field as text, in every view', async () => {
+    const tower = seededTower();
+    const payload = '<img src=x onerror="window.__pwned=1"><b>bold</b>';
+    const missionId = await createMission(tower, {
+      title: payload,
+      outcome: payload,
+      constraints: [payload],
+      definitionOfDone: [{ text: payload, done: false }],
+    });
+    await addPacket(tower, missionId, payload);
+    await enrollRunner(tower, payload);
+    await tower.call('POST', '/decisions', {
+      dedupeKey: 'xss',
+      category: 'scope_expansion',
+      urgency: 'normal',
+      question: payload,
+      recommendation: { alternativeId: 'approve', rationale: payload },
+      consequences: payload,
+      evidence: [],
+      affectedScope: [],
+      advisory: { confidencePercent: 80 },
+      branches: [{ missionId, packetId: null }],
+    });
+    const { root, dashboard } = mountFor(tower);
+
+    for (const hash of [
+      `#/missions/${missionId}`,
+      '#/runners',
+      '#/decisions',
+      '#/missions',
+    ]) {
+      await dashboard.show(hash);
+      expect(root.querySelector('img'), hash).toBeNull();
+      expect(root.querySelector('b'), hash).toBeNull();
+    }
+    expect(
+      (window as unknown as { __pwned?: unknown }).__pwned,
+    ).toBeUndefined();
+  });
+
+  it('shows the persona tagline from configuration', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower);
+
+    await dashboard.show('#/missions');
+
+    expect(root.querySelector('.brand-tagline')?.textContent).toBe(
+      PERSONA.tagline,
+    );
+  });
+
+  it('loads persona text from the file and falls back for empty or non-text values', async () => {
+    const original = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () =>
+        jsonResponse({ name: '   ', tagline: 5 })) as unknown as typeof fetch;
+      expect(await loadPersona()).toEqual(DEFAULT_PERSONA);
+
+      globalThis.fetch = (async () =>
+        jsonResponse({
+          name: '  Pilot Desk  ',
+          tagline: 'Hello',
+        })) as unknown as typeof fetch;
+      expect(await loadPersona()).toEqual({
+        name: 'Pilot Desk',
+        tagline: 'Hello',
+      });
+
+      globalThis.fetch = (async () =>
+        jsonResponse({
+          name: 'x'.repeat(200),
+          tagline: 'y',
+        })) as unknown as typeof fetch;
+      expect((await loadPersona()).name).toHaveLength(80);
+
+      globalThis.fetch = (async () => {
+        throw new TypeError('down');
+      }) as unknown as typeof fetch;
+      expect(await loadPersona()).toEqual(DEFAULT_PERSONA);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
+
+describe('blocked reasons and views the earlier tests did not reach', () => {
+  it('names an open decision that blocks a mission waiting on it', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const packetId = await addPacket(tower, missionId, 'Draft spec');
+    await tower.call('POST', '/decisions', {
+      dedupeKey: 'blocks',
+      category: 'scope_expansion',
+      urgency: 'normal',
+      question: 'May it touch billing?',
+      recommendation: { alternativeId: 'approve', rationale: 'Low risk.' },
+      consequences: 'x',
+      evidence: [],
+      affectedScope: [],
+      advisory: { confidencePercent: 80 },
+      branches: [{ missionId, packetId }],
+    });
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: overrideGet(tower, `/missions/${missionId}`, (body) => ({
+        mission: { ...body.mission, state: 'waiting-decision' },
+      })),
+    });
+
+    await dashboard.show(`#/missions/${missionId}`);
+
+    expect(root.querySelector('section.blocked')?.textContent).toContain(
+      'Waiting for decision: May it touch billing?',
+    );
+  });
+
+  it('says why a verifying mission is waiting', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: overrideGet(tower, `/missions/${missionId}`, (body) => ({
+        mission: { ...body.mission, state: 'verifying' },
+      })),
+    });
+
+    await dashboard.show(`#/missions/${missionId}`);
+
+    expect(root.querySelector('section.blocked')?.textContent).toContain(
+      'Tower has not verified them yet',
+    );
+  });
+
+  it('lists a discrepancy that needs attention', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: overrideGet(
+        tower,
+        `/missions/${missionId}/issue-links`,
+        () => ({
+          links: [],
+          discrepancies: [
+            {
+              id: 'dsc_1',
+              kind: 'reopened',
+              detail: 'Issue reopened',
+              requiresAttention: true,
+              resolvedAt: null,
+              resolution: null,
+            },
+          ],
+        }),
+      ),
+    });
+
+    await dashboard.show(`#/missions/${missionId}`);
+
+    expect(root.querySelector('section.blocked')?.textContent).toContain(
+      'Issue discrepancy (reopened): Issue reopened',
+    );
+  });
+
+  it('shows a verified dependency as no longer blocking', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const spec = await addPacket(tower, missionId, 'Draft spec');
+    await addPacket(tower, missionId, 'Build it', [spec]);
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: overrideGet(tower, `/missions/${missionId}`, (body) => ({
+        mission: {
+          ...body.mission,
+          packets: body.mission.packets.map((p: Record<string, unknown>) =>
+            p.id === spec
+              ? {
+                  ...p,
+                  status: 'verified',
+                  verification: {
+                    at: '2026-10-31T08:00:00.000Z',
+                    by: 'prn_tower',
+                    evidenceRefs: [],
+                  },
+                }
+              : p,
+          ),
+        },
+      })),
+    });
+
+    await dashboard.show(`#/missions/${missionId}`);
+
+    expect(root.querySelector('section.blocked')).toBeNull();
+    const row = ([...root.querySelectorAll('tbody tr')] as El[]).find((tr) =>
+      tr.textContent?.includes('Build it'),
+    );
+    expect(row?.textContent).toContain('—');
+    expect(row?.textContent).not.toContain('Waiting on');
+  });
+
+  it('labels a Tower-verified packet as verified even when a runner also reported on it', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const packetId = await addPacket(tower, missionId, 'Verified task');
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: overrideGet(tower, `/missions/${missionId}`, (body) => ({
+        mission: {
+          ...body.mission,
+          packets: body.mission.packets.map((p: Record<string, unknown>) => ({
+            ...p,
+            status: 'verified',
+            verification: {
+              at: '2026-10-31T08:00:00.000Z',
+              by: 'prn_tower',
+              evidenceRefs: [],
+            },
+          })),
+          attempts: [
+            {
+              id: 'att_v',
+              missionId,
+              packetId,
+              number: 1,
+              runnerId: 'prn_runner',
+              status: 'self-reported-succeeded',
+              dispatchedAt: '2026-10-31T07:00:00.000Z',
+              startedAt: null,
+              reportedAt: '2026-10-31T07:30:00.000Z',
+              report: {
+                outcome: 'succeeded',
+                summary: 'Done',
+                by: 'prn_runner',
+              },
+            },
+          ],
+        },
+      })),
+    });
+
+    await dashboard.show(`#/missions/${missionId}`);
+
+    expect(root.querySelector('[data-evidence="verified"]')?.textContent).toBe(
+      'Verified by Tower',
+    );
+    expect(root.querySelector('[data-evidence="self-reported"]')).toBeNull();
+  });
+
+  it('ticks completed definition-of-done items and shows open ones unticked', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: overrideGet(tower, `/missions/${missionId}`, (body) => ({
+        mission: {
+          ...body.mission,
+          definitionOfDone: [
+            { text: 'Smoke test passes', done: true },
+            { text: 'Docs updated', done: false },
+          ],
+        },
+      })),
+    });
+
+    await dashboard.show(`#/missions/${missionId}`);
+
+    const items = [...root.querySelectorAll('ul.checklist li')] as El[];
+    expect(items[0]?.querySelector('.check')?.textContent).toBe('[x]');
+    expect(items[0]?.querySelector('.check')?.getAttribute('aria-label')).toBe(
+      'done',
+    );
+    expect(items[1]?.querySelector('.check')?.textContent).toBe('[ ]');
+  });
+
+  it('reads read and write scope into their own columns of the sync configuration', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: overrideGet(tower, '/issues/sync-config', () => ({
+        configs: [
+          {
+            provider: 'github',
+            repo: 'favor/app',
+            mode: 'observe',
+            readScope: true,
+            writeScope: false,
+            version: 2,
+            updatedBy: 'prn_x',
+            updatedAt: '2026-10-31T00:00:00.000Z',
+          },
+        ],
+      })),
+    });
+
+    await dashboard.show('#/integrations');
+
+    const cells = [...root.querySelectorAll('tbody td')].map(
+      (td) => (td as El).textContent,
+    );
+    expect(cells).toEqual([
+      'github',
+      'favor/app',
+      'observe',
+      'allowed',
+      'off',
+      '2',
+    ]);
+  });
+
+  it('shows interrupted and fenced leases with their own labels', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: overrideGet(tower, '/runners/leases', () => ({
+        leases: [
+          {
+            id: 'lse_1',
+            packetId: 'pkt_1',
+            missionId: 'msn_1',
+            runnerId: 'prn_1',
+            status: 'recovering',
+            expiresAt: '2026-10-31T09:00:00.000Z',
+          },
+          {
+            id: 'lse_2',
+            packetId: 'pkt_2',
+            missionId: 'msn_1',
+            runnerId: 'prn_1',
+            status: 'fenced',
+            expiresAt: '2026-10-31T09:00:00.000Z',
+          },
+        ],
+      })),
+    });
+
+    await dashboard.show('#/runners');
+
+    expect(root.querySelector('[data-state="recovering"]')?.textContent).toBe(
+      'Interrupted, recovering',
+    );
+    expect(root.querySelector('[data-state="fenced"]')?.textContent).toBe(
+      'Fenced (stale attempt rejected)',
+    );
+  });
+
+  it('shows a paused runner with its own label', async () => {
+    const tower = seededTower();
+    await enrollRunner(tower, 'napping-runner');
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: overrideGet(tower, '/runners', (body) => ({
+        runners: body.runners.map((r: Record<string, unknown>) => ({
+          ...r,
+          status: 'paused',
+        })),
+      })),
+    });
+
+    await dashboard.show('#/runners');
+
+    expect(root.querySelector('[data-state="paused"]')?.textContent).toBe(
+      'Paused',
+    );
+  });
+
+  it('shows the confirmation focused, with its consequence linked by describedby', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower);
+
+    await dashboard.show('#/policy');
+    await createRule(tower);
+    await dashboard.show('#/policy');
+    buttonNamed(root, 'Revoke repo.write').click();
+
+    const group = root.querySelector('[role="group"]') as El;
+    const describedBy = group.getAttribute('aria-describedby') as string;
+    expect(describedBy).toBeTruthy();
+    expect(document.getElementById(describedBy)?.textContent).toContain(
+      'blocked immediately',
+    );
+    expect(document.activeElement?.textContent).toBe('Cancel');
+  });
+});
+
+describe('label associations', () => {
+  it('ties the token field to its label and help text, and each answer choice to its label', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const packetId = await addPacket(tower, missionId, 'Draft spec');
+    await tower.call('POST', '/decisions', {
+      dedupeKey: 'labels',
+      category: 'scope_expansion',
+      urgency: 'normal',
+      question: 'Labelled?',
+      recommendation: null,
+      consequences: 'x',
+      evidence: [],
+      affectedScope: [],
+      advisory: { confidencePercent: 80 },
+      branches: [{ missionId, packetId }],
+    });
+    const { root, dashboard } = mountFor(tower, {
+      storage: memoryStorage(null),
+    });
+
+    await dashboard.show('#/missions');
+    const token = root.querySelector('input[type="password"]') as El;
+    expect(root.querySelector(`label[for="${token.id}"]`)?.textContent).toBe(
+      'Access token',
+    );
+    expect(
+      document.getElementById(token.getAttribute('aria-describedby') as string)
+        ?.textContent,
+    ).toContain('Stored in this browser session only');
+
+    await dashboard.show('#/decisions');
+    for (const radio of [
+      ...root.querySelectorAll('input[type="radio"]'),
+    ] as El[]) {
+      expect(
+        root.querySelector(`label[for="${radio.id}"]`),
+        radio.id,
+      ).not.toBeNull();
+    }
   });
 });

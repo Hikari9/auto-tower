@@ -67,7 +67,12 @@ export function resolveRoute(hash) {
   for (const route of ROUTES) {
     const match = path.match(route.match);
     if (match) {
-      return { route, params: route.params ? route.params(match) : {}, path };
+      try {
+        return { route, params: route.params ? route.params(match) : {}, path };
+      } catch {
+        // A malformed percent-encoding in the hash is not a page we can show.
+        return null;
+      }
     }
   }
   return null;
@@ -138,6 +143,8 @@ export function mountDashboard({
 
   let current = '#/missions';
   let generation = 0;
+  /** A message to show above the next render, such as a rejected write. */
+  let notice = null;
 
   /** @param {string} hash */
   async function show(hash) {
@@ -166,7 +173,14 @@ export function mountDashboard({
     replaceChildren(main, h('p', { role: 'status' }, 'Loading…'));
     try {
       const node = await VIEWS[resolved.route.view](
-        { api, persona: brand, refresh: () => show(current) },
+        {
+          api,
+          persona: brand,
+          refresh: () => show(current),
+          flash: (message) => {
+            notice = message;
+          },
+        },
         resolved.params,
       );
       return paint(gen, node);
@@ -194,7 +208,12 @@ export function mountDashboard({
     if (gen !== generation) {
       return;
     }
-    replaceChildren(main, node);
+    const alert =
+      notice === null
+        ? null
+        : h('p', { role: 'alert', class: 'error' }, notice);
+    notice = null;
+    replaceChildren(main, alert, node);
     main.removeAttribute('aria-busy');
     main.querySelector('h1')?.focus();
   }
@@ -245,6 +264,7 @@ export function mountDashboard({
 
   function signedOut() {
     storage.removeItem(TOKEN_KEY);
+    win?.history.replaceState(null, '', '#/missions');
     show('#/missions');
   }
 

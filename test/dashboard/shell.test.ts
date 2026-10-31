@@ -53,6 +53,12 @@ describe('dashboard shell', () => {
     expect(script.headers.get('content-type')).toContain('text/javascript');
     expect(style.headers.get('content-type')).toContain('text/css');
     expect(persona.headers.get('content-type')).toContain('application/json');
+    for (const res of [script, style, persona]) {
+      expect(res.headers.get('content-security-policy')).toContain(
+        "default-src 'self'",
+      );
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    }
     expect(await persona.json()).toMatchObject({
       name: expect.any(String),
       tagline: expect.any(String),
@@ -67,6 +73,10 @@ describe('dashboard shell', () => {
       '/dashboard/js/../../package.json',
       '/dashboard/%2e%2e/package.json',
       '/dashboard/js/missing.js',
+      '/dashboard/..%2fpackage.json',
+      '/dashboard/%2e%2e%2fpackage.json',
+      '/dashboard/js%2f..%2f..%2fpackage.json',
+      '/dashboard/js/app.d.ts',
     ]) {
       const res = await app.request(path);
       expect(res.status, path).toBe(404);

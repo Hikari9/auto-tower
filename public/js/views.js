@@ -18,6 +18,7 @@ import {
  *   api: { get: (path: string) => Promise<any>, post: (path: string, body?: unknown) => Promise<any>, put: (path: string, body: unknown) => Promise<any> },
  *   persona: { name: string, tagline: string },
  *   refresh: () => Promise<void>,
+ *   flash: (message: string) => void,
  * }} Context
  */
 
@@ -129,7 +130,7 @@ function missionLink(id, title) {
  *   consequence: string,
  *   confirmLabel: string,
  *   run: () => Promise<unknown>,
- *   onDone: () => Promise<void>,
+ *   ctx: Context,
  * }} options
  */
 function confirmAction({
@@ -138,7 +139,7 @@ function confirmAction({
   consequence,
   confirmLabel,
   run,
-  onDone,
+  ctx,
 }) {
   const slot = h('div', { class: 'confirm-slot' });
   confirmSeq += 1;
@@ -170,8 +171,13 @@ function confirmAction({
               cancel.disabled = true;
               try {
                 await run();
-                await onDone();
+                await ctx.refresh();
               } catch (caught) {
+                if (needsReload(caught)) {
+                  ctx.flash(describeError(caught));
+                  await ctx.refresh();
+                  return;
+                }
                 confirm.disabled = false;
                 cancel.disabled = false;
                 error.textContent = describeError(caught);
@@ -206,15 +212,25 @@ function confirmAction({
 /** @param {unknown} error */
 export function describeError(error) {
   if (error instanceof ApiError) {
+    if (error.status === 401) {
+      return 'Your session token was rejected. Enter a valid token.';
+    }
     if (error.status === 409) {
-      return `${error.message}. The record changed since it was loaded. Reload and try again.`;
+      return 'The record changed since it was loaded. The view has been refreshed; review it and try again.';
     }
     if (error.status === 403) {
       return 'This token lacks the scope for this action.';
     }
     return error.message;
   }
-  return 'The request failed. Check the connection and try again.';
+  return 'The request failed. Check the connection. A write may already have been applied, so reload before retrying.';
+}
+
+/** A rejected token or a stale record is not fixed by retrying here. The view reloads instead. */
+function needsReload(error) {
+  return (
+    error instanceof ApiError && (error.status === 401 || error.status === 409)
+  );
 }
 
 /** Shared load-and-render wrapper. A failed load becomes an alert, not a blank page. */
@@ -342,11 +358,11 @@ export function renderMission(ctx, params) {
             fact('Size', mission.size),
             fact('Priority', mission.priority),
           ),
-          mission.constraints.length > 0
+          (mission.constraints ?? []).length > 0
             ? h(
                 'ul',
                 { 'aria-label': 'Constraints' },
-                mission.constraints.map((c) => h('li', null, c)),
+                (mission.constraints ?? []).map((c) => h('li', null, c)),
               )
             : null,
           h(
@@ -363,12 +379,12 @@ export function renderMission(ctx, params) {
         ),
         section(
           'Definition of done',
-          mission.definitionOfDone.length === 0
+          (mission.definitionOfDone ?? []).length === 0
             ? h('p', { class: 'empty' }, 'No criteria recorded.')
             : h(
                 'ul',
                 { class: 'checklist', 'aria-label': 'Definition of done' },
-                mission.definitionOfDone.map((item) =>
+                (mission.definitionOfDone ?? []).map((item) =>
                   h(
                     'li',
                     null,
@@ -406,9 +422,9 @@ export function renderMission(ctx, params) {
                       : 'neutral',
                   { evidence: evidence.kind },
                 ),
-                p.dependsOn.length === 0
+                (p.dependsOn ?? []).length === 0
                   ? '—'
-                  : p.dependsOn
+                  : (p.dependsOn ?? [])
                       .map((depId) => packetsById.get(depId)?.title ?? depId)
                       .join(', '),
                 blocked.length === 0 ? '—' : `Waiting on ${blocked.join(', ')}`,
@@ -439,12 +455,12 @@ export function renderMission(ctx, params) {
         ),
         section(
           'Evidence',
-          mission.evidenceRefs.length === 0
+          (mission.evidenceRefs ?? []).length === 0
             ? h('p', { class: 'empty' }, 'No evidence references recorded.')
             : h(
                 'ul',
                 { 'aria-label': 'Evidence references' },
-                mission.evidenceRefs.map((ref) => h('li', null, ref)),
+                (mission.evidenceRefs ?? []).map((ref) => h('li', null, ref)),
               ),
         ),
         section('Timeline', timeline(activity.items ?? [])),
@@ -589,7 +605,7 @@ export function renderRunners(ctx) {
               stateBadge(RUNNER_STATES, r.status),
               when(r.lastSeenAt),
               String(r.maxConcurrent),
-              r.capabilities.join(', ') || 'none',
+              (r.capabilities ?? []).join(', ') || 'none',
             ]),
           ),
         ),
@@ -696,7 +712,7 @@ function decisionCard(ctx, decision) {
           h(
             'div',
             { class: 'actions' },
-            confirmButton(ctx, decision, alt, note, error),
+            confirmButton(ctx, decision, alt, note, error, cancel),
             cancel,
           ),
           error,
@@ -766,8 +782,8 @@ function decisionCard(ctx, decision) {
   return card;
 }
 
-/** @param {Context} ctx @param {any} decision @param {any} alt @param {HTMLTextAreaElement} note @param {HTMLElement} error */
-function confirmButton(ctx, decision, alt, note, error) {
+/** @param {Context} ctx @param {any} decision @param {any} alt @param {HTMLTextAreaElement} note @param {HTMLElement} error @param {HTMLButtonElement} cancel */
+function confirmButton(ctx, decision, alt, note, error, cancel) {
   return h(
     'button',
     {
@@ -776,6 +792,7 @@ function confirmButton(ctx, decision, alt, note, error) {
       onclick: async (event) => {
         const button = /** @type {HTMLButtonElement} */ (event.currentTarget);
         button.disabled = true;
+        cancel.disabled = true;
         error.textContent = '';
         try {
           await ctx.api.post(
@@ -788,7 +805,13 @@ function confirmButton(ctx, decision, alt, note, error) {
           );
           await ctx.refresh();
         } catch (caught) {
+          if (needsReload(caught)) {
+            ctx.flash(describeError(caught));
+            await ctx.refresh();
+            return;
+          }
           button.disabled = false;
+          cancel.disabled = false;
           error.textContent = describeError(caught);
         }
       },
@@ -865,7 +888,7 @@ function rulesTable(ctx, rules) {
             expectedVersion: rule.version,
             reason: null,
           }),
-        onDone: ctx.refresh,
+        ctx,
       }),
     ]),
   );
@@ -884,6 +907,16 @@ function preferencesList(preferences) {
     { class: 'facts' },
     preferences.map((p) => fact(p.key, JSON.stringify(p.value))),
   );
+}
+
+function limitsText(limits) {
+  const amount =
+    limits.maxAmount === null ? 'no amount cap' : `up to ${limits.maxAmount}`;
+  const missions =
+    limits.missionIds === null
+      ? 'all missions'
+      : `missions ${limits.missionIds.join(', ')}`;
+  return `Limits: ${amount}; ${missions}.`;
 }
 
 function proposalsList(ctx, proposals) {
@@ -918,20 +951,24 @@ function proposalsList(ctx, proposals) {
             `${p.action} on ${p.resource} (${p.maxRisk} risk), suggested after ${p.approvals} approvals`,
           ),
           h(
+            'p',
+            null,
+            `Scope ${p.scope}, grantee ${p.granteeKind}, max risk ${p.maxRisk}. ${limitsText(p.limits)}`,
+          ),
+          h(
             'div',
             { class: 'actions' },
             confirmAction({
               trigger: 'Accept…',
               question: `Accept proposal for ${p.action}?`,
-              consequence:
-                'Creates an active rule that authorizes this action for the covered scope.',
+              consequence: `Creates an active rule: ${p.action} on ${p.resource}, scope ${p.scope}, grantee ${p.granteeKind}, max risk ${p.maxRisk}. ${limitsText(p.limits)}`,
               confirmLabel: 'Accept proposal',
               run: () =>
                 ctx.api.post(
                   `/policy/proposals/${encodeURIComponent(p.id)}/accept`,
                   { note: null },
                 ),
-              onDone: ctx.refresh,
+              ctx,
             }),
             confirmAction({
               trigger: 'Decline…',
@@ -943,7 +980,7 @@ function proposalsList(ctx, proposals) {
                   `/policy/proposals/${encodeURIComponent(p.id)}/decline`,
                   { note: null },
                 ),
-              onDone: ctx.refresh,
+              ctx,
             }),
           ),
         ),
@@ -1049,7 +1086,7 @@ export function renderHealth(ctx) {
         ctx.api.get('/health'),
         ctx.api.get('/missions?limit=1'),
         ctx.api.get('/runners'),
-        ctx.api.get('/decisions?status=open&limit=1'),
+        ctx.api.get('/decisions?status=open&limit=200'),
       ]);
       return { health, missions, runners: runners.runners, decisions };
     },

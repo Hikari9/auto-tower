@@ -1,7 +1,7 @@
 import { DEFAULT_PERSONA, mountDashboard } from './app.js';
 
 /** Persona text is data. Missing or malformed values fall back to the defaults. */
-async function loadPersona() {
+export async function loadPersona() {
   try {
     const res = await fetch('/dashboard/persona.json', { cache: 'no-store' });
     if (!res.ok) {
@@ -18,7 +18,7 @@ async function loadPersona() {
 }
 
 /** @param {unknown} value @param {string} fallback */
-function textOr(value, fallback) {
+export function textOr(value, fallback) {
   return typeof value === 'string' && value.trim() !== ''
     ? value.trim().slice(0, 80)
     : fallback;
