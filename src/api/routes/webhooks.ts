@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Context } from 'hono';
 import { getPrincipal } from '../../auth/principals.js';
 import type { Actor } from '../../core/types.js';
@@ -130,6 +131,9 @@ export const webhookRoutes: readonly RouteSpec[] = [
         deliveryId,
         event: c.req.header('x-github-event') ?? 'unknown',
         observation: codec.decode(c.req.raw.headers, body),
+        // The signature covers the body, not the delivery id, so a captured body replayed under a
+        // new id is caught by its hash.
+        payloadHash: createHash('sha256').update(raw).digest('hex'),
       });
       return c.json(result);
     },

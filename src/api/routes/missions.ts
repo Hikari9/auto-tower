@@ -265,6 +265,7 @@ const readMission: RouteSpec = {
         now ?? (() => new Date()),
         workspaceId,
         mission,
+        callerOf(c).actor.kind,
       ),
     });
   }),

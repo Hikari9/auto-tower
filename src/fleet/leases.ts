@@ -21,7 +21,7 @@ import {
   withoutRuleIds,
 } from './broker.js';
 import { type FleetContext, savepoint } from './context.js';
-import { FleetError } from './errors.js';
+import { FleetError, isUniqueViolation } from './errors.js';
 import type {
   Binding,
   CheckpointInput,
@@ -1036,6 +1036,14 @@ function grant(
       if (error instanceof CoreError) {
         hold(`the mission core refused: ${error.code}`);
         continue;
+      }
+      // Another claim took the scope or the attempt between the check and the insert. The index
+      // held, so nothing is wrong: the runner is told to poll again, as a 409 and not a 500.
+      if (isUniqueViolation(error)) {
+        throw new FleetError(
+          'claim_conflict',
+          'Another claim took this work first. Poll again.',
+        );
       }
       throw error;
     }

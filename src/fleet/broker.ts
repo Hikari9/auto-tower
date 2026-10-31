@@ -354,13 +354,11 @@ export function authorityHoldsFor(
   mission: MissionState,
   /**
    * Who is reading. Rule ids are shown to a person or a chief of staff only: for a runner or a
-   * provider they are removed. Every caller must pass it. It is optional only until the HTTP route
-   * does (see DEFERRED.md), and a caller that leaves it out sees everything.
+   * provider they are removed.
    */
-  viewer?: PrincipalKind,
+  viewer: PrincipalKind,
 ): AuthorityHold[] {
-  const seesRules =
-    viewer === undefined || viewer === 'human' || viewer === 'chief_of_staff';
+  const seesRules = viewer === 'human' || viewer === 'chief_of_staff';
   const refused = db.all<{
     attempt_id: string;
     packet_id: string;
