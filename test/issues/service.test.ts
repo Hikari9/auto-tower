@@ -6,12 +6,14 @@ import {
 } from '../../src/core/errors.js';
 import { createCore } from '../../src/core/index.js';
 import {
+  CLOSE_ACTION,
   createIssueService,
   IssueForbiddenError,
   IssueStateError,
   type ProviderFailure,
   REQUIRED_ISSUES_GUARD,
 } from '../../src/issues/index.js';
+import { categoryOf, isSensitive } from '../../src/policy/index.js';
 import { revoke } from '../policy/helpers.js';
 import {
   completeMission,
@@ -1026,5 +1028,12 @@ describe('read-back after a close', () => {
     expect(
       open.every((d) => d.kind !== 'reopened' || !d.requiresAttention),
     ).toBe(true);
+  });
+});
+
+describe('the close action', () => {
+  it('is a registered sensitive action, so no wildcard grant can allow it', () => {
+    expect(categoryOf(CLOSE_ACTION)).toBe('external_issue_close');
+    expect(isSensitive(categoryOf(CLOSE_ACTION))).toBe(true);
   });
 });
