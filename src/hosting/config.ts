@@ -1,6 +1,3 @@
-/** The dev host binds to loopback only, so it is never reachable from the LAN by accident. */
-export const LOOPBACK_HOST = '127.0.0.1';
-
 export interface HostConfig {
   dbPath: string;
   port: number;

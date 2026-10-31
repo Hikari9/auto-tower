@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { runCli } from '../../src/auth/cli.js';
 import { authenticateToken, hashToken } from '../../src/auth/tokens.js';
@@ -122,5 +123,64 @@ describe('owner CLI input handling', () => {
     // Positive control: the file holds the digest, so the absence check above is meaningful.
     expect(readFileSync(path).toString('latin1')).toContain(hashToken(token));
     expect(readFileSync(path).toString('latin1')).not.toContain(token);
+  });
+});
+
+describe('owner CLI empty-value fallbacks', () => {
+  it('uses the default workspace when --workspace is empty', () => {
+    const path = tempDbPath();
+    const out = capture();
+
+    expect(
+      runCli(
+        ['token', 'create', '--kind', 'human', '--workspace', '', '--db', path],
+        out.io,
+        {},
+      ),
+    ).toBe(0);
+
+    const db = openSqliteDatabase(path);
+    expect(db.get<{ id: string }>('SELECT id FROM workspaces')?.id).toBe(
+      'default',
+    );
+    db.close();
+  });
+
+  it('names the principal after its kind when --name is empty', () => {
+    const path = tempDbPath();
+    const out = capture();
+
+    expect(
+      runCli(
+        ['token', 'create', '--kind', 'runner', '--name', '', '--db', path],
+        out.io,
+        {},
+      ),
+    ).toBe(0);
+
+    const db = openSqliteDatabase(path);
+    expect(db.get<{ name: string }>('SELECT name FROM principals')?.name).toBe(
+      'runner',
+    );
+    db.close();
+  });
+
+  it('falls through to the default path when TOWER_DB_PATH is empty and no --db is given', () => {
+    const out = capture();
+    const cwd = process.cwd();
+    const scratch = tempDbPath();
+    process.chdir(dirname(scratch));
+    try {
+      expect(
+        runCli(['token', 'create', '--kind', 'human'], out.io, {
+          TOWER_DB_PATH: '',
+        }),
+      ).toBe(0);
+      expect(existsSync(join(dirname(scratch), '.tower', 'tower.sqlite'))).toBe(
+        true,
+      );
+    } finally {
+      process.chdir(cwd);
+    }
   });
 });

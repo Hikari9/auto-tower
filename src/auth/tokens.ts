@@ -138,20 +138,40 @@ export function authenticateToken(
   ) {
     return undefined;
   }
-  // An unparseable expiry is treated as expired: NaN comparisons would otherwise fail open.
+  // Fail closed: an invalid clock or an unparseable expiry counts as expired.
+  const nowMs = now.getTime();
+  if (Number.isNaN(nowMs)) {
+    return undefined;
+  }
   if (row.expires_at !== null) {
     const expiresAtMs = Date.parse(row.expires_at);
-    if (Number.isNaN(expiresAtMs) || expiresAtMs <= now.getTime()) {
+    if (Number.isNaN(expiresAtMs) || expiresAtMs <= nowMs) {
       return undefined;
     }
   }
   const principal = toPrincipal(row);
   // Re-apply the kind ceiling at use time, so a stored scope that was never
   // issued (direct SQL, a future import, or a tightened ceiling) grants nothing.
-  const ceiling = SCOPES_BY_KIND[principal.kind];
-  const scopes = (JSON.parse(row.scopes_json) as unknown[]).filter(
+  const scopes = storedScopes(row.scopes_json, SCOPES_BY_KIND[principal.kind]);
+  if (scopes.length === 0) {
+    return undefined;
+  }
+  return { tokenId: row.token_id, principal, scopes };
+}
+
+/** Stored scopes that are valid and allowed for the kind. Corrupt JSON yields none. */
+function storedScopes(json: string, ceiling: readonly Scope[]): Scope[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+  return parsed.filter(
     (scope): scope is Scope =>
       typeof scope === 'string' && isScope(scope) && ceiling.includes(scope),
   );
-  return { tokenId: row.token_id, principal, scopes };
 }

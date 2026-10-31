@@ -1,4 +1,4 @@
-import { closeSync, mkdirSync, openSync } from 'node:fs';
+import { chmodSync, closeSync, lstatSync, mkdirSync, openSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { SqlDatabase, SqlValue } from './database.js';
@@ -17,14 +17,20 @@ export function openSqliteDatabase(path: string): SqlDatabase {
 }
 
 /**
- * Creates the directory and database files owner-only. Token digests and event
- * payloads must not be readable by other local users. SQLite keeps the mode of
- * files that already exist, so the WAL and shared-memory files are created here too.
+ * Keeps the database owner-only: token digests and event payloads must not be
+ * readable by other local users. Directories and files this code creates get
+ * 0700/0600. Files that already exist are tightened to 0600. Pre-existing
+ * directories are left alone, because the path may be a shared directory such
+ * as /tmp. Symbolic links are refused, since chmod would change their target.
  */
 function prepareDatabaseFiles(path: string): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   for (const file of [path, `${path}-wal`, `${path}-shm`]) {
+    if (lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      throw new Error(`Refusing to open ${file}: it is a symbolic link`);
+    }
     closeSync(openSync(file, 'a', 0o600));
+    chmodSync(file, 0o600);
   }
 }
 

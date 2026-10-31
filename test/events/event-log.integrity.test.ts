@@ -126,7 +126,7 @@ describe('append-only guards at the database level', () => {
          VALUES (?, ?, 1, 'duplicate', '{}', ?, 'c', 'now')`,
         [TEST_WORKSPACE, STREAM, principal.principalId],
       ),
-    ).toThrow();
+    ).toThrow(/append-only|UNIQUE/);
   });
 
   it('rejects INSERT OR REPLACE over an idempotency key', () => {
@@ -235,17 +235,21 @@ describe('actor and key scoping', () => {
     ).toThrow(RangeError);
   });
 
-  it('rejects an empty idempotency key rather than storing it', () => {
-    const db = openTestDatabase();
-    const principal = seedPrincipal(db, { kind: 'human' });
+  it.each(['', '   '])(
+    'rejects an idempotency key of %j rather than storing it',
+    (key) => {
+      const db = openTestDatabase();
+      const principal = seedPrincipal(db, { kind: 'human' });
 
-    expect(() =>
-      createEventLog(db).append(
-        input(principal.principalId, { idempotencyKey: '' }),
-      ),
-    ).toThrow(RangeError);
-    expect(db.get('SELECT 1 AS one FROM idempotency_keys')).toBeUndefined();
-  });
+      expect(() =>
+        createEventLog(db).append(
+          input(principal.principalId, { idempotencyKey: key }),
+        ),
+      ).toThrow(RangeError);
+      expect(db.get('SELECT 1 AS one FROM idempotency_keys')).toBeUndefined();
+      expect(db.get('SELECT 1 AS one FROM events')).toBeUndefined();
+    },
+  );
 });
 
 describe('foreign keys', () => {

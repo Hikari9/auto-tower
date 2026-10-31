@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
-import { LOOPBACK_HOST, readHostConfig } from '../../src/hosting/config.js';
+import { describe, expect, it, vi } from 'vitest';
+import { readHostConfig } from '../../src/hosting/config.js';
+import { LOOPBACK_HOST, listenLoopback } from '../../src/hosting/listen.js';
 import worker from '../../src/hosting/worker.js';
 
 describe('Workers entry', () => {
@@ -16,11 +17,26 @@ describe('Workers entry', () => {
   });
 });
 
-describe('Node host config', () => {
-  it('binds to loopback only', () => {
-    expect(LOOPBACK_HOST).toBe('127.0.0.1');
-  });
+describe('Node host listen', () => {
+  it('asks the server to bind to loopback only, on the configured port', () => {
+    const serveFn = vi.fn();
+    const handler = () => new Response('ok');
 
+    listenLoopback(handler, 9123, undefined, serveFn as never);
+
+    expect(LOOPBACK_HOST).toBe('127.0.0.1');
+    expect(serveFn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        hostname: '127.0.0.1',
+        port: 9123,
+        fetch: handler,
+      }),
+      undefined,
+    );
+  });
+});
+
+describe('Node host config', () => {
   it('treats empty environment values as unset', () => {
     expect(readHostConfig({ TOWER_DB_PATH: '', PORT: '' })).toEqual({
       dbPath: '.tower/tower.sqlite',

@@ -208,3 +208,29 @@ describe('stored token fields', () => {
     );
   });
 });
+
+describe('fail-closed token resolution', () => {
+  it('rejects every token when the clock is invalid', () => {
+    const db = openTestDatabase();
+    const human = seedPrincipal(db, { kind: 'human' });
+
+    expect(
+      authenticateToken(db, human.token, new Date('invalid')),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    ['malformed JSON', '['],
+    ['a non-array value', '{"scope":"mission:read"}'],
+    ['only scopes above the ceiling', '["policy:write"]'],
+  ])('rejects a stored scope list that is %s', (_label, scopesJson) => {
+    const db = openTestDatabase();
+    const runner = seedPrincipal(db, { kind: 'runner' });
+    db.run('UPDATE api_tokens SET scopes_json = ? WHERE id = ?', [
+      scopesJson,
+      runner.tokenId,
+    ]);
+
+    expect(authenticateToken(db, runner.token)).toBeUndefined();
+  });
+});
