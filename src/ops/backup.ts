@@ -260,6 +260,21 @@ export function restoreBackup(
   const known = new Set(tableNames(db));
   const included = Object.keys(backup.tables);
   for (const name of included) {
+    // The digest is not a signature: anyone who can edit the file can recompute it. So the file is
+    // held to what an export can contain. A table an export never writes, or token digests in a
+    // file that says it has none, would let an edited backup plant a credential or a migration.
+    if (EPHEMERAL_TABLES.includes(name)) {
+      throw new BackupError(
+        'invalid_file',
+        `The backup holds ${name}, which a backup never contains`,
+      );
+    }
+    if (CREDENTIAL_TABLES.includes(name) && !backup.includesTokenDigests) {
+      throw new BackupError(
+        'invalid_file',
+        `The backup holds ${name} but says it has no token digests`,
+      );
+    }
     if (!known.has(name)) {
       throw new BackupError(
         'schema_mismatch',

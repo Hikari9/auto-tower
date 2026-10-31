@@ -4,16 +4,16 @@ What to watch, what each signal means, and the one switch to throw when somethin
 
 ## Where to look
 
-| What                          | How                                                                               | Who                   |
-| ----------------------------- | --------------------------------------------------------------------------------- | --------------------- |
-| Is the process up             | `GET /health` answers `{"status":"ok"}`. No detail, no auth.                      | Anyone, by design     |
-| Is the workspace healthy      | MCP `read_health`, or `pnpm ops status` on the host                               | Mission readers; host |
-| Why is a mission stuck        | `read_mission` (holds, with the reason), `briefing`, the dashboard                | Mission readers       |
-| What did a tool call do       | MCP `read_audit` with `source: tool_calls`                                        | Policy readers        |
-| Who changed a feature flag    | MCP `read_audit` with `source: feature_flags`                                     | Policy readers        |
-| What the fleet refused        | `GET /runners/audit`                                                              | Humans                |
-| Every denied or escalated act | Policy receipts (`GET /policy/receipts`)                                          | Policy readers        |
-| Halt and revocation history   | `read_health` (recent halts), the `ops_halt_history` and `ops_revocations` tables | Mission readers; host |
+| What                          | How                                                                               | Who                  |
+| ----------------------------- | --------------------------------------------------------------------------------- | -------------------- |
+| Is the process up             | `GET /health` answers `{"status":"ok"}`. No detail, no auth.                      | Anyone, by design    |
+| Is the workspace healthy      | MCP `read_health`, or `pnpm ops status` on the host                               | Policy readers; host |
+| Why is a mission stuck        | `read_mission` (holds, with the reason), `briefing`, the dashboard                | Mission readers      |
+| What did a tool call do       | MCP `read_audit` with `source: tool_calls`                                        | Policy readers       |
+| Who changed a feature flag    | MCP `read_audit` with `source: feature_flags`                                     | Policy readers       |
+| What the fleet refused        | `GET /runners/audit`                                                              | Humans               |
+| Every denied or escalated act | Policy receipts (`GET /policy/receipts`)                                          | Policy readers       |
+| Halt and revocation history   | `read_health` (recent halts), the `ops_halt_history` and `ops_revocations` tables | Policy readers; host |
 
 `/health` is liveness only so that it can stay public without describing the workspace. Do not put workspace detail behind it.
 

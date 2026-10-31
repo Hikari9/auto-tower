@@ -49,8 +49,8 @@ pnpm smoke       # end to end in one process: MCP, two fake runners, the inbox, 
 ## Operating it
 
 ```sh
-pnpm ops backup --out tower.backup.json     # canonical tables to one portable file
-pnpm ops restore --from tower.backup.json --db restored.sqlite
+pnpm ops backup --out .tower/backups/tower.json   # canonical tables to one portable file
+pnpm ops restore --from .tower/backups/tower.json --db .tower/restored.sqlite
 pnpm ops halt --actor <human principal id>  # emergency halt: stop dispatch and guarded effects
 pnpm ops status                             # health, signals, halt state
 ```

@@ -69,7 +69,7 @@ Each tool declares, in `tools/list`, `annotations.readOnlyHint`, `destructiveHin
 | `revoke_policy`          | material | `policy:write`   | Revokes a rule. Blocks the next guarded effect at once. Humans only.                                                          |
 | `set_feature_flag`       | material | `policy:write`   | Turns a flag on or off. Humans only. The flag counts only the rule it names. Every change is kept in the flag history.        |
 | `read_audit`             | read     | `policy:read`    | Append-only history: `feature_flags` (who, old and new setting, rule, time) or `tool_calls` (no arguments or results).        |
-| `read_health`            | read     | `mission:read`   | Status (`ok`, `degraded`, `critical`, `halted`), active signals with what to do, and recent halts. See `docs/operations.md`.  |
+| `read_health`            | read     | `policy:read`    | Status (`ok`, `degraded`, `critical`, `halted`), active signals with what to do, and recent halts. See `docs/operations.md`.  |
 | `halt_workspace`         | material | `policy:write`   | Emergency halt: stops new dispatch and guarded effects, keeps all state. Humans only.                                         |
 | `resume_workspace`       | material | `policy:write`   | Lifts the halt. Humans only.                                                                                                  |
 | `reset_storage_guard`    | material | `policy:write`   | Clears the storage guard after space was freed. Humans only. Trips again if the store is still full.                          |

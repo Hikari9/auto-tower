@@ -1,4 +1,4 @@
-import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { officeRunnerEngine } from '../../src/adapters/office/engine.js';
 import {
@@ -86,6 +86,7 @@ export async function runScenario(
     log(line);
   };
   const world = createWorld();
+  let finished = false;
   try {
     world.github.add(ISSUE_URL);
     world.issues.setSyncConfig(world.ownerCtx(), {
@@ -291,6 +292,7 @@ export async function runScenario(
         'the restored issue link is verified closed',
       );
       step('restored from backup and read the mission back unchanged');
+      finished = true;
       return {
         missionId,
         steps,
@@ -306,6 +308,10 @@ export async function runScenario(
       world.close();
     } catch {
       // Already closed above.
+    }
+    // A scenario that failed leaves nothing behind. A finished one hands its directory to the caller.
+    if (!finished) {
+      rmSync(world.dir, { recursive: true, force: true });
     }
   }
 }

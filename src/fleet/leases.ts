@@ -809,6 +809,10 @@ function withholdReason(
   packet: WorkPacket,
   claim?: ClaimOffer,
 ): string | undefined {
+  // A halt hands out nothing, on a reconcile as on a claim: no new fence, no renewed lease.
+  if (isHalted(tx, runner.workspaceId)) {
+    return 'emergency halt: dispatch is stopped';
+  }
   if (runner.status !== 'active') {
     return `runner is ${runner.status}`;
   }

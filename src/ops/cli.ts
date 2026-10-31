@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { parseArgs } from 'node:util';
 import { getPrincipal } from '../auth/principals.js';
 import { applyMigrations } from '../storage/migrate.js';
@@ -115,6 +116,7 @@ export function runOpsCli(
           const backup = exportBackup(db, {
             includeTokenDigests: values['include-token-digests'] === true,
           });
+          mkdirSync(dirname(out), { recursive: true, mode: 0o700 });
           // `wx` fails if the file appeared since the check, and the mode keeps it owner-only.
           writeFileSync(out, JSON.stringify(backup), {
             flag: 'wx',
@@ -199,9 +201,12 @@ export function runOpsCli(
           const principal = getPrincipal(db, actorId);
           if (
             principal === undefined ||
-            principal.workspaceId !== workspaceId
+            principal.workspaceId !== workspaceId ||
+            principal.disabledAt !== null
           ) {
-            io.stderr(`No principal ${actorId} in workspace ${workspaceId}`);
+            io.stderr(
+              `No enabled principal ${actorId} in workspace ${workspaceId}`,
+            );
             return 1;
           }
           const input = {
@@ -243,9 +248,12 @@ export function runOpsCli(
           const principal = getPrincipal(db, actorId);
           if (
             principal === undefined ||
-            principal.workspaceId !== workspaceId
+            principal.workspaceId !== workspaceId ||
+            principal.disabledAt !== null
           ) {
-            io.stderr(`No principal ${actorId} in workspace ${workspaceId}`);
+            io.stderr(
+              `No enabled principal ${actorId} in workspace ${workspaceId}`,
+            );
             return 1;
           }
           const common = {
@@ -300,7 +308,13 @@ export function runOpsCli(
       io.stderr(error.message);
       return 1;
     }
-    io.stderr(`ops failed: ${error instanceof Error ? error.name : 'error'}`);
+    // A file-system code names a cause and no secret, and tells the operator what to fix.
+    const code = (error as { code?: unknown } | null)?.code;
+    const cause =
+      typeof code === 'string' && /^E[A-Z]+$/.test(code) ? ` (${code})` : '';
+    io.stderr(
+      `ops failed: ${error instanceof Error ? error.name : 'error'}${cause}`,
+    );
     return 1;
   }
 }

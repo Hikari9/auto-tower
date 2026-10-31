@@ -213,6 +213,43 @@ describe('a halt stops new dispatch and keeps everything else', () => {
   });
 });
 
+describe('a halt stops a recovering runner from taking its lease back', () => {
+  it('withholds on reconcile, reissues no fence, and lets it reconcile once resumed', async () => {
+    const h = createFleetHarness();
+    const runner = await h.runner();
+    await runner.claim();
+    h.mission([{ scope: ['repo:app'] }]);
+    h.tick();
+    const granted = (await runner.claim()).body.assignments[0];
+    // The runner goes quiet past the lease TTL, so the lease moves to recovery. Then a person halts.
+    h.clock.advance(h.config.leaseTtlMs + 1000);
+    h.fleet.sweep(TEST_WORKSPACE);
+    halt(h, 'incident');
+    const lease = () =>
+      h.db.get<{ fence: number; status: string; expires_at: string }>(
+        'SELECT fence, status, expires_at FROM runner_leases WHERE id = ?',
+        [granted.leaseId],
+      );
+    const before = lease();
+    expect(before?.status).toBe('recovering');
+
+    const held = await runner.reconcile(granted.leaseId, granted.fence);
+    expect(held.status).toBe(200);
+    expect(held.body.assignment).toBeNull();
+    expect(held.body.withheld).toBe('emergency halt: dispatch is stopped');
+    // Nothing moved: no new fence, no renewed lease, still recovering.
+    expect(held.body.lease.fence).toBe(granted.fence);
+    expect(lease()).toEqual(before);
+    expect(h.db.all('SELECT id FROM runner_leases')).toHaveLength(1);
+
+    resume(h);
+    const after = await runner.reconcile(granted.leaseId, granted.fence);
+    expect(after.body.assignment).not.toBeNull();
+    expect(after.body.withheld).toBeNull();
+    expect(after.body.lease.fence).toBeGreaterThan(granted.fence);
+  });
+});
+
 describe('a halt stops guarded effects', () => {
   it('refuses to close a provider issue, writes nothing outward, and allows it again once lifted', async () => {
     const h = createIssueHarness();
@@ -280,7 +317,10 @@ describe('the halt tools', () => {
     });
     expect(halted.halt).toMatchObject({ halted: true });
 
-    // Anyone can read it.
+    // A person or a chief of staff can read it. A runner or a provider cannot: it names halt
+    // reasons, who halted, and internal failures.
+    const runner = await env.session(env.runner);
+    expect((await runner.call('read_health', {})).status).toBe(403);
     const seen = await cos.ok('read_health', {});
     expect(seen.health.status).toBe('halted');
     expect(seen.haltHistory[0]).toMatchObject({

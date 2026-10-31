@@ -9,6 +9,7 @@ import {
   signalsFor,
 } from '../../src/ops/index.js';
 import type { SqlDatabase } from '../../src/storage/database.js';
+import { openSqliteDatabase } from '../../src/storage/sqlite.js';
 import {
   openTestDatabase,
   seedPrincipal,
@@ -42,22 +43,59 @@ function fullable(inner: SqlDatabase) {
 }
 
 describe('isQuotaFailure', () => {
-  it.each([
-    'database or disk is full',
-    'SQLITE_FULL: database or disk is full',
-    'D1_ERROR: Exceeded storage limit',
-    'quota exceeded for this account',
-    'D1 database size limit reached',
-  ])('recognizes %j', (message) => {
-    expect(isQuotaFailure(new Error(message))).toBe(true);
+  it('recognizes the error SQLite itself raises when the file cannot grow', () => {
+    const db = openSqliteDatabase(':memory:');
+    db.exec('CREATE TABLE t (v TEXT)');
+    db.exec('PRAGMA max_page_count = 8');
+    let caught: unknown;
+    try {
+      for (let i = 0; i < 200; i += 1) {
+        db.run('INSERT INTO t (v) VALUES (?)', ['x'.repeat(4000)]);
+      }
+    } catch (error) {
+      caught = error;
+    }
+    expect((caught as Error).message).toMatch(/database or disk is full/);
+    expect(isQuotaFailure(caught)).toBe(true);
   });
 
-  it.each(['UNIQUE constraint failed: events.seq', 'no such table: x', 'busy'])(
-    'does not mistake %j for a quota failure',
-    (message) => {
-      expect(isQuotaFailure(new Error(message))).toBe(false);
-    },
-  );
+  it.each([
+    [{ errcode: 13 }],
+    [{ errcode: 13 | (2 << 8) }],
+    [{ code: 'SQLITE_FULL' }],
+    [{ code: 'D1_STORAGE_LIMIT' }],
+  ])('recognizes a driver error carrying %j', (props) => {
+    expect(isQuotaFailure(Object.assign(new Error('x'), props))).toBe(true);
+  });
+
+  it('recognizes D1 plan-limit text at the start of a plain error', () => {
+    expect(isQuotaFailure(new Error('D1_ERROR: Exceeded storage limit'))).toBe(
+      true,
+    );
+  });
+
+  it.each([
+    'UNIQUE constraint failed: events.seq',
+    'no such table: x',
+    'busy',
+    // Text a caller can put in a domain error must never read as a quota failure.
+    'Mission x quota exceeded was not found',
+    'database or disk is full',
+    'SQLITE_FULL',
+  ])('does not take %j for a quota failure when it is only text', (message) => {
+    expect(isQuotaFailure(new Error(message))).toBe(false);
+  });
+
+  it('does not take a domain error that quotes D1 text, or a code-less errcode, for one', () => {
+    class DomainError extends Error {}
+    expect(
+      isQuotaFailure(new DomainError('D1_ERROR: Exceeded storage limit')),
+    ).toBe(false);
+    expect(
+      isQuotaFailure(Object.assign(new Error('x'), { errcode: 787 })),
+    ).toBe(false);
+  });
+
   it('treats its own error and non-errors correctly', () => {
     expect(isQuotaFailure(new StorageQuotaError())).toBe(true);
     expect(isQuotaFailure('database or disk is full')).toBe(false);
@@ -152,6 +190,25 @@ describe('the quota guard', () => {
       }),
     ).toThrow(StorageQuotaError);
     expect(base.all('SELECT workspace_id FROM ops_halt')).toEqual([]);
+  });
+
+  it('is not tripped by a request whose own text mentions a quota', async () => {
+    const { createCore } = await import('../../src/core/index.js');
+    const { guardStorage: guard } = await import('../../src/ops/quota.js');
+    const db = guard(openTestDatabase());
+    seedPrincipal(db, { kind: 'human' });
+    const core = createCore({ db });
+    const actor = { id: 'prn_x', kind: 'human' as const };
+    expect(() =>
+      core.missions.cancelMission(
+        { workspaceId: TEST_WORKSPACE, actor },
+        'x quota exceeded database or disk is full',
+        1,
+        null,
+      ),
+    ).toThrow(/not found/);
+    expect(db.quota.tripped).toBe(false);
+    expect(healthReport(db, TEST_WORKSPACE).status).toBe('ok');
   });
 
   it('does not trip on an ordinary constraint failure', () => {

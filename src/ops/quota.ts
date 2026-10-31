@@ -26,10 +26,19 @@ export class StorageQuotaError extends Error {
   }
 }
 
-/** What SQLite and D1 say when a write is refused for space or plan limits. */
-const QUOTA_MESSAGE =
-  /database or disk is full|SQLITE_FULL|exceeded.{0,40}(quota|limit)|(quota|storage|database size|row).{0,40}(exceeded|limit reached)|D1_.{0,40}(LIMIT|QUOTA)/i;
+/** SQLITE_FULL, and its extended codes, which carry it in the low byte. */
+const SQLITE_FULL = 13;
 
+/** What D1 says in its error text when a plan limit refuses a write. It always begins the message. */
+const D1_LIMIT_MESSAGE = /^D1_[A-Z_]*:?.{0,80}(limit|quota)/i;
+
+/**
+ * True only for the store's own refusal. It is decided from the driver's error code, never from
+ * text that a caller chose: a domain error can carry any id or title in its message, and matching
+ * that text would let one request trip the guard for the whole host. The one text rule is D1's,
+ * anchored at the start of a plain `Error`, which a domain error (a subclass with its own prefix)
+ * cannot produce.
+ */
 export function isQuotaFailure(error: unknown): boolean {
   if (error instanceof StorageQuotaError) {
     return true;
@@ -37,12 +46,17 @@ export function isQuotaFailure(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
   }
-  const code = (error as { code?: unknown }).code;
-  return (
-    (typeof code === 'string' &&
-      /SQLITE_FULL|D1_.*(LIMIT|QUOTA)/i.test(code)) ||
-    QUOTA_MESSAGE.test(error.message)
-  );
+  const { code, errcode } = error as { code?: unknown; errcode?: unknown };
+  if (typeof errcode === 'number' && (errcode & 0xff) === SQLITE_FULL) {
+    return true;
+  }
+  if (
+    typeof code === 'string' &&
+    /^(SQLITE_FULL|D1_.*(LIMIT|QUOTA))/i.test(code)
+  ) {
+    return true;
+  }
+  return error.constructor === Error && D1_LIMIT_MESSAGE.test(error.message);
 }
 
 const MUTATING =

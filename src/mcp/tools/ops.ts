@@ -1,11 +1,11 @@
 import { InputReader } from '../../core/validation.js';
-import { HaltForbiddenError } from '../../ops/halt.js';
 import {
   engageHalt,
+  HaltForbiddenError,
   haltHistory,
-  healthReport,
   liftHalt,
-} from '../../ops/index.js';
+} from '../../ops/halt.js';
+import { healthReport } from '../../ops/health.js';
 import type { GuardedDatabase } from '../../ops/quota.js';
 import type { ToolDefinition } from '../tool.js';
 
@@ -18,7 +18,9 @@ export const opsTools: readonly ToolDefinition[] = [
     description:
       'Reports whether the workspace is running, halted or degraded, with each active signal, what it means and what to do about it. Read-only.',
     readOnly: true,
-    scopes: ['mission:read'],
+    // Halt reasons, who halted and the failure signals are operations detail. Runners and
+    // providers hold mission:read and not policy:read, so they do not see it.
+    scopes: ['policy:read'],
     properties: {},
     run(ctx, args) {
       new InputReader(args).finish();

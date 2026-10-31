@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import { runOpsCli } from '../../src/ops/cli.js';
 import {
   disablePrincipal,
   RevocationError,
   revocationHistory,
   revokeTokenById,
-  runOpsCli,
 } from '../../src/ops/index.js';
 import { createWorld, WORLD_DIGEST, WORLD_VERSION } from '../e2e/world.js';
 import { seedPrincipal, TEST_WORKSPACE } from '../helpers/tower.js';
@@ -282,6 +282,29 @@ describe('revocation runbook (docs/policy-revocation.md)', () => {
         world.dbPath,
       ).err,
     ).toMatch(/No token/);
+    world.close();
+  });
+
+  it('does not accept a disabled person as the actor, for halt, resume or revocation', async () => {
+    const { world, second } = await incident();
+    const old = world.principals.owner.id;
+    // The second person disables the first. The first can no longer act through the CLI either.
+    const done = cli(
+      ['disable-principal', '--actor', second.principalId, '--principal', old],
+      world.dbPath,
+    );
+    expect(done.code).toBe(0);
+    for (const args of [
+      ['halt', '--actor', old],
+      ['resume', '--actor', old],
+      ['revoke-token', '--actor', old, '--token-id', 'x'],
+      ['disable-principal', '--actor', old, '--principal', second.principalId],
+    ]) {
+      const result = cli(args, world.dbPath);
+      expect(result.code, args.join(' ')).toBe(1);
+      expect(result.err).toMatch(/No enabled principal/);
+    }
+    expect(world.db.all('SELECT 1 FROM ops_halt')).toEqual([]);
     world.close();
   });
 

@@ -2,12 +2,12 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { runOpsCli } from '../../src/ops/cli.js';
 import {
   BackupError,
   exportBackup,
   readBackup,
   restoreBackup,
-  runOpsCli,
   storeFingerprint,
 } from '../../src/ops/index.js';
 import { applyMigrations } from '../../src/storage/migrate.js';
@@ -284,6 +284,78 @@ describe('refusing a backup that cannot be trusted', () => {
   });
 });
 
+describe('a backup edited and re-digested by someone who can write the file', () => {
+  const redigest = (backup: ReturnType<typeof exportBackup>) => {
+    const edited = JSON.parse(JSON.stringify(backup));
+    edited.digest = createHash('sha256')
+      .update(
+        JSON.stringify(
+          Object.keys(edited.tables)
+            .sort()
+            .map((name) => [name, edited.tables[name]]),
+        ),
+      )
+      .digest('hex');
+    return edited;
+  };
+
+  it('cannot plant a credential in a file that says it holds no token digests', async () => {
+    const { world } = await populated();
+    const plain = exportBackup(world.db);
+    const withTokens = exportBackup(world.db, { includeTokenDigests: true });
+    const planted = redigest({
+      ...plain,
+      tables: { ...plain.tables, api_tokens: withTokens.tables.api_tokens },
+    } as typeof plain);
+    expect(readBackup(JSON.stringify(planted))).toBeDefined();
+    const fresh = openSqliteDatabase(join(tempDir(), 'planted.sqlite'));
+    expect(() => restoreBackup(fresh, planted, migrations())).toThrow(
+      /api_tokens but says it has no token digests/,
+    );
+    fresh.close();
+    world.close();
+  });
+
+  it('cannot carry tables a backup never contains, such as a doctored migration record', async () => {
+    const { world } = await populated();
+    const backup = exportBackup(world.db);
+    for (const name of [
+      'schema_migrations',
+      'mcp_sessions',
+      'mcp_idempotency',
+      'runner_claim_backoff',
+    ]) {
+      const forged = redigest({
+        ...backup,
+        tables: {
+          ...backup.tables,
+          [name]: { columns: ['id'], rows: [['x']] },
+        },
+      } as typeof backup);
+      const fresh = openSqliteDatabase(join(tempDir(), `${name}.sqlite`));
+      expect(() => restoreBackup(fresh, forged, migrations()), name).toThrow(
+        /never contains/,
+      );
+      fresh.close();
+    }
+    world.close();
+  });
+
+  it('still restores a file that says it holds token digests, when it does', async () => {
+    const { world } = await populated();
+    const fresh = openSqliteDatabase(join(tempDir(), 'ok.sqlite'));
+    expect(
+      restoreBackup(
+        fresh,
+        exportBackup(world.db, { includeTokenDigests: true }),
+        migrations(),
+      ).rows,
+    ).toBeGreaterThan(0);
+    fresh.close();
+    world.close();
+  });
+});
+
 describe('schema migration forward', () => {
   it('restores a backup from an older schema, migrates it forward, and keeps the data', async () => {
     // A store that ran every migration but the last, with data in a table the last one alters.
@@ -384,6 +456,27 @@ describe('pnpm ops', () => {
     world.close();
   });
 
+  it('creates a missing backup directory, owner-only, and names the cause when it cannot write', async () => {
+    const { world } = await populated();
+    const dir = tempDir();
+    const nested = join(dir, 'backups', 'nightly', 'tower.json');
+    const made = run(['backup', '--db', world.dbPath, '--out', nested]);
+    expect(made.code).toBe(0);
+    expect(statSync(join(dir, 'backups', 'nightly')).mode & 0o777).toBe(0o700);
+    expect(existsSync(nested)).toBe(true);
+    // A parent that is a file: the error carries the file-system code, and no path or content.
+    const blocked = run([
+      'backup',
+      '--db',
+      world.dbPath,
+      '--out',
+      join(nested, 'x.json'),
+    ]);
+    expect(blocked.code).toBe(1);
+    expect(blocked.err).toMatch(/ops failed: Error \((ENOTDIR|EEXIST)\)/);
+    world.close();
+  });
+
   it('halts and resumes by a human principal, and reports status', async () => {
     const { world } = await populated();
     const owner = world.principals.owner.id;
@@ -408,7 +501,7 @@ describe('pnpm ops', () => {
       /is running/,
     );
     expect(run(['halt', ...base, '--actor', 'prn_nobody']).err).toMatch(
-      /No principal/,
+      /No enabled principal/,
     );
     expect(run(['halt', ...base]).code).toBe(2);
     expect(run(['status', '--db', join(tempDir(), 'none.sqlite')]).code).toBe(

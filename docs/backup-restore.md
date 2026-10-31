@@ -27,10 +27,10 @@ After a restore without token digests, issue new tokens (`pnpm tower token creat
 ## Take a backup
 
 ```sh
-pnpm ops backup --out backups/tower-$(date +%Y%m%dT%H%M%S).json
+pnpm ops backup --out .tower/backups/tower-$(date +%Y%m%dT%H%M%S).json
 ```
 
-It reads the whole database in one transaction, so the file is one consistent moment, and writers wait only for the read. The file is mode 0600 and the command refuses to overwrite one. It works while the server runs. Copy the file off the machine: a backup on the disk that failed is not a backup. Store it as carefully as the database.
+It reads the whole database in one transaction, so the file is one consistent moment, and writers wait only for the read. The file is mode 0600 and the command refuses to overwrite one. It works while the server runs. The directory is created owner-only if it is missing. `.tower/` is already ignored by git, so a backup kept there cannot be committed by accident, and a backup elsewhere in the repository is yours to keep out of git. Copy the file off the machine: a backup on the disk that failed is not a backup. Store it as carefully as the database.
 
 Check any backup, at any time, without touching a database:
 
@@ -38,7 +38,7 @@ Check any backup, at any time, without touching a database:
 pnpm ops verify --from backups/tower-20261031T120000.json
 ```
 
-`verify` recomputes the digest over every table, so an edited or damaged file is refused.
+`verify` recomputes the digest over every table, so a damaged file, or an edit that did not also recompute the digest, is refused. The digest is an integrity check, not a signature: someone who can write the file can recompute it. So restore also holds the file to what an export can contain. It refuses a table a backup never has (sessions, replay results, the migration record), and refuses `api_tokens` in a file that says it holds no token digests. Keep backups where only you can write them (mode 0600 in a directory only you can write).
 
 ## Restore
 
