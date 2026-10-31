@@ -219,7 +219,7 @@ describe('create, read, search, update, cancel', () => {
     expect(res.body.error.details.issues).toEqual(
       expect.arrayContaining([
         { path: 'title', message: 'must not be empty' },
-        { path: 'links[0].url', message: 'must use http or https' },
+        { path: 'links[0].url', message: 'must use https' },
       ]),
     );
   });
@@ -344,6 +344,39 @@ describe('create, read, search, update, cancel', () => {
       (await api.call(api.owner.token, 'GET', `/missions/${m.id}`)).body.mission
         .title,
     ).toBe('Renamed');
+  });
+
+  it.each([
+    'http://github.com/o/r/issues/1',
+    'https://localhost/x',
+    'https://127.0.0.1/x',
+    'https://10.1.2.3/x',
+    'https://169.254.169.254/latest/meta-data',
+    'https://metadata.internal/x',
+  ])('refuses the non-public link %s on create and update', async (url) => {
+    const api = setup();
+    const links = [{ url, classification: 'required' }];
+
+    const created = await api.call(api.owner.token, 'POST', '/missions', {
+      ...NEW_MISSION,
+      links,
+    });
+    expect(created.status).toBe(400);
+    expect(created.body.error.details.issues[0].path).toBe('links[0].url');
+
+    const m = await createMission(api);
+    const updated = await api.call(
+      api.owner.token,
+      'PATCH',
+      `/missions/${m.id}`,
+      { expectedVersion: 1, links },
+    );
+    expect(updated.status).toBe(400);
+    expect(updated.body.error.details.issues[0].path).toBe('links[0].url');
+    expect(
+      (await api.call(api.owner.token, 'GET', `/missions/${m.id}`)).body.mission
+        .version,
+    ).toBe(1);
   });
 
   it('answers 409 for an invalid transition and leaves the mission unchanged', async () => {
