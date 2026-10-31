@@ -9,7 +9,14 @@ import type {
 } from '../core/types.js';
 import type { SqlDatabase } from '../storage/database.js';
 import { backoffMs } from './backoff.js';
-import { authorityReason, ineligibleReason, pickRunner } from './broker.js';
+import {
+  authorityReason,
+  type ClaimRefusal,
+  ineligibleReason,
+  pickRunner,
+  policyVersionOf,
+  recordClaimRefusals,
+} from './broker.js';
 import { type FleetContext, savepoint } from './context.js';
 import { FleetError } from './errors.js';
 import type {
@@ -680,24 +687,50 @@ export function claim(
     heartbeatIn(ctx, tx, caller, input),
   );
   scheduleWorkspace(ctx, workspaceId);
-  return ctx.transact(workspaceId, (tx) => {
-    const runner = standing(ctx, tx, caller, input);
-    const reconcile = recovering(tx, runner);
-    const result = {
-      ...first,
-      runner: { id: runner.id, status: runner.status },
-      reconcile,
-    };
-    if (reconcile.length > 0) {
-      return {
-        ...result,
-        assignments: [],
-        withheld: [],
-        retryAfterMs: ctx.config.pollIntervalMs,
-      };
+  // Refusals are collected in the claim and written after it settles, so a claim that rolls back
+  // still leaves its refusals on record. The refusals change no grant, so they are not part of it.
+  const refusals: ClaimRefusal[] = [];
+  // Best effort: a failed write is logged by name and changes neither the claim nor its error.
+  const settle = (): void => {
+    if (refusals.length === 0) {
+      return;
     }
-    return { ...result, ...grant(ctx, tx, runner) };
-  });
+    try {
+      ctx.transact(workspaceId, (tx) =>
+        recordClaimRefusals(tx, ctx.now, workspaceId, refusals),
+      );
+    } catch (error) {
+      console.error(
+        `claim refusals not recorded: ${error instanceof Error ? error.name : 'error'}`,
+      );
+    }
+  };
+  let result: ClaimResult;
+  try {
+    result = ctx.transact(workspaceId, (tx) => {
+      const runner = standing(ctx, tx, caller, input);
+      const reconcile = recovering(tx, runner);
+      const base = {
+        ...first,
+        runner: { id: runner.id, status: runner.status },
+        reconcile,
+      };
+      if (reconcile.length > 0) {
+        return {
+          ...base,
+          assignments: [],
+          withheld: [],
+          retryAfterMs: ctx.config.pollIntervalMs,
+        };
+      }
+      return { ...base, ...grant(ctx, tx, runner, refusals) };
+    });
+  } catch (error) {
+    settle();
+    throw error;
+  }
+  settle();
+  return result;
 }
 
 function offersOf(tx: SqlDatabase, runner: Runner) {
@@ -754,6 +787,7 @@ function withholdReason(
   runner: Runner,
   mission: MissionState,
   packet: WorkPacket,
+  claim?: ClaimOffer,
 ): string | undefined {
   if (runner.status !== 'active') {
     return `runner is ${runner.status}`;
@@ -761,18 +795,66 @@ function withholdReason(
   if (PAUSING_MISSION_STATES.includes(mission.state)) {
     return `mission is ${mission.state}`;
   }
-  return (
-    ineligibleReason(tx, ctx.config, runner, mission.id, packet, ctx.now(), {
-      requireLive: false,
-      load: 'none',
-    }) ?? authorityReason(tx, ctx.now, runner.workspaceId, mission, packet)
+  const ineligible = ineligibleReason(
+    tx,
+    ctx.config,
+    runner,
+    mission.id,
+    packet,
+    ctx.now(),
+    { requireLive: false, load: 'none' },
   );
+  return ineligible ?? authorityHold(ctx, tx, runner, mission, packet, claim);
+}
+
+/** The attempt a claim is deciding, and where a refusal of it is collected for recording. */
+interface ClaimOffer {
+  attemptId: string;
+  refusals: ClaimRefusal[];
+}
+
+/**
+ * The authority refusal for a packet, or undefined. At a claim (`claim` given) a refusal is
+ * collected, and written once the claim settles.
+ */
+function authorityHold(
+  ctx: FleetContext,
+  tx: SqlDatabase,
+  runner: Runner,
+  mission: MissionState,
+  packet: WorkPacket,
+  claim?: ClaimOffer,
+): string | undefined {
+  const reason = authorityReason(
+    tx,
+    ctx.now,
+    runner.workspaceId,
+    mission,
+    packet,
+  );
+  if (
+    reason !== undefined &&
+    claim !== undefined &&
+    packet.authorization !== null
+  ) {
+    claim.refusals.push({
+      attemptId: claim.attemptId,
+      runnerId: runner.id,
+      authorizedBy: packet.authorization.by,
+      mission,
+      packet,
+      reason,
+      policyVersion: policyVersionOf(tx, ctx.now, runner.workspaceId),
+    });
+  }
+  return reason;
 }
 
 function grant(
   ctx: FleetContext,
   tx: SqlDatabase,
   runner: Runner,
+  refusals: ClaimRefusal[],
 ): Pick<ClaimResult, 'assignments' | 'withheld' | 'retryAfterMs'> {
   const workspaceId = runner.workspaceId;
   const now = ctx.now();
@@ -794,7 +876,10 @@ function grant(
     if (mission === undefined || found === undefined) {
       continue;
     }
-    const reason = withholdReason(ctx, tx, runner, mission, found.packet);
+    const reason = withholdReason(ctx, tx, runner, mission, found.packet, {
+      attemptId: lease.attemptId,
+      refusals,
+    });
     if (reason !== undefined) {
       withheld.push({ attemptId: lease.attemptId, reason });
       continue;
@@ -842,13 +927,10 @@ function grant(
       continue;
     }
     // A grant that was valid at dispatch is checked again here, at the point of effect.
-    const authority = authorityReason(
-      tx,
-      ctx.now,
-      workspaceId,
-      mission,
-      found.packet,
-    );
+    const authority = authorityHold(ctx, tx, runner, mission, found.packet, {
+      attemptId: offer.id,
+      refusals,
+    });
     if (authority !== undefined) {
       hold(authority);
       continue;

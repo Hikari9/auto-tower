@@ -20,6 +20,7 @@ import {
   parseUpdateMission,
 } from '../../core/inputs.js';
 import type { CommandContext, CommandResult } from '../../core/service.js';
+import { authorityHoldsFor } from '../../fleet/broker.js';
 import { createPolicyService } from '../../policy/service.js';
 import type { AppDependencies, AppEnv, RouteSpec } from '../app.js';
 
@@ -250,11 +251,22 @@ const readMission: RouteSpec = {
   access: { scopes: ['mission:read'] },
   handler: guarded((c) => {
     const id = c.req.param('id') ?? '';
-    const mission = coreOf(c).missions.getMission(callerOf(c).workspaceId, id);
+    const { workspaceId } = callerOf(c);
+    const mission = coreOf(c).missions.getMission(workspaceId, id);
     if (mission === undefined) {
       throw new MissionNotFoundError(id);
     }
-    return c.json({ mission });
+    // Claim-time authority refusals still holding a branch of this mission, with the reason.
+    const { db, now } = c.get('deps');
+    return c.json({
+      mission,
+      holds: authorityHoldsFor(
+        db,
+        now ?? (() => new Date()),
+        workspaceId,
+        mission,
+      ),
+    });
   }),
 };
 
