@@ -11,7 +11,11 @@ describe('migrations', () => {
   it('applies each migration once and skips them on re-run', () => {
     const db = openSqliteDatabase(':memory:');
     const migrations = readMigrationFiles(defaultMigrationsDir());
-    expect(applyMigrations(db, migrations)).toEqual(['0001_initial']);
+    // Derived from the directory, so adding a migration never needs an edit here.
+    expect(migrations.length).toBeGreaterThan(0);
+    expect(applyMigrations(db, migrations)).toEqual(
+      migrations.map((migration) => migration.id),
+    );
     expect(applyMigrations(db, migrations)).toEqual([]);
   });
 
