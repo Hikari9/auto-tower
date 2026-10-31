@@ -75,7 +75,7 @@ Not yet in this task: independent review gates for high-risk missions and provid
 
 ## Work packets and the dependency graph
 
-A new mission's checklist items are all not done. Only an update marks them done.
+An update must change at least one field, so an empty update cannot discard a verified outcome. A new mission's checklist items are all not done. Only an update marks them done.
 
 A packet is `pending` until it has an authorization and every packet it depends on is `verified`. Then the scheduler marks it `ready`. Only `verified` satisfies a dependency, so a failed or cancelled prerequisite keeps its dependents `pending`.
 
@@ -109,9 +109,9 @@ A runner principal may start or report only an attempt dispatched to its own id.
 
 ## Limits
 
-- A mission accepts at most 5,000 events (`maxEventsPerMission`). Every command replays the stream, so the cap bounds the cost of one command. Cancelling is always allowed, so a full mission can still be closed.
+- A mission accepts at most 5,000 events (`maxEventsPerMission`). Every command replays the stream, so the cap bounds the cost of one command. At the cap a mission records only what winds it down: moves to `cancelled` or `needs-attention` (even from `completed`), and a runner starting or reporting an attempt that was already dispatched. A retry of the command that reached the cap still returns its first result. The scheduler stops adding work at the cap, never appends past it, and can still flag the mission `needs-attention`.
 - At most 200 packets per mission, 100 list items, and 256 KiB per request body.
-- Replay mutates one state in place instead of copying it per event.
+- Replay mutates one state in place instead of copying it per event. It works on copies of event payloads, so the history read from the log is never changed by a later event.
 
 ## Idempotency and concurrency
 
@@ -165,6 +165,7 @@ The service runs each command in one synchronous transaction: read the stream, a
 
 ## Out of scope for this task
 
+- Policy enforcement. Evidence and policy references are opaque strings that nothing resolves yet, and a chief of staff may cancel a required child, tick checklist items and verify an outcome. Until the policy store lands, treat a chief of staff token as able to complete a mission it did not execute. The producer check only blocks principals that reported an attempt.
 - Runner registration, heartbeats, leases, fencing and the real runner pool (the scheduler reads a `RunnerPool` port).
 - Policy evaluation and the Decision Inbox. Packet authorization is recorded with its policy refs, and a chief of staff must cite one, but nothing evaluates them yet.
 - Issue provider sync, read-back and the required-link guard.

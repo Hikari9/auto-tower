@@ -12,6 +12,20 @@ import type {
 } from './types.js';
 
 /** Fields a `mission.updated` event may change. */
+/** The only fields a `mission.updated` event may carry. Anything else is refused before it is recorded. */
+export const MISSION_CHANGE_KEYS = [
+  'title',
+  'intent',
+  'outcome',
+  'constraints',
+  'risk',
+  'size',
+  'priority',
+  'definitionOfDone',
+  'links',
+  'policyRefs',
+] as const;
+
 export interface MissionChanges {
   title?: string;
   intent?: string;
@@ -138,12 +152,26 @@ export function applyEvent(
   return state;
 }
 
+/**
+ * State must never share arrays or objects with an event: replay mutates state in place,
+ * and a shared payload array would rewrite the history that was read from the log.
+ */
+function isolate(event: StoredEvent): StoredEvent {
+  return {
+    ...event,
+    payload: structuredClone(event.payload),
+    policyRefs: [...event.policyRefs],
+    evidenceRefs: [...event.evidenceRefs],
+  };
+}
+
 /** Mutates `state`. Replay uses it directly, so a long stream is not copied once per event. */
 function applyInPlace(
   state: MissionState,
-  event: StoredEvent,
+  recorded: StoredEvent,
   at: string,
 ): void {
+  const event = isolate(recorded);
   state.version = event.version;
   state.updatedAt = at;
   for (const ref of event.evidenceRefs) {
@@ -156,9 +184,17 @@ function applyInPlace(
   switch (type) {
     case 'mission.updated': {
       const { changes } = event.payload as MissionEventPayloads[typeof type];
-      Object.assign(state, changes);
-      // Changing what was verified invalidates the verification.
-      state.outcomeVerification = null;
+      let changed = false;
+      for (const key of MISSION_CHANGE_KEYS) {
+        if (changes[key] !== undefined) {
+          Object.assign(state, { [key]: changes[key] });
+          changed = true;
+        }
+      }
+      if (changed) {
+        // Changing what was verified invalidates the verification.
+        state.outcomeVerification = null;
+      }
       break;
     }
     case 'mission.transitioned': {
@@ -312,7 +348,8 @@ function applyInPlace(
   }
 }
 
-function created(event: StoredEvent, at: string): MissionState {
+function created(recorded: StoredEvent, at: string): MissionState {
+  const event = isolate(recorded);
   const p = event.payload as MissionEventPayloads['mission.created'];
   return {
     id: missionIdOfStream(event.streamId),

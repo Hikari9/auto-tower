@@ -47,8 +47,13 @@ export class FakeClock {
 /** A runner pool the test controls. `online` runners take any packet, first come first served. */
 export class FakePool implements RunnerPool {
   online: string[] = [];
+  /** Every request the scheduler made, so tests can check what it asked. */
+  requests: Array<Parameters<RunnerPool['findEligible']>[0]> = [];
 
-  findEligible(): { runnerId: string } | undefined {
+  findEligible(
+    request: Parameters<RunnerPool['findEligible']>[0],
+  ): { runnerId: string } | undefined {
+    this.requests.push(request);
     const runnerId = this.online[0];
     return runnerId === undefined ? undefined : { runnerId };
   }

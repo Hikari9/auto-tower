@@ -11,7 +11,11 @@ import {
 } from './errors.js';
 import type { CompletionGuardRegistry } from './guards.js';
 import type { AddPacketInput } from './inputs.js';
-import type { MissionChanges, MissionEventPayloads } from './reducer.js';
+import {
+  MISSION_CHANGE_KEYS,
+  type MissionChanges,
+  type MissionEventPayloads,
+} from './reducer.js';
 import {
   assertAttemptTransition,
   assertMissionTransition,
@@ -141,6 +145,19 @@ export function updateDecision(
     payload: { changes },
     check(state, env) {
       requireWriter(env.actor, 'update a mission');
+      const unknown = Object.keys(changes).filter(
+        (key) => !(MISSION_CHANGE_KEYS as readonly string[]).includes(key),
+      );
+      if (unknown.length > 0) {
+        throw new ValidationError(
+          unknown.map((path) => ({ path, message: 'cannot be updated' })),
+        );
+      }
+      if (MISSION_CHANGE_KEYS.every((key) => changes[key] === undefined)) {
+        throw new ValidationError([
+          { path: '', message: 'must change at least one field' },
+        ]);
+      }
       if (state.state === 'completed' || state.state === 'cancelled') {
         throw new CommandNotAllowedError(
           'update',

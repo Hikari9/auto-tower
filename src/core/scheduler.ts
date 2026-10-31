@@ -137,12 +137,14 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
               );
             };
 
+            // A mission at its event cap takes no new work. It can still be flagged for attention.
             // Packets whose prerequisites are all verified and that carry an authorization.
             for (const packet of [...session.state.packets]) {
               const current = session.state.packets.find(
                 (p) => p.id === packet.id,
               );
               if (
+                !session.full &&
                 current?.status === 'pending' &&
                 current.authorization !== null &&
                 dependenciesSatisfied(current, session.state.packets)
@@ -152,7 +154,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
             }
 
             for (const packet of [...session.state.packets]) {
-              if (packet.status !== 'ready') {
+              if (packet.status !== 'ready' || session.full) {
                 continue;
               }
               const runner = pool.findEligible({
@@ -177,7 +179,8 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
             if (
               target !== undefined &&
               target !== session.state.state &&
-              canTransitionMission(session.state.state, target)
+              canTransitionMission(session.state.state, target) &&
+              (!session.full || target === 'needs-attention')
             ) {
               append(transitionDecision(target, 'scheduler'));
             }

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../../src/api/app.js';
 import { guarded } from '../../src/api/routes/missions.js';
 import { ForbiddenActorError } from '../../src/core/errors.js';
@@ -1169,6 +1169,10 @@ describe('error mapping for core errors', () => {
 });
 
 describe('search filters', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('filters by risk, parent and intent text, and orders by recent update', async () => {
     // Updates are ordered by recording time, so the wall clock is pinned and moved by hand.
     vi.useFakeTimers({ toFake: ['Date'] });

@@ -238,6 +238,8 @@ export interface MissionService {
 
 export interface MissionSession {
   state: MissionState;
+  /** True when the stream is at its event cap. Tracks the stream as steps are appended. */
+  readonly full: boolean;
   /** Appends one event at the next version, applies it, and updates the projection. */
   step(
     decision: Decision,
@@ -286,12 +288,6 @@ export function createMissionService(deps: MissionServiceDeps): MissionService {
       if (events.length === 0) {
         throw new MissionNotFoundError(missionId);
       }
-      if (events.length >= maxEvents && !isCancel(decision)) {
-        throw new CommandNotAllowedError(
-          'change a mission',
-          `it has reached its limit of ${maxEvents} events; cancel it and start a new one`,
-        );
-      }
       const result = log.append({
         workspaceId: ctx.workspaceId,
         streamId,
@@ -311,7 +307,13 @@ export function createMissionService(deps: MissionServiceDeps): MissionService {
       }
       const state = replay(events);
       // The event is appended before the checks so an idempotent replay is answered
-      // ahead of them. A failed check throws, which rolls the append back.
+      // ahead of them, the cap included. A failed check throws, which rolls the append back.
+      if (events.length >= maxEvents && !exemptFromCap(decision)) {
+        throw new CommandNotAllowedError(
+          'change a mission',
+          `it has reached its limit of ${maxEvents} events; cancel it and start a new one`,
+        );
+      }
       decision.check(state, envFor(tx, ctx.actor, state));
       const mission = applyEvent(state, result.event);
       const first = events[0];
@@ -472,7 +474,19 @@ export function createMissionService(deps: MissionServiceDeps): MissionService {
         const seq = events[0]?.seq ?? 0;
         const session: MissionSession = {
           state: replay(events),
+          get full() {
+            return session.state.version >= maxEvents;
+          },
           step(decision, meta) {
+            // Nothing here is idempotency-keyed, so the checks can run first and a refused
+            // decision never reaches the log, even if the caller catches the error.
+            if (session.full && !exemptFromCap(decision)) {
+              throw new CommandNotAllowedError(
+                'change a mission',
+                `it has reached its limit of ${maxEvents} events`,
+              );
+            }
+            decision.check(session.state, envFor(tx, actor, session.state));
             const { event } = log.append({
               workspaceId,
               streamId,
@@ -484,7 +498,6 @@ export function createMissionService(deps: MissionServiceDeps): MissionService {
               policyRefs: decision.policyRefs ?? [],
               evidenceRefs: decision.evidenceRefs ?? [],
             });
-            decision.check(session.state, envFor(tx, actor, session.state));
             session.state = applyEvent(session.state, event);
             writeProjection(tx, session.state, seq);
             return event;
@@ -496,10 +509,21 @@ export function createMissionService(deps: MissionServiceDeps): MissionService {
   };
 }
 
-function isCancel(decision: Decision): boolean {
+/**
+ * What a full mission may still record: moves that flag or close it, and a runner starting or
+ * reporting an attempt that was already dispatched, so work in flight is not orphaned.
+ */
+function exemptFromCap(decision: Decision): boolean {
+  if (
+    decision.type === 'attempt.started' ||
+    decision.type === 'attempt.reported'
+  ) {
+    return true;
+  }
+  const to = (decision.payload as { to?: string }).to;
   return (
     decision.type === 'mission.transitioned' &&
-    (decision.payload as { to: string }).to === 'cancelled'
+    (to === 'cancelled' || to === 'needs-attention')
   );
 }
 
