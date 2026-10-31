@@ -84,10 +84,13 @@ export function authorityReason(
     const who = redactString(auth.by).slice(0, 128);
     return `authority: the authorizing principal ${who} is not in this workspace`;
   }
+  // A disabled authorizer has no standing, whatever kind it is and whether or not it cited a rule.
+  if (actor.disabled_at !== null) {
+    return 'authority: the principal is disabled';
+  }
   if (actor.kind === 'human') {
     const denied = deniedClaim(db, clock, workspaceId, {
       id: auth.by,
-      disabled: actor.disabled_at !== null,
       mission,
       packet,
     });
@@ -126,18 +129,12 @@ function deniedClaim(
   workspaceId: string,
   authorizer: {
     id: string;
-    disabled: boolean;
     mission: Pick<MissionState, 'id'>;
     packet: WorkPacket;
   },
 ): string | undefined {
   const { id, mission, packet } = authorizer;
-  if (authorizer.disabled) {
-    return 'the principal is disabled';
-  }
-  if (
-    packet.scope.some((scope) => scope.includes('*') || hasTraversal(scope))
-  ) {
+  if (packet.scope.some((scope) => !checkableScope(scope))) {
     return `packet ${packet.id} declares a scope a deny rule cannot be checked against`;
   }
   const scopes =
@@ -169,6 +166,24 @@ function denyApplies(rule: PolicyRule, principalId: string, missionId: string) {
   );
 }
 
+/** A scope a deny rule can be matched against: literal, with no wildcard, traversal or padding. */
+function checkableScope(scope: string): boolean {
+  return (
+    !scope.includes('*') &&
+    !hasTraversal(scope) &&
+    scope === scope.trim()
+  );
+}
+
+/** The policy version now. Read inside the claim, so a refusal names the version it was decided under. */
+export function policyVersionOf(
+  db: SqlDatabase,
+  clock: () => Date,
+  workspaceId: string,
+): number {
+  return createPolicyService({ db, clock }).policyVersion(workspaceId);
+}
+
 /** A claim-time refusal, held until the claim settles so it is recorded whatever the outcome. */
 export interface ClaimRefusal {
   attemptId: string;
@@ -177,6 +192,8 @@ export interface ClaimRefusal {
   mission: Pick<MissionState, 'id' | 'risk'>;
   packet: Pick<WorkPacket, 'id' | 'scope'>;
   reason: string;
+  /** The policy version the reason was decided under. */
+  policyVersion: number;
 }
 
 /**
@@ -204,9 +221,7 @@ function recordClaimRefusal(
   refusal: ClaimRefusal,
 ): void {
   const at = clock().toISOString();
-  const policyVersion = createPolicyService({ db, clock }).policyVersion(
-    workspaceId,
-  );
+  const { policyVersion } = refusal;
   const seenAudit = db.get<{ n: number }>(
     `SELECT COUNT(*) AS n FROM fleet_audit
       WHERE workspace_id = ? AND kind = 'claim.authority_denied'
@@ -272,9 +287,10 @@ export interface AuthorityHold {
 }
 
 /**
- * The holds on a mission's offers: each offer that was refused at a claim and is still refused now,
- * with the reason it is refused now. Read-only. An offer the runner was granted, or an attempt that
- * ended, is not held, and neither is one whose authority has since been restored.
+ * The holds on a mission's work: each attempt refused at a claim that is still refused now and has no
+ * lease the runner has confirmed, with the reason it is refused now. Read-only. Confirmed work keeps
+ * running, so it is not held. An attempt that ended is not held, and neither is one whose authority
+ * has since been restored.
  */
 export function authorityHoldsFor(
   db: SqlDatabase,
@@ -296,10 +312,11 @@ export function authorityHoldsFor(
         AND a.id = json_extract(f.detail_json, '$.attemptId')
       WHERE f.workspace_id = ? AND f.kind = 'claim.authority_denied'
         AND json_extract(f.detail_json, '$.missionId') = ?
-        AND a.status = 'leased'
+        AND a.status IN ('leased', 'running')
         AND NOT EXISTS (
           SELECT 1 FROM runner_leases l
-           WHERE l.workspace_id = a.workspace_id AND l.attempt_id = a.id)
+           WHERE l.workspace_id = a.workspace_id AND l.attempt_id = a.id
+             AND l.confirmed_at IS NOT NULL)
       ORDER BY f.seq`,
     [workspaceId, mission.id],
   );

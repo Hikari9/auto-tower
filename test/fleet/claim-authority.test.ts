@@ -122,7 +122,9 @@ describe('claim-time authority re-check', () => {
     const resent = (await runner.claim()) as Claim;
     expect(packetsGranted(resent)).toEqual([human]);
     expect(reasons(resent)).toHaveLength(1);
-    expect(reasons(resent)[0]).toMatch(/^authority: /);
+    expect(reasons(resent)[0]).toMatch(
+      /^authority: policy ref .* does not name a current rule/,
+    );
   });
 
   it('withholds the cited branch on reconcile after its rule is revoked, and does not reissue its fence', async () => {
@@ -140,7 +142,7 @@ describe('claim-time authority re-check', () => {
     const granted = first.body.assignments.find((a) => a.packetId === cited);
     expect(granted).toBeDefined();
     // The runner goes quiet past the lease TTL, so the lease moves to recovery.
-    h.clock.advance(61_000);
+    h.clock.advance(h.config.leaseTtlMs + 1_000);
     policy.revokeRule(h.ctx(), rule.id, 1, 'withdrawn');
     const answer = await runner.reconcile(
       granted?.leaseId ?? '',
@@ -151,7 +153,9 @@ describe('claim-time authority re-check', () => {
     // Refused, not re-issued: the lease keeps its original fence and stays in recovery.
     expect(answer.body.lease.fence).toBe(granted?.fence);
     expect(answer.body.lease.status).toBe('recovering');
-    expect(answer.body.withheld).toMatch(/^authority: /);
+    expect(answer.body.withheld).toMatch(
+      /^authority: policy ref .* does not name a current rule/,
+    );
     // Reconcile is not a claim: the refusal is returned, not recorded.
     expect(denials(h)).toHaveLength(0);
     expect(receipts(h)).toHaveLength(0);
@@ -372,7 +376,9 @@ describe('claim-time refusals: coverage of each record and hold', () => {
     );
     const runner = await h.runner();
     const other = (await runner.claim()) as Claim;
-    expect(packetsGranted(other)).toEqual(expect.arrayContaining([cited, human]));
+    expect(packetsGranted(other)).toEqual(
+      expect.arrayContaining([cited, human]),
+    );
     expect(other.body.withheld).toEqual([]);
 
     // Denies the authorizer by id: the human branch is withheld.
@@ -417,11 +423,21 @@ describe('claim-time refusals: coverage of each record and hold', () => {
 
     const other = h.mission([{ title: 'other', scope: ['env:prod'] }]);
     await runner.claim();
-    const otherHolds = await h.call(h.owner.token, 'GET', `/missions/${other.id}`);
+    const otherHolds = await h.call(
+      h.owner.token,
+      'GET',
+      `/missions/${other.id}`,
+    );
     expect(otherHolds.body.holds).toHaveLength(1);
     expect(otherHolds.body.holds[0].packetId).toBe(other.packetIds[0]);
-    const firstHolds = await h.call(h.owner.token, 'GET', `/missions/${firstMission}`);
-    expect(firstHolds.body.holds.map((x: { packetId: string }) => x.packetId)).toEqual([human]);
+    const firstHolds = await h.call(
+      h.owner.token,
+      'GET',
+      `/missions/${firstMission}`,
+    );
+    expect(
+      firstHolds.body.holds.map((x: { packetId: string }) => x.packetId),
+    ).toEqual([human]);
 
     const released = await h.call(
       h.owner.token,
@@ -430,7 +446,11 @@ describe('claim-time refusals: coverage of each record and hold', () => {
       { reason: 'withdrawn by owner' },
     );
     expect(released.status).toBe(200);
-    const after = await h.call(h.owner.token, 'GET', `/missions/${firstMission}`);
+    const after = await h.call(
+      h.owner.token,
+      'GET',
+      `/missions/${firstMission}`,
+    );
     expect(after.body.holds).toEqual([]);
   });
 
@@ -439,14 +459,18 @@ describe('claim-time refusals: coverage of each record and hold', () => {
     policy.revokeRule(h.ctx(), rule.id, 1, 'withdrawn');
     const runner = await h.runner();
     const first = (await runner.claim()) as Claim;
-    const attemptId = first.body.withheld.find((w) => w.reason.includes('current rule'))?.attemptId;
+    const attemptId = first.body.withheld.find((w) =>
+      w.reason.includes('current rule'),
+    )?.attemptId;
     policy.createRule(h.ctx(), ruleInput({ action: 'unrelated.check' }));
     await runner.claim();
     const rows = denials(h).filter((d) => d.detail.attemptId === attemptId);
     expect(rows).toHaveLength(2);
     const missionId = rows[0]?.detail.missionId;
     const res = await h.call(h.owner.token, 'GET', `/missions/${missionId}`);
-    const holds = res.body.holds.filter((x: { packetId: string }) => x.packetId !== human);
+    const holds = res.body.holds.filter(
+      (x: { packetId: string }) => x.packetId !== human,
+    );
     expect(holds).toHaveLength(1);
     expect(holds[0].policyVersion).toBe(rows[1]?.detail.policyVersion);
     expect(holds[0].reason).toBe(rows[1]?.detail.reason);
@@ -474,15 +498,18 @@ describe('claim-time refusals: coverage of each record and hold', () => {
     expect(reasonFor(wildcard.packetIds[0] ?? '')).toMatch(
       /^authority: packet .* declares a scope a deny rule cannot be checked against/,
     );
-    expect(reasonFor(traversal.packetIds[0] ?? '')).toMatch(/^authority: packet .* declares a scope/);
+    expect(reasonFor(traversal.packetIds[0] ?? '')).toMatch(
+      /^authority: packet .* declares a scope/,
+    );
     // An empty scope is checked under `packet:<id>`, which the wildcard deny covers.
-    expect(reasonFor(empty.packetIds[0] ?? '')).toMatch(/^authority: .*denied by rule/);
+    expect(reasonFor(empty.packetIds[0] ?? '')).toMatch(
+      /^authority: .*denied by rule/,
+    );
     expect(packetsGranted(claim)).toEqual([]);
   });
 
-  it('records nothing and still refuses when the authorizing principal row is gone', async () => {
-    const { h, policy, rule, cited } = setup();
-    policy.revokeRule(h.ctx(), rule.id, 1, 'withdrawn');
+  it('refuses with an audit row and no receipt when the authorizing principal row is gone', async () => {
+    const { h, cited } = setup();
     h.db.run('PRAGMA foreign_keys = OFF');
     h.db.run('DELETE FROM principals WHERE id = ? AND workspace_id = ?', [
       h.cos.actor.id,
@@ -492,6 +519,9 @@ describe('claim-time refusals: coverage of each record and hold', () => {
     const claim = (await runner.claim()) as Claim;
     expect(claim.status).toBe(200);
     expect(packetsGranted(claim)).not.toContain(cited);
+    expect(reasons(claim)).toEqual([
+      expect.stringMatching(/^authority: the authorizing principal .* is not in this workspace/),
+    ]);
     const rows = denials(h);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.detail.packetId).toBe(cited);
@@ -563,26 +593,25 @@ describe('claim-time refusals: resource, principal state, live holds and durabil
     ).rule;
     const runner = await h.runner({ maxConcurrent: 10 });
     await runner.claim();
-    const attemptId = denials(h).find((d) => d.detail.packetId === human)?.detail.attemptId as string;
-    const missionId = denials(h).find((d) => d.detail.packetId === human)?.detail.missionId as string;
-    expect(
-      (await h.call(h.owner.token, 'GET', `/missions/${missionId}`)).body.holds,
-    ).toHaveLength(1);
+    const humanRow = denials(h).find((d) => d.detail.packetId === human);
+    const attemptId = humanRow?.detail.attemptId as string;
+    const missionId = humanRow?.detail.missionId as string;
+    const held = await h.call(h.owner.token, 'GET', `/missions/${missionId}`);
+    expect(held.body.holds).toEqual([
+      expect.objectContaining({ attemptId, packetId: human }),
+    ]);
     policy.revokeRule(h.ctx(), deny.id, 1, 'lifted');
     const read = await h.call(h.owner.token, 'GET', `/missions/${missionId}`);
     expect(read.body.holds).toEqual([]);
-    expect(attemptId).toBeTruthy();
   });
 
-  it('clears a hold on a held lease once its resend is granted again', async () => {
+  it('holds an unconfirmed lease whose resend is refused, and clears the hold once resent', async () => {
     const { h, policy, cited } = setup();
     const runner = await h.runner({ maxConcurrent: 10 });
     const first = (await runner.claim()) as Claim;
     expect(packetsGranted(first)).toContain(cited);
-    const attempt = first.body.assignments.find((a) => a.packetId === cited) as unknown as {
-      missionId: string;
-    };
-    const missionId = attempt.missionId;
+    const granted = first.body.assignments.find((a) => a.packetId === cited);
+    const missionId = (granted as unknown as { missionId: string }).missionId;
     const deny = policy.createRule(
       h.ctx(),
       ruleInput({
@@ -595,9 +624,15 @@ describe('claim-time refusals: resource, principal state, live holds and durabil
     const refused = (await runner.claim()) as Claim;
     expect(packetsGranted(refused)).not.toContain(cited);
     expect(reasons(refused)).toHaveLength(1);
-    // The branch still holds its lease, so the refusal is a withheld resend, not an offer on hold.
-    const whileHeld = await h.call(h.owner.token, 'GET', `/missions/${missionId}`);
-    expect(whileHeld.body.holds).toEqual([]);
+    // The runner never confirmed the lease, so the refused resend is a hold on the branch.
+    const whileHeld = await h.call(
+      h.owner.token,
+      'GET',
+      `/missions/${missionId}`,
+    );
+    expect(
+      whileHeld.body.holds.map((x: { packetId: string }) => x.packetId),
+    ).toEqual([cited]);
     policy.revokeRule(h.ctx(), deny.id, 1, 'lifted');
     const resent = (await runner.claim()) as Claim;
     expect(packetsGranted(resent)).toContain(cited);
@@ -629,5 +664,145 @@ describe('claim-time refusals: resource, principal state, live holds and durabil
     }
     expect(denials(h).map((d) => d.detail.packetId)).toEqual([cited]);
     expect(receipts(h)).toHaveLength(1);
+  });
+});
+
+describe('claim-time authority: deny scope, effect, grantee and disabled coverage', () => {
+  it('does not apply a deny rule that names another mission', async () => {
+    const { h, policy, human } = setup();
+    policy.createRule(
+      h.ctx(),
+      ruleInput({
+        effect: 'deny',
+        action: '*',
+        resource: '*',
+        scope: 'env:prod',
+        grantee: { kind: null, principalId: null },
+        limits: { maxAmount: null, missionIds: ['msn_someone_else'] },
+      }),
+    );
+    const runner = await h.runner({ maxConcurrent: 10 });
+    const claim = (await runner.claim()) as Claim;
+    expect(packetsGranted(claim)).toContain(human);
+    expect(denials(h)).toHaveLength(0);
+  });
+
+  it('does not apply a deny rule whose concrete action is not the claim action', async () => {
+    const { h, policy, human } = setup();
+    policy.createRule(
+      h.ctx(),
+      ruleInput({
+        effect: 'deny',
+        action: 'deploy.staging',
+        resource: '*',
+        scope: 'env:prod',
+        grantee: { kind: null, principalId: null },
+      }),
+    );
+    const runner = await h.runner({ maxConcurrent: 10 });
+    const claim = (await runner.claim()) as Claim;
+    expect(packetsGranted(claim)).toContain(human);
+  });
+
+  it('does not treat an allow rule as a refusal for a human packet', async () => {
+    const { h, policy, human } = setup();
+    policy.createRule(
+      h.ctx(),
+      ruleInput({
+        effect: 'allow',
+        action: '*',
+        resource: '*',
+        scope: 'env:prod',
+        grantee: { kind: 'human', principalId: null },
+        maxRisk: 'high',
+      }),
+    );
+    const runner = await h.runner({ maxConcurrent: 10 });
+    const claim = (await runner.claim()) as Claim;
+    expect(packetsGranted(claim)).toContain(human);
+    expect(denials(h)).toHaveLength(0);
+  });
+
+  it('does not apply a deny rule granted only to a chief of staff to a human packet', async () => {
+    const { h, policy, human } = setup();
+    policy.createRule(
+      h.ctx(),
+      ruleInput({
+        effect: 'deny',
+        action: '*',
+        resource: '*',
+        scope: 'env:prod',
+        grantee: { kind: 'chief_of_staff', principalId: null },
+      }),
+    );
+    const runner = await h.runner({ maxConcurrent: 10 });
+    const claim = (await runner.claim()) as Claim;
+    expect(packetsGranted(claim)).toContain(human);
+  });
+
+  it('refuses a cited branch whose chief of staff is disabled', async () => {
+    const { h, cited } = setup();
+    const runner = await h.runner({ maxConcurrent: 10 });
+    h.db.run(
+      'UPDATE principals SET disabled_at = ? WHERE id = ? AND workspace_id = ?',
+      ['2026-01-01T00:00:00.000Z', h.cos.actor.id, TEST_WORKSPACE],
+    );
+    const claim = (await runner.claim()) as Claim;
+    expect(packetsGranted(claim)).not.toContain(cited);
+    expect(reasons(claim)).toEqual([
+      'authority: the principal is disabled',
+    ]);
+  });
+});
+
+describe('claim-time authority: scope spelling', () => {
+  it('refuses a human packet whose scope has padding, which a literal deny rule would miss', async () => {
+    const { h, policy } = setup();
+    const padded = h.mission([{ title: 'padded', scope: ['env:prod '] }]);
+    policy.createRule(
+      h.ctx(),
+      ruleInput({
+        effect: 'deny',
+        action: '*',
+        resource: '*',
+        scope: 'env:prod',
+        grantee: { kind: null, principalId: null },
+      }),
+    );
+    const runner = await h.runner({ maxConcurrent: 10 });
+    const claim = (await runner.claim()) as Claim;
+    expect(packetsGranted(claim)).not.toContain(padded.packetIds[0]);
+    expect(reasons(claim)).toContainEqual(
+      expect.stringMatching(/^authority: packet .* declares a scope a deny rule cannot be checked against/),
+    );
+  });
+});
+
+describe('claim-time authority: a failed refusal write does not change the claim', () => {
+  it('still grants the claim when recording a refusal fails', async () => {
+    const { h, policy, rule, human } = setup();
+    policy.revokeRule(h.ctx(), rule.id, 1, 'withdrawn');
+    const runner = await h.runner({ maxConcurrent: 10 });
+    const real = h.db.run.bind(h.db);
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const spy = vi.spyOn(h.db, 'run').mockImplementation((...args) => {
+      if (args[0].includes('INSERT INTO policy_receipts')) {
+        throw new Error('injected receipt failure');
+      }
+      return real(...args);
+    });
+    try {
+      const claim = (await runner.claim()) as Claim;
+      expect(claim.status).toBe(200);
+      expect(packetsGranted(claim)).toContain(human);
+      expect(errors).toHaveBeenCalledWith(
+        'claim refusals not recorded: Error',
+      );
+    } finally {
+      spy.mockRestore();
+      errors.mockRestore();
+    }
+    // The failed write rolled back with its transaction, so no refusal is on record.
+    expect(denials(h)).toHaveLength(0);
   });
 });

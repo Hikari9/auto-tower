@@ -10,10 +10,11 @@ import type {
 import type { SqlDatabase } from '../storage/database.js';
 import { backoffMs } from './backoff.js';
 import {
-  type ClaimRefusal,
   authorityReason,
+  type ClaimRefusal,
   ineligibleReason,
   pickRunner,
+  policyVersionOf,
   recordClaimRefusals,
 } from './broker.js';
 import { type FleetContext, savepoint } from './context.js';
@@ -689,10 +690,18 @@ export function claim(
   // Refusals are collected in the claim and written after it settles, so a claim that rolls back
   // still leaves its refusals on record. The refusals change no grant, so they are not part of it.
   const refusals: ClaimRefusal[] = [];
+  // Best effort: a failed write is logged by name and changes neither the claim nor its error.
   const settle = (): void => {
-    if (refusals.length > 0) {
+    if (refusals.length === 0) {
+      return;
+    }
+    try {
       ctx.transact(workspaceId, (tx) =>
         recordClaimRefusals(tx, ctx.now, workspaceId, refusals),
+      );
+    } catch (error) {
+      console.error(
+        `claim refusals not recorded: ${error instanceof Error ? error.name : 'error'}`,
       );
     }
   };
@@ -835,6 +844,7 @@ function authorityHold(
       mission,
       packet,
       reason,
+      policyVersion: policyVersionOf(tx, ctx.now, runner.workspaceId),
     });
   }
   return reason;

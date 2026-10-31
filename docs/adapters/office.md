@@ -164,12 +164,14 @@ the runner. The runner's own capability, scope, status and quota are checked sep
 that principal still stands behind it.
 
 - **Authorizer not in the workspace.** The packet is refused.
+- **Disabled authorizer, any kind.** The packet is refused.
 - **Chief of staff.** Each cited policy rule is evaluated again through the check the mission core uses at
   authorization (`refusalForPolicyRefs`). A revoked, expired, replaced or deny-covered rule refuses the
   packet.
-- **Human.** The authorization cites no rule, so the packet is checked against deny rules only. A disabled
-  human is refused. Otherwise a packet is refused when an active deny rule covers it. A deny rule covers
-  the claim when its grantee is any principal or a human, its action is `packet.claim` or a wildcard that
+- **Human.** The authorization cites no rule, so the packet is checked against deny rules only. A packet
+  is refused when an active deny rule covers it. A deny rule covers
+  the claim when its grantee is a human or any kind, and names no principal or this packet's authorizer. Its
+  action is `packet.claim` or a wildcard that
   matches it, its mission is any or this mission, and its scope matches one of the packet's scopes. Its
   resource is not compared, since a packet names none. A packet with no scope is checked under its own
   name, `packet:<id>`, so only a wildcard scope rule covers it. A packet whose scope contains `*` or `..`
@@ -191,10 +193,10 @@ policy write nothing new:
 Refusals are written after the claim settles, in their own transaction, whether the claim succeeds or
 fails. A claim that rolls back still leaves its refusals on record.
 
-`GET /missions/:id` returns `holds`: each offer that was refused at a claim and is still refused now, with
-the reason it is refused now and the policy version it was evaluated under. An offer the runner was granted,
-or whose attempt ended, is not listed. A hold therefore clears as soon as its authority is restored, with no
-claim needed.
+`GET /missions/:id` returns `holds`: each attempt that was refused at a claim, is still refused now, and has
+no lease the runner has confirmed. Each hold carries the reason it is refused now and the current policy
+version. A confirmed lease keeps running and is not listed. An attempt that ended is not listed. A hold
+therefore clears as soon as its authority is restored, with no claim needed.
 
 Work already running is not affected. The check governs new grants and re-sent assignments.
 
