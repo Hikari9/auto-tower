@@ -4,6 +4,7 @@ import { decisionTools } from './decisions.js';
 import { evidenceTools } from './evidence.js';
 import { fleetTools } from './fleet.js';
 import { missionTools } from './missions.js';
+import { opsTools } from './ops.js';
 import { policyTools } from './policy.js';
 import { workTools } from './work.js';
 
@@ -15,6 +16,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   ...evidenceTools,
   ...decisionTools,
   ...policyTools,
+  ...opsTools,
 ];
 
 const BY_NAME = new Map(TOOLS.map((tool) => [tool.name, tool]));

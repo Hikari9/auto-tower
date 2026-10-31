@@ -15,7 +15,9 @@
     "lint": "biome check .",
     "test": "vitest run",
     "check": "pnpm typecheck && pnpm lint && pnpm test",
-    "runner": "tsx bin/tower-runner.ts"
+    "runner": "tsx bin/tower-runner.ts",
+    "smoke": "tsx scripts/smoke.ts",
+    "ops": "tsx scripts/ops.ts"
   },
   "bin": {
     "tower-runner": "./bin/tower-runner.ts"

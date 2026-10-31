@@ -267,9 +267,11 @@ describe('tool declarations', () => {
       'answer_decision',
       'close_mission',
       'grant_policy',
+      'halt_workspace',
       'request_dispatch',
       'request_expansion',
       'request_reconciliation',
+      'resume_workspace',
       'revoke_policy',
       'set_feature_flag',
     ]);

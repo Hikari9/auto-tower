@@ -9,6 +9,8 @@ import {
   VersionConflictError,
 } from '../events/errors.js';
 import { FleetError } from '../fleet/errors.js';
+import { HaltForbiddenError, WorkspaceHaltedError } from '../ops/halt.js';
+import { StorageQuotaError } from '../ops/quota.js';
 import { PolicyDeniedError } from '../policy/errors.js';
 
 export interface ToolFailure {
@@ -81,6 +83,13 @@ export function toFailure(error: unknown): ToolFailure {
   }
   if (error instanceof IdempotencyKeyReuseError) {
     return { code: 'idempotency_key_reused', message: error.message };
+  }
+  if (
+    error instanceof HaltForbiddenError ||
+    error instanceof WorkspaceHaltedError ||
+    error instanceof StorageQuotaError
+  ) {
+    return { code: error.code, message: error.message };
   }
   console.error(
     `mcp tool error: ${error instanceof Error ? error.name : 'unknown'}`,

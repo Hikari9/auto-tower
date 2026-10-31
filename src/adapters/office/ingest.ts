@@ -14,7 +14,11 @@ export type OfficeIngest =
   | { status: 'ingested'; replayed: boolean }
   | {
       status: 'not_ingested';
-      reason: 'invalid_receipt' | 'unsupported_contract' | 'conflict' | 'failed';
+      reason:
+        | 'invalid_receipt'
+        | 'unsupported_contract'
+        | 'conflict'
+        | 'failed';
       message: string;
     };
 
