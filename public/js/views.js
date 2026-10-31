@@ -918,7 +918,10 @@ function preferencesList(preferences) {
 }
 
 function limitsText(limits) {
-  const { maxAmount = null, missionIds = null } = limits ?? {};
+  if (limits === undefined || limits === null) {
+    return 'Limits: not reported. Review before confirming.';
+  }
+  const { maxAmount = null, missionIds = null } = limits;
   const amount = maxAmount === null ? 'no amount cap' : `up to ${maxAmount}`;
   const missions =
     missionIds === null ? 'all missions' : `missions ${missionIds.join(', ')}`;

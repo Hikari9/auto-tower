@@ -180,7 +180,13 @@ export function mountDashboard({
           api,
           persona: brand,
           // After navigating away, a finished write must not re-render a different page.
-          refresh: () => (current === viewHash ? show(viewHash) : undefined),
+          refresh: () => {
+            if (current !== viewHash) {
+              notice = null;
+              return undefined;
+            }
+            return show(viewHash);
+          },
           flash: (message) => {
             notice = { hash: viewHash, message };
           },

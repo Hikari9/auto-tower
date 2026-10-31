@@ -38,8 +38,10 @@ const DASHBOARD_PATHS = new Map<string, string>([
   // The shell is requested at "/". Workers static assets answer /index.html with a 307 to "/".
   ['/dashboard', ''],
   ['/dashboard/', ''],
+  // /dashboard/index.html is the shell too. Requesting /index.html would take the 307 to "/".
   ...WORKER_DASHBOARD_FILES.map(
-    (name) => [`/dashboard/${name}`, name] as const,
+    (name) =>
+      [`/dashboard/${name}`, name === 'index.html' ? '' : name] as const,
   ),
 ]);
 

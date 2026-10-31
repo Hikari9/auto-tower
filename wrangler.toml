@@ -7,8 +7,9 @@ compatibility_date = "2026-10-01"
 compatibility_flags = ["nodejs_compat"]
 
 # Static dashboard files. The Workers entry serves /dashboard through this binding (src/hosting/worker.ts).
-# html_handling "none" keeps "/" serving index.html without redirects; the entry asks for "/" only.
+# run_worker_first sends every request through the Worker, so the dashboard policy headers and the
+# file allowlist apply to direct requests too. The default html handling maps "/" to index.html.
 [assets]
 directory = "public"
 binding = "ASSETS"
-html_handling = "none"
+run_worker_first = true

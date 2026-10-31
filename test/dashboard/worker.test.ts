@@ -170,3 +170,24 @@ describe('Workers deployment config', () => {
     );
   });
 });
+
+describe('Workers shell paths and config, round 3', () => {
+  it('serves the shell for /dashboard/ and /dashboard/index.html', async () => {
+    for (const path of ['/dashboard/', '/dashboard/index.html']) {
+      const res = await worker.fetch(new Request(`${origin}${path}`), {
+        ASSETS: assetsBinding(),
+      });
+      expect(res.status, path).toBe(200);
+      expect(res.headers.get('content-type'), path).toContain('text/html');
+    }
+  });
+
+  it('turns on run_worker_first so direct asset requests pass the Worker policy', () => {
+    const toml = readFileSync(
+      join(import.meta.dirname, '../../wrangler.toml'),
+      'utf8',
+    );
+
+    expect(toml).toMatch(/run_worker_first = true/);
+  });
+});

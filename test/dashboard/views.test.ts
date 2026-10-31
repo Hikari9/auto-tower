@@ -1825,52 +1825,6 @@ describe('write conflicts and expiry on proposals and rules', () => {
     );
   });
 
-  it('does not show a conflict notice on a page the user moved to while the write was in flight', async () => {
-    const tower = seededTower();
-    const missionId = await createMission(tower);
-    const packetId = await addPacket(tower, missionId, 'Draft spec');
-    await tower.call('POST', '/decisions', {
-      dedupeKey: 'navigated',
-      category: 'scope_expansion',
-      urgency: 'normal',
-      question: 'Answer after navigating?',
-      recommendation: { alternativeId: 'approve', rationale: 'Low risk.' },
-      consequences: 'x',
-      evidence: [],
-      affectedScope: [],
-      advisory: { confidencePercent: 80 },
-      branches: [{ missionId, packetId }],
-    });
-    let release: () => void = () => {};
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const { root, dashboard } = mountFor(tower, {
-      fetchImpl: async (path, init) => {
-        if (init.method === 'POST') {
-          await gate;
-          return jsonResponse(
-            {
-              error: { code: 'version_conflict', message: 'Decision changed' },
-            },
-            409,
-          );
-        }
-        return tower.fetchFor(null)(path, init);
-      },
-    });
-
-    await dashboard.show('#/decisions');
-    buttonNamed(root, 'Answer…').click();
-    buttonNamed(root, 'Confirm answer').click();
-    await dashboard.show('#/runners');
-    release();
-    await new Promise((resolve) => setTimeout(resolve, 20));
-
-    expect(root.querySelector('h1')?.textContent).toBe('Runner fleet');
-    expect(root.querySelector('[role="alert"]')).toBeNull();
-  });
-
   it('does not repeat a conflict notice on a later visit to the same page', async () => {
     const tower = seededTower();
     const { root, dashboard } = mountFor(tower, {
@@ -2185,5 +2139,285 @@ describe('every view and every field', () => {
         (b) => b.textContent === 'Accept…',
       ),
     ).toBe(true);
+  });
+});
+
+// --- Round 3: deterministic notices, single alerts, caps, and the remaining gaps ---
+
+/**
+ * A 409 for the decision answer whose body read signals `written`. One macrotask after that,
+ * the failed write has finished its catch, so assertions are not racing a timer.
+ */
+function staleAnswer(tower: Tower) {
+  let written: () => void = () => {};
+  const done = new Promise<void>((resolve) => {
+    written = resolve;
+  });
+  const fetchImpl = async (path: string, init: RequestInit) => {
+    if (init.method === 'POST') {
+      return {
+        ok: false,
+        status: 409,
+        text: async () => {
+          written();
+          return JSON.stringify({
+            error: { code: 'version_conflict', message: 'Decision changed' },
+          });
+        },
+      } as unknown as Response;
+    }
+    return tower.fetchFor(null)(path, init);
+  };
+  return { fetchImpl, done };
+}
+
+async function openQuestion(tower: Tower, question: string) {
+  const missionId = await createMission(tower);
+  const packetId = await addPacket(tower, missionId, 'Draft spec');
+  const res = await tower.call('POST', '/decisions', {
+    dedupeKey: question,
+    category: 'scope_expansion',
+    urgency: 'normal',
+    question,
+    recommendation: { alternativeId: 'approve', rationale: 'Low risk.' },
+    consequences: 'x',
+    evidence: [],
+    affectedScope: [],
+    advisory: { confidencePercent: 80 },
+    branches: [{ missionId, packetId }],
+  });
+  expect(res.status).toBe(201);
+}
+
+describe('conflict notices, deterministically', () => {
+  it('shows the conflict on the page that raised it', async () => {
+    const tower = seededTower();
+    await openQuestion(tower, 'Shown here?');
+    const { fetchImpl, done } = staleAnswer(tower);
+    const { root, dashboard } = mountFor(tower, { fetchImpl });
+
+    await dashboard.show('#/decisions');
+    buttonNamed(root, 'Answer…').click();
+    buttonNamed(root, 'Confirm answer').click();
+    await done;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(root.querySelector('h1')?.textContent).toBe('Decision inbox');
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+      'changed since it was loaded',
+    );
+  });
+
+  it('does not show the conflict on a page the user moved to, or on a later visit to the raising page', async () => {
+    const tower = seededTower();
+    await openQuestion(tower, 'Not here?');
+    const { fetchImpl, done } = staleAnswer(tower);
+    const { root, dashboard } = mountFor(tower, { fetchImpl });
+
+    await dashboard.show('#/decisions');
+    buttonNamed(root, 'Answer…').click();
+    buttonNamed(root, 'Confirm answer').click();
+    await dashboard.show('#/runners');
+    await done;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(root.querySelector('h1')?.textContent).toBe('Runner fleet');
+    expect(root.querySelector('[role="alert"]')).toBeNull();
+
+    await dashboard.show('#/decisions');
+    expect(root.querySelector('h1')?.textContent).toBe('Decision inbox');
+    expect(root.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('shows one message, the sign-in one, when an answer is rejected as unauthorized', async () => {
+    const tower = seededTower();
+    await openQuestion(tower, 'One message?');
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) => {
+        if (init.method === 'POST') {
+          return jsonResponse(
+            {
+              error: {
+                code: 'unauthenticated',
+                message: 'A valid bearer token is required',
+              },
+            },
+            401,
+          );
+        }
+        return tower.fetchFor(null)(path, init);
+      },
+    });
+
+    await dashboard.show('#/decisions');
+    buttonNamed(root, 'Answer…').click();
+    buttonNamed(root, 'Confirm answer').click();
+
+    await vi.waitFor(() =>
+      expect(root.querySelector('input[type="password"]')).not.toBeNull(),
+    );
+    expect(root.querySelectorAll('[role="alert"]')).toHaveLength(1);
+  });
+});
+
+describe('failure wording on proposals, caps, and paths', () => {
+  it('says a failed accept may already have been applied when the network dropped', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) => {
+        if (init.method === 'POST') {
+          throw new TypeError('fetch failed');
+        }
+        if (path === '/policy') {
+          const real = (await (
+            await tower.fetchFor(null)(path, init)
+          ).json()) as Record<string, unknown>;
+          return jsonResponse({
+            ...real,
+            proposals: [pendingProposal('prp_net')],
+          });
+        }
+        return tower.fetchFor(null)(path, init);
+      },
+    });
+
+    await dashboard.show('#/policy');
+    buttonNamed(root, 'Accept…').click();
+    buttonNamed(root, 'Accept proposal').click();
+
+    await vi.waitFor(() =>
+      expect(
+        root.querySelector('[role="group"] [role="alert"]')?.textContent,
+      ).toContain('reload before retrying'),
+    );
+  });
+
+  it('says 200 or more open decisions when the list is full, and the exact count below it', async () => {
+    const tower = seededTower();
+    const full = mountFor(tower, {
+      fetchImpl: overrideGet(tower, '/decisions', () => ({
+        decisions: Array.from({ length: 200 }, (_, i) => ({ id: `dec_${i}` })),
+      })),
+    });
+    await full.dashboard.show('#/health');
+    expect(factValue(full.root, 'Open decisions')).toBe('200 or more');
+
+    const short = mountFor(tower, {
+      fetchImpl: overrideGet(tower, '/decisions', () => ({
+        decisions: Array.from({ length: 199 }, (_, i) => ({ id: `dec_${i}` })),
+      })),
+    });
+    await short.dashboard.show('#/health');
+    expect(factValue(short.root, 'Open decisions')).toBe('199');
+  });
+
+  it('says limits were not reported for a proposal without them', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: policyWithProposal(
+        tower,
+        pendingProposal('prp_nolim', { limits: undefined }),
+        null,
+      ),
+    });
+
+    await dashboard.show('#/policy');
+    buttonNamed(root, 'Accept…').click();
+
+    expect(root.querySelector('[role="group"]')?.textContent).toContain(
+      'Limits: not reported. Review before confirming.',
+    );
+    expect(text(root)).not.toContain('no amount cap');
+  });
+
+  it('puts the limits sentence in the accept confirmation itself', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: policyWithProposal(tower, pendingProposal('prp_limits'), null),
+    });
+
+    await dashboard.show('#/policy');
+    buttonNamed(root, 'Accept…').click();
+
+    expect(root.querySelector('[role="group"]')?.textContent).toContain(
+      'Limits: no amount cap; all missions.',
+    );
+  });
+
+  it('renders markup in rules and the sync provider as text', async () => {
+    const tower = seededTower();
+    const payload = '<img src=x onerror="window.__pwned=3"><b>bold</b>';
+    await createRule(tower);
+    const views: [
+      string,
+      (path: string, init: RequestInit) => Promise<Response>,
+    ][] = [
+      [
+        '#/policy',
+        overrideGet(tower, '/policy', (body) => ({
+          ...body,
+          rules: body.rules.map((r: Record<string, unknown>) => ({
+            ...r,
+            action: payload,
+          })),
+        })),
+      ],
+      [
+        '#/integrations',
+        overrideGet(tower, '/issues/sync-config', () => ({
+          configs: [
+            {
+              provider: payload,
+              repo: 'favor/app',
+              mode: 'observe',
+              readScope: true,
+              writeScope: false,
+              version: 1,
+              updatedBy: 'x',
+              updatedAt: '2026-10-31T00:00:00.000Z',
+            },
+          ],
+        })),
+      ],
+    ];
+    for (const [hash, fetchImpl] of views) {
+      const { root, dashboard } = mountFor(tower, { fetchImpl });
+      await dashboard.show(hash);
+      expect(root.querySelector('img'), hash).toBeNull();
+      expect(root.querySelector('b'), hash).toBeNull();
+      expect(text(root), hash).toContain(payload);
+    }
+  });
+
+  it('shows the hostile schemes as plain text as well as withholding the links', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const hostile = ['java\tscript:alert(1)', 'javascript:alert(1)'];
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: overrideGet(
+        tower,
+        `/missions/${missionId}/issue-links`,
+        () => ({
+          links: hostile.map((url, i) => ({
+            id: `lnk_${i}`,
+            url,
+            observedState: 'unknown',
+            observedSource: null,
+            polledAt: null,
+          })),
+          discrepancies: [],
+        }),
+      ),
+    });
+
+    await dashboard.show(`#/missions/${missionId}`);
+
+    // The only link in the content is the back link; no issue link was rendered.
+    expect(
+      [...root.querySelectorAll('main a')].map((a) => a.getAttribute('href')),
+    ).toEqual(['#/missions']);
+    for (const url of hostile) {
+      expect(text(root)).toContain(url);
+    }
   });
 });
