@@ -9,7 +9,12 @@ import type {
 } from '../core/types.js';
 import type { SqlDatabase } from '../storage/database.js';
 import { backoffMs } from './backoff.js';
-import { authorityReason, ineligibleReason, pickRunner } from './broker.js';
+import {
+  authorityReason,
+  ineligibleReason,
+  pickRunner,
+  recordClaimDenial,
+} from './broker.js';
 import { type FleetContext, savepoint } from './context.js';
 import { FleetError } from './errors.js';
 import type {
@@ -754,6 +759,7 @@ function withholdReason(
   runner: Runner,
   mission: MissionState,
   packet: WorkPacket,
+  claimAttemptId?: string,
 ): string | undefined {
   if (runner.status !== 'active') {
     return `runner is ${runner.status}`;
@@ -761,12 +767,54 @@ function withholdReason(
   if (PAUSING_MISSION_STATES.includes(mission.state)) {
     return `mission is ${mission.state}`;
   }
-  return (
-    ineligibleReason(tx, ctx.config, runner, mission.id, packet, ctx.now(), {
-      requireLive: false,
-      load: 'none',
-    }) ?? authorityReason(tx, ctx.now, runner.workspaceId, mission, packet)
+  const ineligible = ineligibleReason(
+    tx,
+    ctx.config,
+    runner,
+    mission.id,
+    packet,
+    ctx.now(),
+    { requireLive: false, load: 'none' },
   );
+  return (
+    ineligible ?? authorityHold(ctx, tx, runner, mission, packet, claimAttemptId)
+  );
+}
+
+/**
+ * The authority refusal for a packet, or undefined. A refusal at a claim (`claimAttemptId` given)
+ * is recorded: the audit row and the deny receipt, once per attempt and policy version.
+ */
+function authorityHold(
+  ctx: FleetContext,
+  tx: SqlDatabase,
+  runner: Runner,
+  mission: MissionState,
+  packet: WorkPacket,
+  claimAttemptId?: string,
+): string | undefined {
+  const reason = authorityReason(
+    tx,
+    ctx.now,
+    runner.workspaceId,
+    mission,
+    packet,
+  );
+  if (
+    reason !== undefined &&
+    claimAttemptId !== undefined &&
+    packet.authorization !== null
+  ) {
+    recordClaimDenial(tx, ctx.now, runner.workspaceId, {
+      attemptId: claimAttemptId,
+      runnerId: runner.id,
+      authorizedBy: packet.authorization.by,
+      mission,
+      packet,
+      reason,
+    });
+  }
+  return reason;
 }
 
 function grant(
@@ -794,7 +842,14 @@ function grant(
     if (mission === undefined || found === undefined) {
       continue;
     }
-    const reason = withholdReason(ctx, tx, runner, mission, found.packet);
+    const reason = withholdReason(
+      ctx,
+      tx,
+      runner,
+      mission,
+      found.packet,
+      lease.attemptId,
+    );
     if (reason !== undefined) {
       withheld.push({ attemptId: lease.attemptId, reason });
       continue;
@@ -842,12 +897,13 @@ function grant(
       continue;
     }
     // A grant that was valid at dispatch is checked again here, at the point of effect.
-    const authority = authorityReason(
+    const authority = authorityHold(
+      ctx,
       tx,
-      ctx.now,
-      workspaceId,
+      runner,
       mission,
       found.packet,
+      offer.id,
     );
     if (authority !== undefined) {
       hold(authority);

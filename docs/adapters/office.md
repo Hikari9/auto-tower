@@ -154,17 +154,45 @@ messages.
 
 ## Claim-time authority
 
-`claim` and reconcile re-check each cited policy rule before they grant work. A chief of staff's
-authorization cites rules. Each cited rule is evaluated again at the point of the claim, through the
-same check the mission core uses at authorization (`refusalForPolicyRefs`). A revoked, expired, replaced
-or deny-covered rule withholds only the packet it authorized. The offer comes back with a reason that
-starts with `authority:`. Other branches of the mission are granted as before.
+`claim` re-checks the authority a packet was authorized under before it grants the packet. Reconcile
+re-checks it too, but records nothing, since reconcile is not a claim. The check runs on each new grant
+and on each re-sent assignment.
 
-A human's authorization cites no rule and is not re-checked. Work already running is not affected. The
-check governs new grants and re-sent assignments.
+The check evaluates the principal that authorized the packet (`authorization.by`). It does not evaluate
+the runner. The runner's own capability, scope, status and quota are checked separately, by
+`ineligibleReason`. Authority to run a packet belongs to whoever authorized it, so the check asks whether
+that principal still stands behind it.
 
-The implementation is in `src/fleet/broker.ts` (`authorityReason`) and `src/fleet/leases.ts`. The tests
-are in `test/fleet/claim-authority.test.ts`.
+- **Chief of staff.** Each cited policy rule is evaluated again through the check the mission core uses at
+  authorization (`refusalForPolicyRefs`). A revoked, expired, replaced or deny-covered rule refuses the
+  packet.
+- **Human.** The authorization cites no rule, so the packet is checked against deny rules only. The check
+  evaluates the human for action `packet.claim`, resource `packet:<id>`, each packet scope, and the
+  mission's risk. Only an explicit deny refuses. The absence of an allow rule does not, because a human's
+  authorization needs none. A deny rule covers this check when it names `packet.claim`, a wildcard that
+  matches it, the packet's scope, and the mission. A packet with no scope is checked under its own name,
+  `packet:<id>`, so only a wildcard scope rule covers it. A packet whose scope contains `*` or `..` is
+  refused, since the policy cannot check it.
+
+A refused packet is not granted. Its offer comes back in `withheld` with a reason that starts with
+`authority:`. The branch is held and other branches of the mission proceed as before.
+
+Each claim-time refusal is recorded once per attempt and policy version, so repeated polls under the same
+policy write nothing new:
+
+- A `claim.authority_denied` row in `fleet_audit`, with the attempt, packet, mission, policy version and
+  redacted reason. Its actor is the authorizing principal.
+- A deny row in `policy_receipts`, with action `packet.claim`, resource `attempt:<id>`, and code
+  `claim_authority_denied`. A receipt needs the authorizing principal to exist in the workspace. When it
+  does not, the receipt is skipped and the audit row still lands.
+
+`GET /missions/:id` returns `holds`: the latest refusal per attempt that has not ended and has not been
+granted a lease since. A hold clears on the first claim that grants the branch.
+
+Work already running is not affected. The check governs new grants and re-sent assignments.
+
+The implementation is in `src/fleet/broker.ts` (`authorityReason`, `recordClaimDenial`,
+`authorityHoldsFor`) and `src/fleet/leases.ts`. The tests are in `test/fleet/claim-authority.test.ts`.
 
 ## Tests
 

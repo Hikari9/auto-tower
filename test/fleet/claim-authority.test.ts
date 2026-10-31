@@ -154,3 +154,173 @@ describe('claim-time authority re-check', () => {
     expect(answer.body.withheld).toMatch(/^authority: /);
   });
 });
+
+interface DenialRow {
+  runner_id: string | null;
+  actor_id: string | null;
+  detail_json: string;
+}
+
+interface ReceiptRow {
+  principal_id: string;
+  action: string;
+  resource: string;
+  effect: string;
+  code: string;
+  reason: string;
+  policy_version: number;
+}
+
+/** Claim-time refusals as the audit holds them, with the detail parsed. */
+function denials(h: ReturnType<typeof setup>['h']) {
+  return h.db
+    .all<DenialRow>(
+      "SELECT runner_id, actor_id, detail_json FROM fleet_audit WHERE kind = 'claim.authority_denied' ORDER BY seq",
+    )
+    .map((row) => ({ ...row, detail: JSON.parse(row.detail_json) }));
+}
+
+function receipts(h: ReturnType<typeof setup>['h']): ReceiptRow[] {
+  return h.db.all<ReceiptRow>(
+    "SELECT principal_id, action, resource, effect, code, reason, policy_version FROM policy_receipts WHERE code = 'claim_authority_denied' ORDER BY seq",
+  );
+}
+
+describe('a claim-time authority refusal is durable and visible', () => {
+  it('writes one audit row and one deny receipt per attempt and policy version, however often it polls', async () => {
+    const { h, policy, rule, cited } = setup();
+    policy.revokeRule(h.ctx(), rule.id, 1, 'withdrawn');
+    const runner = await h.runner();
+    const first = (await runner.claim()) as Claim;
+    const attemptId = first.body.withheld[0]?.attemptId ?? '';
+    await runner.claim();
+    await runner.claim();
+
+    const rows = denials(h);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.runner_id).toBe(runner.id);
+    expect(rows[0]?.detail).toEqual({
+      attemptId,
+      packetId: cited,
+      missionId: expect.any(String),
+      policyVersion: expect.any(Number),
+      reason: expect.stringMatching(/^authority: policy ref .* does not name a current rule/),
+    });
+
+    const deny = receipts(h);
+    expect(deny).toHaveLength(1);
+    expect(deny[0]).toMatchObject({
+      principal_id: h.cos.actor.id,
+      action: 'packet.claim',
+      resource: `attempt:${attemptId}`,
+      effect: 'deny',
+      code: 'claim_authority_denied',
+      policy_version: rows[0]?.detail.policyVersion,
+    });
+  });
+
+  it('records again only when the policy version moves', async () => {
+    const { h, policy, rule } = setup();
+    policy.revokeRule(h.ctx(), rule.id, 1, 'withdrawn');
+    const runner = await h.runner();
+    await runner.claim();
+    expect(denials(h)).toHaveLength(1);
+    policy.createRule(h.ctx(), ruleInput({ action: 'unrelated.check' }));
+    await runner.claim();
+    const rows = denials(h);
+    expect(rows).toHaveLength(2);
+    expect(rows[1]?.detail.policyVersion).toBeGreaterThan(
+      rows[0]?.detail.policyVersion,
+    );
+    expect(receipts(h)).toHaveLength(2);
+  });
+
+  it('shows the open hold on the mission read, and clears it once a later claim grants the branch', async () => {
+    const { h, cited, policy } = setup();
+    const deny = policy.createRule(
+      h.ctx(),
+      ruleInput({
+        effect: 'deny',
+        grantee: { kind: null, principalId: null },
+      }),
+    ).rule;
+    const runner = await h.runner();
+    const claim = (await runner.claim()) as Claim;
+    const attemptId = claim.body.withheld[0]?.attemptId;
+    const missionId = h.db
+      .all<{ mission_id: string }>(
+        'SELECT mission_id FROM execution_attempts WHERE workspace_id = ? AND id = ?',
+        [TEST_WORKSPACE, attemptId ?? ''],
+      )[0]?.mission_id;
+
+    const held = await h.call(h.owner.token, 'GET', `/missions/${missionId}`);
+    expect(held.status).toBe(200);
+    expect(held.body.holds).toEqual([
+      {
+        attemptId,
+        packetId: cited,
+        reason: expect.stringMatching(/^authority: .*denied by rule/),
+        policyVersion: expect.any(Number),
+        at: expect.any(String),
+      },
+    ]);
+
+    policy.revokeRule(h.ctx(), deny.id, 1, 'lifted');
+    const granted = (await runner.claim()) as Claim;
+    expect(packetsGranted(granted)).toContain(cited);
+    const clear = await h.call(h.owner.token, 'GET', `/missions/${missionId}`);
+    expect(clear.body.holds).toEqual([]);
+  });
+});
+
+describe('a human-authorized packet is re-checked against deny rules at claim', () => {
+  it('withholds only the human branch when a deny rule added after authorization covers it', async () => {
+    const { h, policy, cited, human } = setup();
+    policy.createRule(
+      h.ctx(),
+      ruleInput({
+        effect: 'deny',
+        action: '*',
+        resource: '*',
+        scope: 'env:prod',
+        grantee: { kind: null, principalId: null },
+      }),
+    );
+    const runner = await h.runner();
+    const claim = (await runner.claim()) as Claim;
+    expect(claim.status).toBe(200);
+    expect(packetsGranted(claim)).toEqual([cited]);
+    expect(reasons(claim)).toHaveLength(1);
+    expect(reasons(claim)[0]).toMatch(/^authority: .*denied by rule/);
+
+    const rows = denials(h);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.actor_id).toBe(h.owner.actor.id);
+    expect(rows[0]?.detail.packetId).toBe(human);
+    const deny = receipts(h);
+    expect(deny).toHaveLength(1);
+    expect(deny[0]).toMatchObject({
+      principal_id: h.owner.actor.id,
+      action: 'packet.claim',
+      code: 'claim_authority_denied',
+    });
+  });
+
+  it('still dispatches the human branch when the deny rule covers another scope', async () => {
+    const { h, policy, human } = setup();
+    policy.createRule(
+      h.ctx(),
+      ruleInput({
+        effect: 'deny',
+        action: '*',
+        resource: '*',
+        scope: 'env:staging',
+        grantee: { kind: null, principalId: null },
+      }),
+    );
+    const runner = await h.runner();
+    const claim = (await runner.claim()) as Claim;
+    expect(packetsGranted(claim)).toContain(human);
+    expect(denials(h).map((row) => row.detail.packetId)).not.toContain(human);
+  });
+});
