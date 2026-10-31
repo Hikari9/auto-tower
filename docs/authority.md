@@ -33,7 +33,7 @@ The **policy version** is a workspace counter. It moves when a rule is created, 
 
 ### Evaluation
 
-`policy.authorize({ workspace, principal, action, resource, scope, risk, amount?, missionId? })` returns a `PolicyEvaluation`:
+`policy.authorize({ workspace, principal, action, resource, scope, risk, amount?, missionId?, attemptId? })` returns a `PolicyEvaluation`:
 
 ```
 { effect: 'allow' | 'deny' | 'escalate', code, reason, ruleId, ruleVersion, policyVersion, policyRef, evaluatedAt }
@@ -49,7 +49,7 @@ Order of evaluation:
 2. An active deny rule that covers the request: `deny` (`explicit_deny`).
 3. Independent review by a producer of the work: `deny` (`producer_cannot_review`). See below.
 4. An active grant that covers the request: `allow`. It must cover the action, resource, scope and mission, the request's risk, and any amount.
-5. Safe cleanup: `allow` (`safe_cleanup`).
+5. Cleanup the rules above allow without a grant: `allow` (`safe_cleanup`). See Cleanup without a grant.
 6. Otherwise `deny`. If an expired or revoked grant would have covered it, the code says so (`grant_expired`, `grant_revoked`) and names the rule.
 
 `escalate` is a refusal that the caller may route to a person or delegate. `authorize` returns it only when asked (`escalate: true`), which `routeExpansion` does. It never permits anything.
@@ -58,26 +58,37 @@ A grant with no `maxAmount` covers no request that carries an amount, and a gran
 
 ### Sensitive actions
 
-The first segments of an action name set its category.
+Which actions are sensitive is decided by an explicit registry in `src/policy/actions.ts`, and by nothing else. Each registry entry is a run of whole dot-separated segments. An action belongs to a category when its segments contain that run anywhere, so `deploy.live` and `ops.deploy.live.eu` are registered and `deployments.live` is not. Segments are never split into words or matched by prefix. The first category that matches wins, in the order below.
 
-| Category               | Matches                                                                                                                                                                  |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `spend`                | `spend`, `spend.*`                                                                                                                                                       |
-| `production_deploy`    | a word starting `deploy`, `release`, `ship` or `publish` together with a word starting `prod`, such as `deploy.production`, `release.production`, `infra.deploy.to-prod` |
-| `security`             | `security.*`                                                                                                                                                             |
-| `destructive`          | `destructive` anywhere, or a word starting `delete`, `destroy`, `drop`, `purge`, `wipe`, `truncate` or `remove`, or `force` together with `push`                         |
-| `external_issue_close` | `issue` followed by a word starting `close`, anywhere in the name                                                                                                        |
-| `independent_review`   | `review` followed by a word starting `independent`, anywhere in the name                                                                                                 |
-| `cleanup`              | `cleanup.*`                                                                                                                                                              |
-| `standard`             | everything else                                                                                                                                                          |
+| Category               | Registered runs                                                                                                                                                                                                                          |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `independent_review`   | `review.independent`                                                                                                                                                                                                                     |
+| `spend`                | `spend`, `billing`, `payment`, `payments`, `purchase`, `invoice.pay`, `subscription.upgrade`                                                                                                                                             |
+| `production_deploy`    | `deploy.prod`, `deploy.production`, `deploy.live`, `deploy.release`, `release.prod`, `release.production`, `release.live`, `release.publish`, `publish.prod`, `publish.production`, `publish.live`, `promote.prod`, `promote.production` |
+| `security`             | `security`, `secret`, `secrets`, `iam`, `firewall`, `credential`, `credentials`, `permission.grant`, `token.issue`                                                                                                                       |
+| `external_issue_close` | `issue.close`, `issue.resolve`, `ticket.close`, `ticket.resolve`                                                                                                                                                                         |
+| `destructive`          | `destructive`, `delete`, `destroy`, `drop`, `purge`, `wipe`, `truncate`, `remove`, `force-push`, `push-force`, `force_push`, `push_force`, `push.force`, `force.push`                                                                    |
+| `cleanup`              | `cleanup` or `cleanup.*` with none of the above anywhere in the name                                                                                                                                                                     |
+| `standard`             | everything else                                                                                                                                                                                                                          |
 
-A name is read as words split on `.`, `-` and `_`, and a sensitive word counts wherever it sits: `deploy.to-prod`, `db.table_drop` and `cleanup.issue.close` are all sensitive, and `cleanup.drop-prod-db` is destructive, not cleanup. So `deploy.prod-eu`, `db.drop_table` and `billing.spend.create` are sensitive too. Every category except `standard` and `cleanup` is **sensitive**. A sensitive action is denied unless an active grant names the action, with no wildcard, and names a resource and a scope that are not made only of `*` (`**` counts as bare). A grant of `*` / `*` / `*` allows ordinary work and none of these. Callers choose action names, so a runner cannot relabel a sensitive effect. A name of the form `cleanup.*` whose remaining segments are not sensitive is allowed without a grant for a guarded effect, and is never an approval: the router and a Chief of Staff's answer accept only a real rule.
+A name that is not in the registry is `standard`. That is the cost of an explicit list: `deploy.prod-eu` and `db.table_drop` are standard until someone registers them, so a new kind of sensitive effect must be added to the registry before anything relies on it being refused by default. The tests pin `deploy.live`, `billing.charge` and `payment.send` as sensitive.
+
+Every category except `standard` and `cleanup` is **sensitive**. A sensitive action is denied unless an active grant names the action, with no wildcard, and names a resource and a scope that are not made only of `*` (`**` counts as bare). A grant of `*` / `*` / `*` allows ordinary work and none of these. Callers choose action names, so a runner cannot relabel a sensitive effect: `cleanup.issue.close` and `cleanup.billing.refund` are registered, so they are never cleanup.
+
+### Cleanup without a grant
+
+A `cleanup.*` action needs no grant in exactly these cases, and each is a `safe_cleanup` allow:
+
+- the principal is a human, or
+- the principal is the runner that holds the live lease of the attempt the request names (`attemptId`, in the mission `missionId`), meaning the attempt is `leased` or `running` and its `runnerId` is that principal. The lease is read from the mission, never taken from the caller's word.
+
+In neither case is the cleanup allowed when the resource is destructive: a resource with a `db`, `database`, `prod`, `production`, `backup`, `backups`, `secret`, `secrets`, `volume`, `bucket` or `disk` segment (split on `:`, `/` and `.`), or one that is only wildcards. A Chief of Staff, a runner without a live lease, and a provider get no grantless cleanup. They need a grant like any other action, and a grant can cover cleanup of a destructive resource. Cleanup is never an approval: the router and a Chief of Staff's answer accept only a real rule.
 
 ### Revocation and expiry
 
 Revoking a grant makes the next guarded effect deny. A grant that was valid at dispatch is not trusted later: `policy.guard(request)` evaluates again at the point of effect, writes a receipt, and throws `PolicyDeniedError` unless the result is `allow`. A policy reference stored at dispatch is evidence of what was true then, and is not consulted again.
 
-Safe cleanup (`cleanup.*`, such as releasing a lease or removing a scratch directory) stays allowed after revocation, so work in flight can wind down. An explicit deny rule blocks it too.
+Cleanup that is allowed without a grant (`cleanup.*`, such as releasing a lease or removing a scratch directory) stays allowed after revocation, so work in flight can wind down, for the lease holder or a human. An explicit deny rule blocks it too.
 
 **Emergency halt** is a deny rule with action, resource and scope all `*` and no grantee. It stops every guarded effect and every cleanup until a human revokes it. No separate switch exists.
 
@@ -175,6 +186,20 @@ An open decision with the same dedupe key absorbs a new request: the new branche
 
 The mission core in this repository has no `blockBranch` or `unblockBranch`. A blocked branch is a pending packet without authorization, and unblocking it is `authorizePacket`, which is what the inbox calls.
 
+### Authorizing a packet as a Chief of Staff
+
+`authorizePacket` in the mission core, which `POST /missions/:id/work-packets/:packetId/authorize`, the inbox and `routeExpansion` all use, checks the policy a Chief of Staff cites at the point of effect, inside the same transaction as the event. A cited ref is only a name. A human needs no citation.
+
+Of the refs a Chief of Staff cites, those starting `policy:` are checked and at least one is required. Other refs, such as `decision:<id>@<version>`, are audit links and carry no authority. Each policy ref is resolved and evaluated again with `authorize`, for that actor, the mission and every scope the packet declares, and is refused with `409 command_not_allowed` unless all of these hold:
+
+- it has the form `policy:v<n>:rule:<id>@<version>` and names a rule in the workspace at its current version, so an unknown, fabricated, amended or label-only ref fails;
+- the rule is an `allow` rule that is neither revoked nor expired, so a revoked or expired rule fails whatever other rule might also allow;
+- the rule's grantee, mission limit and `maxRisk` cover this actor, this mission and the mission's risk, and a capped rule is checked at its own ceiling;
+- the rule's scope contains every scope the packet declares, so a rule for one directory cannot authorize a packet that declares more;
+- no deny rule covers it.
+
+A packet that declares no scope, or a scope with a `..` segment, cannot be authorized by a Chief of Staff, because there is nothing to check a rule against. The check reads the latest committed policy, so a revocation after a dry run or after dispatch refuses the next authorization. It records no receipt, because the refusal rolls the transaction back. The rule is checked against its own action and resource patterns. The request that led to the ref is not known to the core, so a broad grant such as `deploy.*` is not narrowed by a deny rule written for one of its actions.
+
 ## Who may do what
 
 | Principal        | Policy read | Policy write | Raise a decision | Answer a decision          | Ask for an expansion | Approve an expansion       |
@@ -190,27 +215,27 @@ Two layers enforce this. The token scopes: `policy:write` is held only by humans
 
 All routes need a bearer token with the scope shown. Errors use the shared `{ error: { code, message } }` body.
 
-| Method and path                                              | Scope                         | Purpose                                                               |
-| ------------------------------------------------------------ | ----------------------------- | --------------------------------------------------------------------- |
-| `GET /policy`                                                | `policy:read`                 | Policy version, active rules, preferences, pending proposals.         |
-| `GET /policy/rules?status=`                                  | `policy:read`                 | Rules: `active`, `inactive` or `all` (default).                       |
-| `GET /policy/rules/:id`                                      | `policy:read`                 | One rule.                                                             |
-| `POST /policy/rules`                                         | `policy:write`                | Create a grant or deny rule. `Idempotency-Key` makes a retry safe.    |
-| `PATCH /policy/rules/:id`                                    | `policy:write`                | Amend. Needs `expectedVersion`. `409` if stale.                       |
-| `POST /policy/rules/:id/revoke`                              | `policy:write`                | Revoke. Needs `expectedVersion`.                                      |
-| `GET /policy/history?after=&limit=`                          | `policy:read`                 | Every authority event in order: who, when, the rule as it became.     |
-| `GET /policy/rules/:id/history`                              | `policy:read`                 | The same, for one rule.                                               |
-| `POST /policy/evaluations`                                   | `policy:read`                 | Dry run for the caller, or for `principalId`. Records nothing.        |
-| `GET /policy/receipts?after=&limit=`                         | `policy:read`                 | Refused effects and escalations.                                      |
-| `GET /policy/preferences`, `PUT /policy/preferences/:key`    | `policy:read`, `policy:write` | Preferences.                                                          |
-| `GET /policy/proposals?status=`, `GET /policy/proposals/:id` | `policy:read`                 | Proposals, with history for one.                                      |
-| `POST /policy/proposals/:id/accept`, `/narrow`, `/decline`   | `policy:write`                | Resolve a proposal.                                                   |
-| `POST /decisions`                                            | `decision:write`              | Raise a decision and link the branches it blocks.                     |
-| `GET /decisions?status=&limit=`                              | `decision:read`               | The inbox, prioritized.                                               |
-| `GET /decisions/:id`                                         | `decision:read`               | One decision with its answers.                                        |
-| `POST /decisions/:id/answers`                                | `decision:write`              | Answer.                                                               |
-| `GET /decisions/:id/history`                                 | `decision:read`               | Audit events for one decision.                                        |
-| `POST /expansions`                                           | `decision:write`              | Settle an expansion request at its tier. The caller is the requester. |
+| Method and path                                              | Scope                         | Purpose                                                                                                                                |
+| ------------------------------------------------------------ | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /policy`                                                | `policy:read`                 | Policy version, active rules, preferences, pending proposals.                                                                          |
+| `GET /policy/rules?status=`                                  | `policy:read`                 | Rules: `active`, `inactive` or `all` (default).                                                                                        |
+| `GET /policy/rules/:id`                                      | `policy:read`                 | One rule.                                                                                                                              |
+| `POST /policy/rules`                                         | `policy:write`                | Create a grant or deny rule. `Idempotency-Key` makes a retry safe.                                                                     |
+| `PATCH /policy/rules/:id`                                    | `policy:write`                | Amend. Needs `expectedVersion`. `409` if stale.                                                                                        |
+| `POST /policy/rules/:id/revoke`                              | `policy:write`                | Revoke. Needs `expectedVersion`.                                                                                                       |
+| `GET /policy/history?after=&limit=`                          | `policy:read`                 | Every authority event in order: who, when, the rule as it became.                                                                      |
+| `GET /policy/rules/:id/history`                              | `policy:read`                 | The same, for one rule.                                                                                                                |
+| `POST /policy/evaluations`                                   | `policy:read`                 | Dry run for the caller, or for `principalId`. Optional `attemptId` names the attempt whose lease a cleanup relies on. Records nothing. |
+| `GET /policy/receipts?after=&limit=`                         | `policy:read`                 | Refused effects and escalations.                                                                                                       |
+| `GET /policy/preferences`, `PUT /policy/preferences/:key`    | `policy:read`, `policy:write` | Preferences.                                                                                                                           |
+| `GET /policy/proposals?status=`, `GET /policy/proposals/:id` | `policy:read`                 | Proposals, with history for one.                                                                                                       |
+| `POST /policy/proposals/:id/accept`, `/narrow`, `/decline`   | `policy:write`                | Resolve a proposal.                                                                                                                    |
+| `POST /decisions`                                            | `decision:write`              | Raise a decision and link the branches it blocks.                                                                                      |
+| `GET /decisions?status=&limit=`                              | `decision:read`               | The inbox, prioritized.                                                                                                                |
+| `GET /decisions/:id`                                         | `decision:read`               | One decision with its answers.                                                                                                         |
+| `POST /decisions/:id/answers`                                | `decision:write`              | Answer.                                                                                                                                |
+| `GET /decisions/:id/history`                                 | `decision:read`               | Audit events for one decision.                                                                                                         |
+| `POST /expansions`                                           | `decision:write`              | Settle an expansion request at its tier. The caller is the requester.                                                                  |
 
 A rule body names `grantee` and `limits` as nested objects, for example `{"action":"deploy.staging","resource":"repo:app","scope":"env:staging","maxRisk":"medium","grantee":{"kind":"chief_of_staff"},"limits":{"maxAmount":500},"expiresAt":"2026-12-31T00:00:00Z"}`. Unknown fields are rejected. `expiresAt` needs a time zone (`Z` or an offset). A value without one would be read in the host's zone, so it is refused.
 
@@ -219,8 +244,6 @@ A rule body names `grantee` and `limits` as nested objects, for example `{"actio
 The `policy` event stream holds every authority change: `policy.rule.created`, `.amended`, `.revoked`, and `policy.proposal.created`, `.resolved`. Each event carries the full rule or proposal as it became, the actor, the correlation id and the policy version. `events` rejects update and delete, so history cannot be rewritten through the SQL interface. A decision's stream holds `decision.created`, `decision.linked` and `decision.answered`, and each resumed packet records a `packet.authorized` event in its mission citing the decision. `policy.rebuildProjection(workspace)` rebuilds rules, proposals and the version from the stream alone.
 
 ## Not covered here
-
-- **The mission routes can still authorize a packet.** `POST /missions/:id/work-packets/:packetId/authorize` accepts a Chief of Staff token with any non-empty `policyRefs`, and the core does not evaluate them. A Chief of Staff can therefore authorize a pending packet there without a grant, around the tiers above. Closing it means evaluating policy inside `authorizePacketDecision` in `src/core`, or limiting that route to humans, which is outside this task's scope. Until then the tiers bind only callers that use `routeExpansion`, `/expansions` and the inbox.
 
 - Hash-chaining the log is deferred (see `DEFERRED.md`). Someone with direct file access can still edit the database.
 - A decline that arrives after a resume does not un-authorize the packet (see Answering).

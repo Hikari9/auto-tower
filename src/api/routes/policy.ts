@@ -234,6 +234,7 @@ const evaluateRequest: RouteSpec = {
         risk: input.risk,
         amount: input.amount,
         missionId: input.missionId,
+        attemptId: input.attemptId,
       }),
     });
   }),

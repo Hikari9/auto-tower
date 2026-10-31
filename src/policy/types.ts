@@ -70,6 +70,11 @@ export interface AuthorizeRequest {
   risk: Risk;
   amount?: number | undefined;
   missionId?: string | undefined;
+  /**
+   * The attempt this effect belongs to. Grantless cleanup is allowed to the principal that holds
+   * this attempt's live lease. Read from the mission, never taken from the caller's word.
+   */
+  attemptId?: string | undefined;
   /** Principals known to have produced the work, in addition to those the mission records. */
   producerIds?: readonly string[] | undefined;
 }

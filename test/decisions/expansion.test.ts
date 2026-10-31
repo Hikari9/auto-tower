@@ -288,9 +288,9 @@ describe('tier 2: a Chief of Staff under a delegated rule', () => {
       maxRisk: 'high',
       limits: { maxAmount: 1_000_000, missionIds: null },
     });
-    expect(spend(withFollowUp(h, 'medium', ['month:*']), 10).outcome).toBe(
-      'decision_required',
-    );
+    expect(
+      spend(withFollowUp(h, 'medium', ['month:2026-03']), 10).outcome,
+    ).toBe('decision_required');
 
     grant(h, {
       action: 'spend.compute',
@@ -298,12 +298,12 @@ describe('tier 2: a Chief of Staff under a delegated rule', () => {
       scope: 'month:2026-03',
       limits: { maxAmount: 100, missionIds: null },
     });
-    expect(spend(withFollowUp(h, 'medium', ['month:*']), 100).outcome).toBe(
-      'approved',
-    );
-    expect(spend(withFollowUp(h, 'medium', ['month:*']), 101).outcome).toBe(
-      'decision_required',
-    );
+    expect(
+      spend(withFollowUp(h, 'medium', ['month:2026-03']), 100).outcome,
+    ).toBe('approved');
+    expect(
+      spend(withFollowUp(h, 'medium', ['month:2026-03']), 101).outcome,
+    ).toBe('decision_required');
   });
 
   it('is stopped by a deny rule, which no grant or answer overrides', () => {
@@ -619,7 +619,9 @@ describe('from repeated approvals to a standing rule', () => {
   it('lets a human accept the proposal, after which a Chief of Staff approves the same ask', () => {
     const { h, route } = setup();
     const ask = (requester = h.runner) => {
-      const m = withFollowUp(h);
+      // The rule the proposal becomes covers one directory at low risk, so the mission and its
+      // packet stay inside that.
+      const m = withFollowUp(h, 'low', ['infra/terraform']);
       const outcome = route(
         expansion(h, {
           requester,

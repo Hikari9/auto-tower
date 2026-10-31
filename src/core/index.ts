@@ -34,6 +34,7 @@ export function createCore(deps: CoreDependencies): Core {
     db: deps.db,
     guards,
     ...(deps.newId === undefined ? {} : { newId: deps.newId }),
+    ...(deps.clock === undefined ? {} : { clock: deps.clock }),
     ...(deps.maxEventsPerMission === undefined
       ? {}
       : { maxEventsPerMission: deps.maxEventsPerMission }),

@@ -35,6 +35,15 @@ export interface CheckEnv {
   /** Loaded on demand: only the completion check needs the children. */
   children(): MissionState[];
   guards: CompletionGuardRegistry;
+  /**
+   * Resolves and evaluates the policy refs a chief of staff cites for a packet against the latest
+   * committed policy. Returns why they fail, or `undefined` when every one holds.
+   */
+  refusePolicyRefs(
+    state: MissionState,
+    packet: WorkPacket,
+    policyRefs: readonly string[],
+  ): string | undefined;
 }
 
 /**
@@ -292,14 +301,6 @@ export function authorizePacketDecision(
     policyRefs,
     check(state, env) {
       requireWriter(env.actor, 'authorize a work packet');
-      // Policy evaluation arrives with the policy store. Until then a chief of staff
-      // must name the policy it acts under, so the grant can be audited later.
-      if (env.actor.kind === 'chief_of_staff' && policyRefs.length === 0) {
-        throw new CommandNotAllowedError(
-          'authorize a work packet',
-          'a chief of staff must cite the policy it acts under',
-        );
-      }
       requireBreakdownOpen(state, 'authorize a work packet');
       const packet = packetIn(state, packetId);
       if (packet.status !== 'pending' || packet.authorization !== null) {
@@ -307,6 +308,14 @@ export function authorizePacketDecision(
           'authorize a work packet',
           `packet ${packetId} is ${packet.status}${packet.authorization === null ? '' : ' and already authorized'}`,
         );
+      }
+      // A cited ref is a claim. A chief of staff acts only under a rule that is current now, so
+      // each ref is resolved and evaluated here, where the authorization takes effect.
+      if (env.actor.kind === 'chief_of_staff') {
+        const refusal = env.refusePolicyRefs(state, packet, policyRefs);
+        if (refusal !== undefined) {
+          throw new CommandNotAllowedError('authorize a work packet', refusal);
+        }
       }
     },
   };
