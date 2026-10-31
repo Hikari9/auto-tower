@@ -68,6 +68,69 @@ describe('mutating tools', () => {
     expect((await s.ok('search_missions')).total).toBe(1);
   });
 
+  it('pass the key to the core as its idempotency and correlation key, so the event log dedupes without the stored result', async () => {
+    const env = createMcpEnv();
+    const s = await env.session(env.owner);
+    const k = key('core');
+    const first = await s.ok('create_mission', {
+      ...MISSION,
+      idempotencyKey: k,
+    });
+    const event = env.db.get<{ correlation_id: string }>(
+      'SELECT correlation_id FROM events WHERE stream_id = ?',
+      [`mission:${first.mission.id}`],
+    );
+    expect(event?.correlation_id).toBe(k);
+    expect(
+      env.db.get<{ n: number }>(
+        'SELECT COUNT(*) AS n FROM idempotency_keys WHERE idempotency_key = ?',
+        [k],
+      )?.n,
+    ).toBe(1);
+
+    // Lose the stored MCP result, as a crash between the effect and the store would.
+    env.db.run('DELETE FROM mcp_idempotency');
+    const again = await s.ok('create_mission', {
+      ...MISSION,
+      idempotencyKey: k,
+    });
+    expect(again.mission.id).toBe(first.mission.id);
+    expect(again.replayed).toBe(true);
+    expect((await s.ok('search_missions')).total).toBe(1);
+  });
+
+  it('report success when the result cannot be stored, and dedupe the retry through the core', async () => {
+    const env = createMcpEnv();
+    const s = await env.session(env.owner);
+    env.db.exec(
+      "CREATE TRIGGER no_store BEFORE INSERT ON mcp_idempotency BEGIN SELECT RAISE(ABORT, 'disk full'); END",
+    );
+    const k = key('nostore');
+    const first = await s.call('create_mission', {
+      ...MISSION,
+      idempotencyKey: k,
+    });
+    expect(first.isError).toBe(false);
+    const retry = await s.ok('create_mission', {
+      ...MISSION,
+      idempotencyKey: k,
+    });
+    expect(retry.mission.id).toBe(first.data.mission.id);
+    expect((await s.ok('search_missions')).total).toBe(1);
+  });
+
+  it('treat null arguments as none', async () => {
+    const env = createMcpEnv();
+    const s = await env.session(env.owner);
+    const reply = await s.rpc('tools/call', {
+      name: 'briefing',
+      arguments: null,
+    });
+    expect(reply.body.result.isError).toBe(false);
+    const bad = await s.rpc('tools/call', { name: 'briefing', arguments: 'x' });
+    expect(bad.body.error.code).toBe(-32602);
+  });
+
   it('scope a key to the caller, so another principal cannot replay it', async () => {
     const env = createMcpEnv();
     const a = await env.session(env.owner);

@@ -227,6 +227,43 @@ describe('provider access tokens', () => {
     expect(names).not.toContain('grant_policy');
   });
 
+  it('applies the principal kind ceiling at use time to a link row written directly', async () => {
+    const { env, provider } = setup();
+    const cos = env.seed('chief_of_staff');
+    env.db.run(
+      `INSERT INTO oauth_identities (workspace_id, issuer, subject, principal_id, scopes_json, linked_by, linked_at)
+       VALUES ('ws_test', ?, 'dave', ?, ?, ?, '2026-01-01T00:00:00Z')`,
+      [
+        ISSUER,
+        cos.principalId,
+        JSON.stringify(['mission:read', 'policy:write']),
+        env.principals.owner,
+      ],
+    );
+    provider.mint('at-d', {
+      subject: 'dave',
+      scopes: ['mission:read', 'policy:write'],
+    });
+    const s = await env.session('at-d');
+    const names = (await s.rpc('tools/list')).body.result.tools.map(
+      (t: { name: string }) => t.name,
+    );
+    expect(names).toContain('search_missions');
+    expect(names).not.toContain('grant_policy');
+    expect(
+      (
+        await s.call('grant_policy', {
+          action: 'a.b',
+          resource: 'r',
+          scope: 's',
+          grantee: { kind: 'runner' },
+          idempotencyKey: 'k',
+          confirm: true,
+        })
+      ).status,
+    ).toBe(403);
+  });
+
   it('never lets a chief of staff identity exceed that kind, even if linked with more', () => {
     const env = createMcpEnv();
     const human = env.seed('human');
@@ -240,6 +277,28 @@ describe('provider access tokens', () => {
         linkedBy: human.principalId,
       }),
     ).toThrow(/not allowed/);
+  });
+
+  it('can link an identity again after it was revoked, and refuses to re-point an active one', () => {
+    const env = createMcpEnv();
+    const human = env.seed('human');
+    const cos = env.seed('chief_of_staff');
+    const link = (principalId: string) =>
+      linkIdentity(env.db, {
+        issuer: ISSUER,
+        subject: 'erin',
+        principalId,
+        linkedBy: human.principalId,
+      });
+    link(human.principalId);
+    expect(() => link(cos.principalId)).toThrow(/already linked/);
+    revokeIdentity(env.db, ISSUER, 'erin');
+    link(cos.principalId);
+    const row = env.db.get<{ principal_id: string; revoked_at: string | null }>(
+      'SELECT principal_id, revoked_at FROM oauth_identities WHERE subject = ?',
+      ['erin'],
+    );
+    expect(row).toEqual({ principal_id: cos.principalId, revoked_at: null });
   });
 
   it('lets only a human link an identity', () => {

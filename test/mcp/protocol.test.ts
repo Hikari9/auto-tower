@@ -179,6 +179,37 @@ describe('origin policy', () => {
     expect(good.status).toBe(200);
   });
 
+  it('applies the same origin policy to GET and DELETE, leaving the session open', async () => {
+    const env = createMcpEnv({
+      mcp: { allowedOrigins: ['https://chat.example.test'] },
+    });
+    const s = await env.session(env.owner);
+    for (const method of ['GET', 'DELETE']) {
+      const bad = await env.http(env.owner, '/mcp', {
+        method,
+        headers: {
+          origin: 'https://evil.example.test',
+          'mcp-session-id': s.sessionId ?? '',
+        },
+      });
+      expect(bad.status, method).toBe(403);
+    }
+    expect((await s.rpc('tools/list')).status).toBe(200);
+    const good = await env.http(env.owner, '/mcp', {
+      method: 'GET',
+      headers: { origin: 'https://chat.example.test' },
+    });
+    expect(good.status).toBe(405);
+    const ended = await env.http(env.owner, '/mcp', {
+      method: 'DELETE',
+      headers: {
+        origin: 'https://chat.example.test',
+        'mcp-session-id': s.sessionId ?? '',
+      },
+    });
+    expect(ended.status).toBe(204);
+  });
+
   it('refuses any origin by default, before looking at the credential', async () => {
     const env = createMcpEnv();
     const reply = await env
@@ -228,14 +259,16 @@ describe('tool declarations', () => {
     }
   });
 
-  it('makes grant, revoke, dispatch request and close material, and nothing else', () => {
+  it('makes every action that grants, revokes, dispatches, closes or authorizes work material, and nothing else', () => {
     const material = TOOLS.filter((t) => t.material === true)
       .map((t) => t.name)
       .sort();
     expect(material).toEqual([
+      'answer_decision',
       'close_mission',
       'grant_policy',
       'request_dispatch',
+      'request_expansion',
       'revoke_policy',
       'set_feature_flag',
     ]);

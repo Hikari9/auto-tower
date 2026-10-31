@@ -33,6 +33,8 @@ CREATE TABLE mcp_idempotency (
   FOREIGN KEY (principal_id, workspace_id) REFERENCES principals (id, workspace_id)
 );
 
+CREATE INDEX mcp_idempotency_created_idx ON mcp_idempotency (created_at);
+
 -- Every tool call and its outcome, with no arguments and no result. Append only.
 CREATE TABLE mcp_audit (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,

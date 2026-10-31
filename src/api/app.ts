@@ -18,6 +18,11 @@ import {
   type FleetConfig,
 } from '../fleet/index.js';
 import {
+  createRequiredIssuesGuard,
+  DEFAULT_READBACK_MAX_AGE_MS,
+  REQUIRED_ISSUES_GUARD,
+} from '../issues/guard.js';
+import {
   createIssueService,
   type IssueProvider,
   type IssueService,
@@ -131,6 +136,19 @@ export function resolveDependencies(
   const office = createOfficeReviewGuard(deps.db);
   if (!core.guards.list().some((guard) => guard.name === office.name)) {
     core.guards.register(office);
+  }
+  // Registered here, not left to whichever issue service a host passed in, which may have been
+  // built over another core. The issue service the app builds finds it and keeps it.
+  if (
+    !core.guards.list().some((guard) => guard.name === REQUIRED_ISSUES_GUARD)
+  ) {
+    core.guards.register(
+      createRequiredIssuesGuard(
+        deps.db,
+        deps.now ?? (() => new Date()),
+        DEFAULT_READBACK_MAX_AGE_MS,
+      ),
+    );
   }
   const authority =
     deps.authority ??

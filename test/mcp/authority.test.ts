@@ -33,6 +33,7 @@ const expansionFor = (missionId: string, packetId: string, extra = {}) => ({
   risk: 'low',
   question: 'May this reach into infra?',
   idempotencyKey: key('exp'),
+  confirm: true,
   ...extra,
 });
 
@@ -135,6 +136,7 @@ describe('a chief of staff approves expansion only under an applicable grant', (
       version: 1,
       choice: 'approve',
       idempotencyKey: key(),
+      confirm: true,
     });
     expect(refused.isError).toBe(true);
     expect(refused.data.error.code).toMatch(
@@ -149,11 +151,67 @@ describe('a chief of staff approves expansion only under an applicable grant', (
       version: 1,
       choice: 'approve',
       idempotencyKey: key(),
+      confirm: true,
     });
     expect(answered.decision.status).toBe('answered');
     expect(
       (await owner.ok('list_decisions', { status: 'open' })).decisions,
     ).toEqual([]);
+  });
+});
+
+describe('actions that authorize work need confirmation', () => {
+  it('refuses request_expansion and answer_decision without confirm and authorizes nothing', async () => {
+    const api = createIssueApi();
+    const { owner: ownerP, cos: cosP } = clients(api);
+    const owner = await ownerP;
+    const cos = await cosP;
+    const { driver, followUps } = withFollowUps(api, 1);
+    const first = followUps[0] as string;
+    await owner.ok('grant_policy', {
+      ...GRANT,
+      idempotencyKey: key(),
+      confirm: true,
+    });
+    // A covering grant would authorize the packet at once, so the call has to be confirmed.
+    const unconfirmed = await cos.call('request_expansion', {
+      ...expansionFor(driver.id, first),
+      confirm: undefined,
+    });
+    expect(unconfirmed.data.error.code).toBe('confirmation_required');
+    expect(
+      driver.refresh().packets.find((p) => p.id === first)?.authorization,
+    ).toBeNull();
+
+    const { followUps: third, driver: asked } = withFollowUps(api, 1);
+    const decisionAsked = await cos.ok(
+      'request_expansion',
+      expansionFor(asked.id, third[0] as string, {
+        action: 'deploy.production',
+        scope: 'infra/terraform',
+        dedupeKey: 'needs-person',
+      }),
+    );
+    expect(decisionAsked.outcome).toBe('decision_required');
+    const answer = {
+      decisionId: decisionAsked.decision.id,
+      version: 1,
+      choice: 'approve',
+      idempotencyKey: key(),
+    };
+    const refused = await owner.call('answer_decision', answer);
+    expect(refused.data.error.code).toBe('confirmation_required');
+    expect(
+      asked.refresh().packets.find((p) => p.id === third[0])?.authorization,
+    ).toBeNull();
+    const done = await owner.ok('answer_decision', {
+      ...answer,
+      confirm: true,
+    });
+    expect(done.decision.status).toBe('answered');
+    expect(
+      asked.refresh().packets.find((p) => p.id === third[0])?.authorization,
+    ).not.toBeNull();
   });
 });
 

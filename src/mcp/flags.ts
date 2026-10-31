@@ -193,8 +193,10 @@ export function createFlagService(deps: FlagServiceDeps): FlagService {
         `INSERT INTO feature_flags (workspace_id, flag, enabled, provider_id, budget_cents, policy_rule_id, updated_by, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (workspace_id, flag) DO UPDATE SET
-           enabled = excluded.enabled, provider_id = excluded.provider_id,
-           budget_cents = excluded.budget_cents, policy_rule_id = excluded.policy_rule_id,
+           enabled = excluded.enabled,
+           provider_id = COALESCE(excluded.provider_id, feature_flags.provider_id),
+           budget_cents = COALESCE(excluded.budget_cents, feature_flags.budget_cents),
+           policy_rule_id = COALESCE(excluded.policy_rule_id, feature_flags.policy_rule_id),
            updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
         [
           ctx.workspaceId,

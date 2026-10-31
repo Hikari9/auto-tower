@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { createFlagService } from '../../src/mcp/flags.js';
+import { createPolicyService } from '../../src/policy/service.js';
 import { key } from './helpers.js';
 import { createMcpEnv } from './setup.js';
 
@@ -34,6 +36,76 @@ const grantRule = (
     idempotencyKey: key(),
     confirm: true,
   });
+
+describe('isEnabled, which a capability calls at the point of effect', () => {
+  it('is false for an unset flag, true while approved, and false the moment an approval lapses', async () => {
+    const env = createMcpEnv({ mcp: { approvedAiProviders: ['acme-ai'] } });
+    const s = await env.session(env.owner);
+    const policy = createPolicyService({ db: env.db });
+    const flags = (approved: readonly string[]) =>
+      createFlagService({
+        db: env.db,
+        policy,
+        approvedProviders: approved,
+        now: () => new Date(),
+      });
+    expect(flags(['acme-ai']).isEnabled('ws_test', 'cloud_ai.triage')).toBe(
+      false,
+    );
+
+    const { rule } = await grantRule(s);
+    await s.ok('set_feature_flag', {
+      ...ENABLE,
+      policyRuleId: rule.id,
+      idempotencyKey: key(),
+      confirm: true,
+    });
+    expect(flags(['acme-ai']).isEnabled('ws_test', 'cloud_ai.triage')).toBe(
+      true,
+    );
+    expect(flags(['acme-ai']).isEnabled('ws_test', 'hosted_execution')).toBe(
+      false,
+    );
+    // Provider no longer approved.
+    expect(flags([]).isEnabled('ws_test', 'cloud_ai.triage')).toBe(false);
+
+    await s.ok('revoke_policy', {
+      ruleId: rule.id,
+      expectedVersion: rule.version,
+      idempotencyKey: key(),
+      confirm: true,
+    });
+    expect(flags(['acme-ai']).isEnabled('ws_test', 'cloud_ai.triage')).toBe(
+      false,
+    );
+    const row = env.db.get<{ enabled: number }>(
+      "SELECT enabled FROM feature_flags WHERE flag = 'cloud_ai.triage'",
+    );
+    expect(row?.enabled).toBe(1);
+  });
+
+  it('is false when the rule stays but its cap drops below the budget', async () => {
+    const env = createMcpEnv({ mcp: { approvedAiProviders: ['acme-ai'] } });
+    const s = await env.session(env.owner);
+    const policy = createPolicyService({ db: env.db });
+    const { rule } = await grantRule(s);
+    await s.ok('set_feature_flag', {
+      ...ENABLE,
+      policyRuleId: rule.id,
+      idempotencyKey: key(),
+      confirm: true,
+    });
+    const service = createFlagService({
+      db: env.db,
+      policy,
+      approvedProviders: ['acme-ai'],
+      now: () => new Date(),
+    });
+    expect(service.isEnabled('ws_test', 'cloud_ai.triage')).toBe(true);
+    env.db.run('UPDATE feature_flags SET budget_cents = 9000');
+    expect(service.isEnabled('ws_test', 'cloud_ai.triage')).toBe(false);
+  });
+});
 
 describe('feature flags', () => {
   it('exist and default to off', async () => {
@@ -211,6 +283,31 @@ describe('feature flags', () => {
       confirm: true,
     });
     expect(reply.status).toBe(403);
+  });
+
+  it('keeps what was approved when it is turned off, and accepts a null budget doing so', async () => {
+    const { s } = await envWithProvider();
+    const { rule } = await grantRule(s);
+    await s.ok('set_feature_flag', {
+      ...ENABLE,
+      policyRuleId: rule.id,
+      idempotencyKey: key(),
+      confirm: true,
+    });
+    const off = await s.ok('set_feature_flag', {
+      flag: 'cloud_ai.triage',
+      enabled: false,
+      budgetCents: null,
+      idempotencyKey: key(),
+      confirm: true,
+    });
+    expect(off.flag).toMatchObject({
+      enabled: false,
+      requested: false,
+      providerId: 'acme-ai',
+      budgetCents: 2000,
+      policyRuleId: rule.id,
+    });
   });
 
   it('turns a flag off without any approval', async () => {

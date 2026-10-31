@@ -18,6 +18,11 @@ interface SessionRow {
   closed_at: string | null;
 }
 
+/** Open sessions one principal may hold. Opening another closes the least recently used. */
+export const MAX_OPEN_SESSIONS = 50;
+/** How long a stored result can answer a retry. */
+export const IDEMPOTENCY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
 export function openSession(
   db: SqlDatabase,
   input: {
@@ -30,6 +35,22 @@ export function openSession(
 ): SessionRecord {
   const id = newId('mcs');
   const at = input.now.toISOString();
+  db.run(
+    `UPDATE mcp_sessions SET closed_at = ?
+     WHERE workspace_id = ? AND principal_id = ? AND closed_at IS NULL AND id IN (
+       SELECT id FROM mcp_sessions
+       WHERE workspace_id = ? AND principal_id = ? AND closed_at IS NULL
+       ORDER BY last_seen_at DESC, id DESC LIMIT -1 OFFSET ?
+     )`,
+    [
+      at,
+      input.workspaceId,
+      input.principalId,
+      input.workspaceId,
+      input.principalId,
+      MAX_OPEN_SESSIONS - 1,
+    ],
+  );
   db.run(
     `INSERT INTO mcp_sessions (id, workspace_id, principal_id, protocol_version, client_name, created_at, last_seen_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -165,6 +186,9 @@ export function storeResult(
   result: Record<string, unknown>,
   now: Date,
 ): void {
+  db.run('DELETE FROM mcp_idempotency WHERE created_at < ?', [
+    new Date(now.getTime() - IDEMPOTENCY_RETENTION_MS).toISOString(),
+  ]);
   db.run(
     `INSERT OR IGNORE INTO mcp_idempotency (workspace_id, principal_id, idempotency_key, tool, request_hash, result_json, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,

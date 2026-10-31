@@ -66,6 +66,9 @@ export const decisionTools: readonly ToolDefinition[] = [
       'Answers a Decision Inbox item. Only the authority the decision requires may answer: a chief of staff can answer only one a current delegated rule covers. An approval resumes only the branches blocked on this decision.',
     readOnly: false,
     scopes: ['decision:write'],
+    material: true,
+    effect:
+      'An approval authorizes the packets linked to the decision for execution.',
     properties: {
       decisionId: id,
       version: {
@@ -102,6 +105,9 @@ export const decisionTools: readonly ToolDefinition[] = [
       'Asks Tower to settle work beyond what a mission authorized. Inside approved scope it proceeds. A chief of staff is approved only under a current grant that covers the request. Anything else becomes a decision for the person who may answer. Asking approves nothing.',
     readOnly: false,
     scopes: ['decision:write'],
+    material: true,
+    effect:
+      'Under a grant that covers it, this authorizes the packet for execution at once.',
     properties: EXPANSION_PROPERTIES,
     required: ['missionId', 'action', 'resource', 'scope', 'risk', 'question'],
     run(ctx, args, key) {

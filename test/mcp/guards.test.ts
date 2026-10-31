@@ -3,7 +3,10 @@ import { OFFICE_REVIEW_GUARD } from '../../src/adapters/office/ledger.js';
 import { createApp } from '../../src/api/app.js';
 import { issueToken } from '../../src/auth/tokens.js';
 import { createCore } from '../../src/core/index.js';
-import { REQUIRED_ISSUES_GUARD } from '../../src/issues/index.js';
+import {
+  type IssueService,
+  REQUIRED_ISSUES_GUARD,
+} from '../../src/issues/index.js';
 import { createHarness, MissionDriver, mission } from '../core/helpers.js';
 import { openTestDatabase, seedPrincipal } from '../helpers/tower.js';
 import {
@@ -54,6 +57,31 @@ describe('completion guards on every MCP path', () => {
     const done = await close(driver.refresh().version);
     expect(done.isError).toBe(false);
     expect(done.data.mission.state).toBe('completed');
+  });
+
+  it('runs one reconciliation when a retry arrives while the first is still reading', async () => {
+    const api = createIssueApi();
+    const { h } = api;
+    h.github.add(ISSUE_URL);
+    configure(h);
+    const driver = missionWithLinks(h);
+    const s = new McpClient((path, init) => api.raw(path, init), api.owner);
+    const args = {
+      missionId: driver.id,
+      idempotencyKey: key('concurrent'),
+    };
+    const reads = h.github.getCalls;
+    const [a, b] = await Promise.all([
+      s.call('request_reconciliation', args),
+      s.call('request_reconciliation', args),
+    ]);
+    expect(a.isError).toBe(false);
+    expect(b.isError).toBe(false);
+    expect(h.github.getCalls - reads).toBe(1);
+    expect(b.data).toEqual(a.data);
+    expect(
+      [a.meta, b.meta].filter((m) => m?.['tower/replayed'] === true),
+    ).toHaveLength(1);
   });
 
   it('blocks a reopened issue as a discrepancy and never as completion', async () => {
@@ -134,6 +162,15 @@ describe('createApp with an injected core', () => {
     expect(reply.data.error.code).toBe('completion_guard_failed');
     expect(failures(reply.data)).toContain(OFFICE_REVIEW_GUARD);
     expect(driver.refresh().state).toBe('verifying');
+  });
+
+  it('registers the required-issues guard even when the issue service came from elsewhere', () => {
+    const db = openTestDatabase();
+    const core = createCore({ db });
+    createApp({ db, core, issues: {} as IssueService });
+    expect(core.guards.list().map((g) => g.name)).toContain(
+      REQUIRED_ISSUES_GUARD,
+    );
   });
 
   it('does the same when the app builds its own core', async () => {

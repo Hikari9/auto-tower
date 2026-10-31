@@ -60,8 +60,8 @@ Each tool declares, in `tools/list`, `annotations.readOnlyHint`, `destructiveHin
 | `create_mission`         | mutating | `mission:write`  | Creates a draft mission.                                                                  |
 | `update_mission`         | mutating | `mission:write`  | Changes descriptive fields. Risk lowering by a Chief of Staff is refused and receipted.   |
 | `request_reconciliation` | mutating | `mission:write`  | Reads linked issues back from the provider. Writes nothing to a provider.                 |
-| `answer_decision`        | mutating | `decision:write` | Answers a decision. Only the authority it requires may.                                   |
-| `request_expansion`      | mutating | `decision:write` | Settles work beyond a mission's authorization at the right tier. Asking approves nothing. |
+| `answer_decision`        | material | `decision:write` | Answers a decision. Only the authority it requires may.                                   |
+| `request_expansion`      | material | `decision:write` | Settles work beyond a mission's authorization at the right tier. Asking approves nothing. |
 | `propose_policy_change`  | mutating | `decision:write` | Raises a decision for a person. Changes no policy.                                        |
 | `close_mission`          | material | `mission:write`  | `completed` (runs every guard) or `cancelled`.                                            |
 | `request_dispatch`       | material | `mission:write`  | Authorizes one packet and runs one scheduler pass.                                        |
@@ -71,7 +71,7 @@ Each tool declares, in `tools/list`, `annotations.readOnlyHint`, `destructiveHin
 
 **Mutating** tools require an `idempotencyKey` (1 to 100 printable characters). The first result is stored in `mcp_idempotency`, scoped to the caller. A retry with the same key and arguments returns it with `_meta["tower/replayed"] = true` and acts once. The same key with another tool or other arguments is `idempotency_key_reused`. A failed call stores nothing, so its key can be reused. The key is also passed to the core as its idempotency and correlation key, so a retry after a crash between the effect and the stored result is still deduplicated by the event log.
 
-**Material** tools also require `confirm: true`, exactly the boolean. Anything else is `confirmation_required`, nothing runs and nothing is stored. The schema says what a confirmed call does.
+**Material** tools also require `confirm: true`, exactly the boolean. They are the ones that grant or revoke authority, dispatch, close, change a flag, or authorize work: `answer_decision` (an approval authorizes the packets linked to the decision) and `request_expansion` (under a covering grant it authorizes the packet at once) count, because they reach the same effect as `request_dispatch`. Anything else is `confirmation_required`, nothing runs and nothing is stored. The schema says what a confirmed call does.
 
 Mutating mission tools take `expectedVersion`. A stale one is `version_conflict`.
 
@@ -132,4 +132,6 @@ linkIdentity(db, {
 - No server-to-client stream, no resources, prompts or sampling, no JSON-RPC batches.
 - `src/hosting` does not read MCP settings from the environment yet, and there is no admin route to link identities. See `DEFERRED.md`.
 - Tool arguments are validated by the same parsers as the HTTP API. The published `inputSchema` is a guide for clients, not the source of truth.
-- Sessions are not expired by age. Closing is explicit.
+- A principal holds at most 50 open sessions. Opening another closes the least recently used. Sessions are not otherwise expired by age.
+- Stored results answer a retry for 7 days, then are pruned. A retry that arrives while the first call is still running joins it instead of running the tool twice.
+- A result that cannot be stored does not fail a call that already took effect. The core's own idempotency key still deduplicates a retry for the tools that pass it.

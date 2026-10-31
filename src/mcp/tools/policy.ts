@@ -136,7 +136,11 @@ export const policyTools: readonly ToolDefinition[] = [
     },
     required: ['flag', 'enabled'],
     run(ctx, args) {
-      const r = new InputReader(args);
+      // The schema allows null for an unset budget. The reader takes a number or nothing.
+      const { budgetCents: givenBudget, ...others } = args;
+      const r = new InputReader(
+        givenBudget === null ? others : { ...others, budgetCents: givenBudget },
+      );
       const flag = r.string('flag', { max: 64, min: 1 });
       if (!isFeatureFlag(flag)) {
         throw new McpToolError(

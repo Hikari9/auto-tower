@@ -35,7 +35,7 @@ export const SUPPORTED_PROTOCOLS = [
 ] as const;
 const SERVER_INFO = { name: 'auto-tower', version: '0.0.0' } as const;
 const INSTRUCTIONS =
-  'Auto Tower is durable mission control. Call briefing first. Mutating tools need an idempotencyKey. Grant, revoke, dispatch and close tools also need confirm: true. Asking for authority never grants it.';
+  'Auto Tower is durable mission control. Call briefing first. Mutating tools need an idempotencyKey. Tools that grant, revoke, dispatch, close or authorize work also need confirm: true. Asking for authority never grants it.';
 
 export interface McpRequest {
   auth: AuthenticatedToken;
@@ -121,6 +121,10 @@ const failureResult = (failure: ToolFailure) =>
 
 export function createMcpServer(services: Services): McpServer {
   const { db, now } = services;
+  const inFlight = new Map<
+    string,
+    { hash: string; tool: string; result: Promise<Record<string, unknown>> }
+  >();
 
   function audit(
     caller: Caller,
@@ -196,16 +200,49 @@ export function createMcpServer(services: Services): McpServer {
     };
     try {
       const hash = key === undefined ? '' : requestHash(tool.name, rawArgs);
-      if (key !== undefined) {
-        const stored = replayFor(db, owner, key, tool.name, hash);
-        if (stored !== undefined) {
-          audit(caller, tool, 'replayed', null);
-          return textResult(stored, false, { 'tower/replayed': true });
-        }
+      if (key === undefined) {
+        const { data } = await tool.run(ctx, args, key);
+        audit(caller, tool, 'ok', null);
+        return textResult(data, false);
       }
-      const { data } = await tool.run(ctx, args, key);
-      if (key !== undefined) {
+      const stored = replayFor(db, owner, key, tool.name, hash);
+      if (stored !== undefined) {
+        audit(caller, tool, 'replayed', null);
+        return textResult(stored, false, { 'tower/replayed': true });
+      }
+      // An async tool can still be running when its retry arrives, and nothing is stored yet.
+      // The retry joins the first call instead of running the tool a second time.
+      const flight = `${owner.workspaceId}\0${owner.principalId}\0${key}`;
+      const running = inFlight.get(flight);
+      if (running !== undefined) {
+        if (running.hash !== hash || running.tool !== tool.name) {
+          throw new McpToolError(
+            'idempotency_key_reused',
+            'The idempotency key was already used for a different call',
+          );
+        }
+        const data = await running.result;
+        audit(caller, tool, 'replayed', null);
+        return textResult(data, false, { 'tower/replayed': true });
+      }
+      const result = Promise.resolve(tool.run(ctx, args, key)).then(
+        (output) => output.data,
+      );
+      inFlight.set(flight, { hash, tool: tool.name, result });
+      let data: Record<string, unknown>;
+      try {
+        data = await result;
+      } finally {
+        inFlight.delete(flight);
+      }
+      // The effect is done. A failure to remember it must not report the call as failed, since a
+      // retry would then run it again. The core's own idempotency still covers most tools.
+      try {
         storeResult(db, owner, key, tool.name, hash, data, now());
+      } catch (storeError) {
+        console.error(
+          `mcp result not stored: ${storeError instanceof Error ? storeError.name : 'error'}`,
+        );
       }
       audit(caller, tool, 'ok', null);
       return textResult(data, false);
@@ -354,9 +391,8 @@ export function createMcpServer(services: Services): McpServer {
           }
           if (
             given !== undefined &&
-            (typeof given !== 'object' ||
-              given === null ||
-              Array.isArray(given))
+            given !== null &&
+            (typeof given !== 'object' || Array.isArray(given))
           ) {
             return {
               status: 200,

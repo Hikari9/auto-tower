@@ -47,9 +47,16 @@ export function linkIdentity(db: SqlDatabase, input: LinkIdentityInput): void {
     throw new Error('An identity link needs at least one scope');
   }
   assertScopesAllowed(principal.kind, scopes);
+  // A revoked identity can be linked again, to the same principal or another. An active one
+  // cannot be silently re-pointed: revoke it first.
   db.run(
     `INSERT INTO oauth_identities (workspace_id, issuer, subject, principal_id, scopes_json, linked_by, linked_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (issuer, subject) DO UPDATE SET
+       workspace_id = excluded.workspace_id, principal_id = excluded.principal_id,
+       scopes_json = excluded.scopes_json, linked_by = excluded.linked_by,
+       linked_at = excluded.linked_at, revoked_at = NULL
+     WHERE oauth_identities.revoked_at IS NOT NULL`,
     [
       principal.workspaceId,
       input.issuer,
@@ -60,6 +67,15 @@ export function linkIdentity(db: SqlDatabase, input: LinkIdentityInput): void {
       (input.now ?? new Date()).toISOString(),
     ],
   );
+  const stored = db.get<{ principal_id: string; revoked_at: string | null }>(
+    'SELECT principal_id, revoked_at FROM oauth_identities WHERE issuer = ? AND subject = ?',
+    [input.issuer, input.subject],
+  );
+  if (stored?.principal_id !== principal.id || stored.revoked_at !== null) {
+    throw new Error(
+      'That identity is already linked. Revoke it before linking it again',
+    );
+  }
 }
 
 export function revokeIdentity(
