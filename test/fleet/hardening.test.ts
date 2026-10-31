@@ -410,6 +410,29 @@ describe('quarantine', () => {
     expect(audit(h, 'runner.unquarantined')).toHaveLength(0);
   });
 
+  it('refuses old-fence writes to a lease in recovery even though its expiry has not passed', async () => {
+    const h = createFleetHarness();
+    const a = await h.runner();
+    const held = await hold(h, a);
+    await h.call(h.owner.token, 'POST', `/runners/${a.id}/quarantine`, {});
+    await h.call(h.owner.token, 'POST', `/runners/${a.id}/unquarantine`);
+    expect(Date.parse(lease(h, held.leaseId).expires_at)).toBeGreaterThan(
+      h.clock.now().getTime(),
+    );
+    for (const res of [
+      await a.progress(held.leaseId, { fence: 1, seq: 1, message: 'x' }),
+      await a.checkpoint(held.leaseId, { fence: 1, ref: 'refs/heads/x' }),
+      await a.receipt(held.leaseId, {
+        receiptId: 'r',
+        fence: 1,
+        outcome: 'succeeded',
+      }),
+    ]) {
+      expect(res.body.error.code).toBe('lease_expired');
+    }
+    expect(h.db.all('SELECT seq FROM runner_progress')).toHaveLength(0);
+  });
+
   it('lets the original runner reconcile first after a long quarantine, and refuses stale writes meanwhile', async () => {
     const h = createFleetHarness();
     const a = await h.runner({ name: 'a' });

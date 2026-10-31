@@ -1610,11 +1610,8 @@ export function releaseOffer(
     if (offer === undefined) {
       throw new FleetError('lease_not_found', 'No such attempt');
     }
-    const lease = tx.get<{ id: string }>(
-      'SELECT id FROM runner_leases WHERE workspace_id = ? AND attempt_id = ? LIMIT 1',
-      [caller.workspaceId, attemptId],
-    );
-    if (offer.status !== 'leased' || lease !== undefined) {
+    // A claimed attempt is already running, so only an unclaimed offer is still 'leased'.
+    if (offer.status !== 'leased') {
       throw new FleetError(
         'lease_closed',
         'The attempt is not an unclaimed offer; release its lease instead',
