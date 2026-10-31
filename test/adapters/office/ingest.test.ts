@@ -97,7 +97,6 @@ describe('ingestOfficeEvidence', () => {
     const outcome = ingestOfficeEvidence(
       db,
       input(
-        db,
         second,
         receipt({ independentReview: { reviewer: first, result: 'approved' } }),
       ),
