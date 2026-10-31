@@ -1,3 +1,4 @@
+import { missionStreamId } from '../core/types.js';
 import type { SqlDatabase, SqlValue } from '../storage/database.js';
 import type {
   Discrepancy,
@@ -23,6 +24,7 @@ interface LinkRow {
   observed_source: ObservedSource | null;
   observed_at: string | null;
   observed_title: string | null;
+  polled_at: string | null;
   verified_closed_at: string | null;
   closed_by_tower_at: string | null;
   retry_not_before: string | null;
@@ -37,7 +39,7 @@ interface LinkRow {
 }
 
 const LINK_COLUMNS =
-  'id, mission_id, url, provider, repo, issue_number, node_id, observed_state, observed_source, observed_at, observed_title, verified_closed_at, closed_by_tower_at, retry_not_before, exemption_status, exemption_reason, exemption_requested_by, exemption_requested_at, exemption_approved_by, exemption_approved_at, created_at, updated_at';
+  'id, mission_id, url, provider, repo, issue_number, node_id, observed_state, observed_source, observed_at, observed_title, polled_at, verified_closed_at, closed_by_tower_at, retry_not_before, exemption_status, exemption_reason, exemption_requested_by, exemption_requested_at, exemption_approved_by, exemption_approved_at, created_at, updated_at';
 
 function toLink(row: LinkRow): IssueLinkRecord {
   return {
@@ -52,6 +54,7 @@ function toLink(row: LinkRow): IssueLinkRecord {
     observedSource: row.observed_source,
     observedAt: row.observed_at,
     observedTitle: row.observed_title,
+    polledAt: row.polled_at,
     verifiedClosedAt: row.verified_closed_at,
     closedByTowerAt: row.closed_by_tower_at,
     retryNotBefore: row.retry_not_before,
@@ -79,6 +82,40 @@ export function loadLinks(
       [workspaceId, missionId],
     )
     .map(toLink);
+}
+
+/**
+ * Every URL the mission has ever carried as `required`, read from its event stream. A link that
+ * was required once keeps counting after an update removes it or downgrades it, so this is the
+ * set the completion guard answers for. Events are append-only, which makes the set only grow.
+ */
+export function loadEverRequiredUrls(
+  db: SqlDatabase,
+  workspaceId: string,
+  missionId: string,
+): Set<string> {
+  const urls = new Set<string>();
+  const rows = db.all<{ type: string; payload_json: string }>(
+    "SELECT type, payload_json FROM events WHERE workspace_id = ? AND stream_id = ? AND type IN ('mission.created', 'mission.updated') ORDER BY version",
+    [workspaceId, missionStreamId(missionId)],
+  );
+  for (const row of rows) {
+    const payload = JSON.parse(row.payload_json) as {
+      links?: unknown;
+      changes?: { links?: unknown };
+    };
+    const links =
+      row.type === 'mission.created' ? payload.links : payload.changes?.links;
+    if (!Array.isArray(links)) {
+      continue;
+    }
+    for (const link of links as { url?: unknown; classification?: unknown }[]) {
+      if (link.classification === 'required' && typeof link.url === 'string') {
+        urls.add(link.url);
+      }
+    }
+  }
+  return urls;
 }
 
 export function loadLinkByUrl(
@@ -128,7 +165,7 @@ export function loadAllTrackedLinks(
 ): IssueLinkRecord[] {
   return db
     .all<LinkRow>(
-      `SELECT ${LINK_COLUMNS} FROM issue_links WHERE workspace_id = ? AND provider IS NOT NULL ORDER BY created_at, id`,
+      `SELECT ${LINK_COLUMNS} FROM issue_links WHERE workspace_id = ? AND provider IS NOT NULL ORDER BY (polled_at IS NOT NULL), polled_at, created_at, id`,
       [workspaceId],
     )
     .map(toLink);
@@ -170,6 +207,7 @@ export interface LinkUpdate {
   observedSource?: ObservedSource | null;
   observedAt?: string | null;
   observedTitle?: string | null;
+  polledAt?: string | null;
   verifiedClosedAt?: string | null;
   closedByTowerAt?: string | null;
   retryNotBefore?: string | null;
@@ -187,6 +225,7 @@ const UPDATE_COLUMNS: Readonly<Record<keyof LinkUpdate, string>> = {
   observedSource: 'observed_source',
   observedAt: 'observed_at',
   observedTitle: 'observed_title',
+  polledAt: 'polled_at',
   verifiedClosedAt: 'verified_closed_at',
   closedByTowerAt: 'closed_by_tower_at',
   retryNotBefore: 'retry_not_before',

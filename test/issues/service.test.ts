@@ -458,6 +458,40 @@ describe('identity and blockers', () => {
   });
 });
 
+describe('blockers the provider would not report', () => {
+  it('does not close, and treats the blockers as unknown rather than none', async () => {
+    const h = ready();
+    h.github.issue(ISSUE_URL).blockers = null;
+    const driver = missionWithLinks(h);
+
+    const report = await h.issues.closeRequired(h.ctx(h.cos), driver.id);
+
+    expect(report.results[0]).toMatchObject({
+      status: 'blocked',
+      discrepancy: 'blocked',
+      detail: 'blockers_unknown',
+    });
+    expect(h.github.closeCalls).toBe(0);
+    expect(report.state).toBe('reconciling');
+    expect(
+      h.issues.discrepancies('ws_test', driver.id, 'open')[0],
+    ).toMatchObject({ kind: 'blocked', requiresAttention: true });
+  });
+
+  it('closes once the blockers are known to be none', async () => {
+    const h = ready();
+    h.github.issue(ISSUE_URL).blockers = null;
+    const driver = missionWithLinks(h);
+    await h.issues.closeRequired(h.ctx(h.cos), driver.id);
+
+    h.github.issue(ISSUE_URL).blockers = 0;
+    const report = await h.issues.closeRequired(h.ctx(h.cos), driver.id);
+
+    expect(report.results[0]?.status).toBe('closed');
+    expect(h.github.closeCalls).toBe(1);
+  });
+});
+
 describe('failures leave the mission reconciling with a discrepancy', () => {
   const cases: Array<
     [string, () => (h: ReturnType<typeof ready>) => void, string]
@@ -679,20 +713,114 @@ describe('the completion guard', () => {
     expect(driver.go('completed').state).toBe('completed');
   });
 
-  it('does not count a link the mission no longer lists as a required link', async () => {
-    const h = ready();
-    const driver = missionWithLinks(h);
+  const reclassify = (
+    h: ReturnType<typeof ready>,
+    driver: ReturnType<typeof missionWithLinks>,
+    links: Array<{
+      url: string;
+      classification: 'required' | 'optional' | 'reference-only';
+    }>,
+  ) => {
     h.core.missions.updateMission(
       h.ctx(h.owner),
       driver.id,
       driver.refresh().version,
-      {
-        links: [
-          { url: ISSUE_URL, classification: 'reference-only', title: null },
-        ],
-      },
+      { links: links.map((l) => ({ ...l, title: null })) },
     );
     driver.refresh();
+  };
+
+  it.each([
+    ['downgraded to reference-only', 'reference-only'],
+    ['downgraded to optional', 'optional'],
+    ['removed', null],
+  ] as const)(
+    'keeps counting a required link that was %s',
+    async (_name, to) => {
+      const h = ready();
+      const driver = missionWithLinks(h);
+      reclassify(
+        h,
+        driver,
+        to === null ? [] : [{ url: ISSUE_URL, classification: to }],
+      );
+
+      expect(() => completeMission(driver)).toThrow(CompletionGuardFailedError);
+      expect(() => driver.go('completed')).toThrow(/is not verified closed/);
+    },
+  );
+
+  it('lets the mission complete once a downgraded link is verified closed by read-back', async () => {
+    const h = ready();
+    const driver = missionWithLinks(h);
+    reclassify(h, driver, [
+      { url: ISSUE_URL, classification: 'reference-only' },
+    ]);
+    h.github.issue(ISSUE_URL).state = 'closed';
+
+    const report = await h.issues.verifyMission(h.ctx(h.owner), driver.id);
+
+    expect(report.results).toHaveLength(1);
+    expect(report.satisfied).toBe(true);
+    expect(completeMission(driver).state).toBe('completed');
+  });
+
+  it('lets the mission complete once a removed link is verified closed by read-back', async () => {
+    const h = ready();
+    const driver = missionWithLinks(h);
+    reclassify(h, driver, []);
+    h.github.issue(ISSUE_URL).state = 'closed';
+
+    await h.issues.verifyMission(h.ctx(h.owner), driver.id);
+
+    expect(completeMission(driver).state).toBe('completed');
+  });
+
+  it('lets the mission complete when a person approves an exemption for a downgraded link', () => {
+    const h = ready();
+    const driver = missionWithLinks(h);
+    const linkId = h.issues.listLinks('ws_test', driver.id)[0]?.id ?? '';
+    reclassify(h, driver, [
+      { url: ISSUE_URL, classification: 'reference-only' },
+    ]);
+    expect(() => completeMission(driver)).toThrow(CompletionGuardFailedError);
+
+    h.issues.requestExemption(h.ctx(h.cos), driver.id, linkId, 'tracks later');
+    h.issues.approveExemption(h.ctx(h.owner), driver.id, linkId);
+
+    expect(driver.go('completed').state).toBe('completed');
+  });
+
+  it('shows a removed link that still counts, and never closes a downgraded one', async () => {
+    const h = ready();
+    h.github.add(ISSUE_URL_2);
+    const driver = missionWithLinks(h, [
+      { url: ISSUE_URL },
+      { url: ISSUE_URL_2 },
+    ]);
+    reclassify(h, driver, [{ url: ISSUE_URL, classification: 'optional' }]);
+
+    const links = h.issues.listLinks('ws_test', driver.id);
+    expect(
+      links.map((l) => [l.url, l.classification, l.countsAsRequired]),
+    ).toEqual([
+      [ISSUE_URL, 'optional', true],
+      [ISSUE_URL_2, null, true],
+    ]);
+
+    const report = await h.issues.closeRequired(h.ctx(h.cos), driver.id);
+    expect(report.results).toEqual([]);
+    expect(h.github.closeCalls).toBe(0);
+  });
+
+  it('does not count a link that was never required', () => {
+    const h = ready();
+    const driver = missionWithLinks(h, [
+      { url: ISSUE_URL, classification: 'optional' },
+    ]);
+    reclassify(h, driver, [
+      { url: ISSUE_URL, classification: 'reference-only' },
+    ]);
 
     expect(completeMission(driver).state).toBe('completed');
   });
@@ -795,6 +923,31 @@ describe('drift after completion', () => {
     expect(h.github.closeCalls).toBe(1);
   });
 
+  it('treats a downgraded link that reopens after completion as drift', async () => {
+    const h = ready();
+    const driver = missionWithLinks(h);
+    await h.issues.closeRequired(h.ctx(h.cos), driver.id);
+    h.core.missions.updateMission(
+      h.ctx(h.owner),
+      driver.id,
+      driver.refresh().version,
+      {
+        links: [{ url: ISSUE_URL, classification: 'optional', title: null }],
+      },
+    );
+    driver.refresh();
+    await h.issues.verifyMission(h.ctx(h.owner), driver.id);
+    completeMission(driver);
+
+    h.github.issue(ISSUE_URL).state = 'open';
+    await h.issues.poll(h.ctx(h.provider));
+
+    expect(driver.refresh().state).toBe('needs-attention');
+    expect(
+      h.issues.discrepancies('ws_test', driver.id, 'open').map((d) => d.kind),
+    ).toEqual(['reopened']);
+  });
+
   it('is recorded under the adapter, which may flag attention but never resume', async () => {
     const h = ready();
     const driver = missionWithLinks(h);
@@ -867,6 +1020,78 @@ describe('polling fallback', () => {
     expect(h.issues.listLinks('ws_test', driver.id)[0]).toMatchObject({
       verifiedClosed: true,
       state: 'closed',
+    });
+  });
+
+  it('visits links least recently polled first, so more than the limit are all reached', async () => {
+    const h = ready();
+    const urls = [1, 2, 3, 4, 5].map(
+      (n) => `https://github.com/acme/web/issues/${n}`,
+    );
+    for (const url of urls.slice(1)) {
+      h.github.add(url);
+    }
+    const driver = missionWithLinks(
+      h,
+      urls.map((url) => ({ url })),
+    );
+    h.issues.listLinks('ws_test', driver.id);
+    const observed = () =>
+      h.issues
+        .listLinks('ws_test', driver.id)
+        .filter((l) => l.observedAt !== null).length;
+
+    const first = await h.issues.poll(h.ctx(h.provider), { limit: 2 });
+    expect([first.checked, observed()]).toEqual([2, 2]);
+    h.clock.advance(1000);
+    const second = await h.issues.poll(h.ctx(h.provider), { limit: 2 });
+    expect([second.checked, observed()]).toEqual([2, 4]);
+    h.clock.advance(1000);
+    const third = await h.issues.poll(h.ctx(h.provider), { limit: 2 });
+    expect([third.checked, observed()]).toEqual([2, 5]);
+  });
+
+  it('does not let a link that keeps failing hold the front of the queue', async () => {
+    const h = createIssueHarness();
+    configure(h);
+    grantClose(h);
+    h.github.add(ISSUE_URL_2);
+    // The provider does not know the first issue, so every read of it fails.
+    const driver = missionWithLinks(h, [
+      { url: ISSUE_URL },
+      { url: ISSUE_URL_2 },
+    ]);
+    h.issues.listLinks('ws_test', driver.id);
+
+    await h.issues.poll(h.ctx(h.provider), { limit: 1 });
+    h.clock.advance(1000);
+    await h.issues.poll(h.ctx(h.provider), { limit: 1 });
+
+    const second = h.issues
+      .listLinks('ws_test', driver.id)
+      .find((l) => l.url === ISSUE_URL_2);
+    expect(second?.observedAt).not.toBeNull();
+  });
+
+  it('polls a required link that was downgraded', async () => {
+    const h = ready();
+    const driver = missionWithLinks(h);
+    h.issues.listLinks('ws_test', driver.id);
+    h.core.missions.updateMission(
+      h.ctx(h.owner),
+      driver.id,
+      driver.refresh().version,
+      {
+        links: [{ url: ISSUE_URL, classification: 'optional', title: null }],
+      },
+    );
+    h.github.issue(ISSUE_URL).state = 'closed';
+
+    const report = await h.issues.poll(h.ctx(h.provider));
+
+    expect(report.checked).toBe(1);
+    expect(h.issues.listLinks('ws_test', driver.id)[0]).toMatchObject({
+      verifiedClosed: true,
     });
   });
 

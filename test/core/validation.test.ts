@@ -118,7 +118,7 @@ describe('parseCreateMission', () => {
         links: [{ url, classification: 'required' }],
       });
 
-    it('keeps http and https, drops the fragment, and records a null title', () => {
+    it('keeps https, drops the fragment, and records a null title', () => {
       expect(
         link('https://github.com/o/r/issues/1#issuecomment-5').links,
       ).toEqual([
@@ -128,9 +128,12 @@ describe('parseCreateMission', () => {
           title: null,
         },
       ]);
-      expect(link('http://tracker.example/x').links[0]?.url).toBe(
-        'http://tracker.example/x',
-      );
+    });
+
+    it('rejects plain http', () => {
+      expect(issues(() => link('http://tracker.example/x'))).toEqual([
+        ['links[0].url', 'must use https'],
+      ]);
     });
 
     it.each([
@@ -140,8 +143,25 @@ describe('parseCreateMission', () => {
       'data:text/plain,hi',
     ])('rejects the scheme in %s', (url) => {
       expect(issues(() => link(url))).toEqual([
-        ['links[0].url', 'must use http or https'],
+        ['links[0].url', 'must use https'],
       ]);
+    });
+
+    it.each([
+      'https://localhost/x',
+      'https://127.0.0.1/x',
+      'https://[::1]/x',
+      'https://10.0.0.5/x',
+      'https://192.168.1.1/x',
+      'https://169.254.169.254/latest/meta-data',
+      'https://2130706433/x',
+      'https://intranet.internal/x',
+      'https://tracker/x',
+      'https://example.com:8443/x',
+    ])('rejects the non-public host in %s', (url) => {
+      const found = issues(() => link(url));
+      expect(found).toHaveLength(1);
+      expect(found[0]?.[0]).toBe('links[0].url');
     });
 
     it('rejects credentials in the URL', () => {
@@ -167,6 +187,26 @@ describe('parseCreateMission', () => {
 });
 
 describe('parseUpdateMission', () => {
+  it('applies the public https check to links', () => {
+    expect(
+      issues(() =>
+        parseUpdateMission({
+          expectedVersion: 1,
+          links: [
+            {
+              url: 'http://github.com/o/r/issues/1',
+              classification: 'required',
+            },
+            { url: 'https://127.0.0.1/x', classification: 'optional' },
+          ],
+        }),
+      ),
+    ).toEqual([
+      ['links[0].url', 'must use https'],
+      ['links[1].url', 'must name a DNS host, not an IP address'],
+    ]);
+  });
+
   it('requires an expected version and at least one change', () => {
     expect(issues(() => parseUpdateMission({ title: 'x' }))).toEqual([
       ['expectedVersion', 'is required'],

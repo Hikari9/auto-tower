@@ -6,7 +6,7 @@ How Tower links missions to external issues, reads them back, closes them under 
 
 - A link is a stored URL with a class: `required`, `optional` or `reference-only`. The class lives on the mission. Links work with no provider configured, and a link grants no write access.
 - Tower's copy of an issue is a snapshot read from the provider. Issue titles and bodies are untrusted data. Tower never treats them as instructions.
-- A mission completes only when every `required` link is verified closed by a provider read-back, or a person approved an exemption.
+- A mission completes only when every `required` link is verified closed by a provider read-back, or a person approved an exemption. A link counts from the moment it is required. Removing it from the mission, or downgrading it to `optional` or `reference-only`, does not stop it counting: it keeps holding the mission open until a read-back shows it closed or a person approves an exemption. Verify and poll still read such a link, and `GET .../issue-links` still lists it (`classification: null` when removed, `countsAsRequired: true`). Tower never closes a link that is no longer `required`.
 - Tower writes to a provider only when the repository's sync scope allows writes **and** a Tower `authorize` returns `allow` for that exact issue.
 - Optional and reference-only links are never closed. Cancelling a mission closes nothing.
 - A failed or doubtful close leaves the mission `reconciling` or `needs-attention` with a discrepancy record. A required issue that reopens or drifts after completion does the same, and the completion event stays in the history.
@@ -29,13 +29,13 @@ The scopes follow from the mode. A request may name them (`readScope`, `writeSco
 
 Tower never fetches a stored URL. A provider builds its API URLs from a parsed owner, repository and number against its own fixed API host, and never follows a redirect (a redirect means the issue moved, and is reported as `transferred`). A DNS name that later resolves to a private address therefore cannot be reached through a link.
 
-The mission routes accept links too (`POST /missions`, `PATCH /missions/:id`) with the core's looser check: http and any host. Such a link is stored and shown, and the issue layer will not fetch it, because no provider owns a URL that is not a public GitHub issue.
+The mission routes accept links too (`POST /missions`, `PATCH /missions/:id`) with the same check, so an http, loopback, private, link-local or metadata URL is refused with `400` there as well. A public https URL that is not a GitHub issue is stored and shown, and the issue layer will not fetch it, because no provider owns it.
 
 Each linked URL gets one tracking row (`issue_links`) the first time anything lists, verifies, closes or adds it. A webhook or poll for a link with no row has nothing to compare against and is ignored. It holds the last observed state, where that came from (`readback`, `poll`, `webhook` or `close`), the provider's identity for the issue (`node_id`, captured by the first read-back), `verified_closed_at`, and any exemption. Only a provider read-back sets `verified_closed_at`. A webhook never does.
 
 ## The completion guard
 
-`required-issues-closed` is registered on the core's guard registry by `createIssueService`. `createApp` builds the service before it handles any request, so no route can complete a mission ahead of it. A host that builds its own core and calls `core.missions` directly must build the service over the same core. The check is synchronous and reads what the last read-back stored. For each required link:
+`required-issues-closed` is registered on the core's guard registry by `createIssueService`. `createApp` builds the service before it handles any request, so no route can complete a mission ahead of it. A host that builds its own core and calls `core.missions` directly must build the service over the same core. The check is synchronous and reads what the last read-back stored. The set of links it answers for is every URL the mission has carried as `required`, read from the mission's event stream. For each of them:
 
 - an approved exemption passes it;
 - otherwise it needs `verified_closed_at`, the last observed state `closed`, a captured identity, no unresolved discrepancy that needs attention, and a read-back no older than 15 minutes.
@@ -57,7 +57,7 @@ A rate limit (`429`, or a `403` with `retry-after`, an exhausted limit or the se
 
 Every outcome comes back in `results[]` with HTTP `200`, so one refused link does not hide the others. `satisfied` says whether every required link is now verified closed or exempt with nothing open that needs attention.
 
-`POST /missions/:id/issue-links/verify` (`mission:write`) reads every required link back without writing to the provider. `POST /issues/poll` (`provider:sync`, held by provider adapters and humans) does the same across the workspace's live missions and is the fallback for missed webhooks.
+`POST /missions/:id/issue-links/verify` (`mission:write`) reads every required link back without writing to the provider. `POST /issues/poll` (`provider:sync`, held by provider adapters and humans) does the same across the workspace's live missions and is the fallback for missed webhooks. It visits the least recently polled links first, and stamps every link it tries, so a workspace with more tracked links than the `limit` reaches all of them over successive polls.
 
 ## Discrepancies
 
@@ -105,7 +105,7 @@ The provider's title is cleaned (control and bidirectional characters become spa
 `createGitHubProvider({ token, fetch?, apiBase?, timeoutMs? })` implements `tower.issues.v1`.
 
 - `token` is a function called per request. Tower stores no credential and never logs one.
-- Reads use `GET /repos/{owner}/{repo}/issues/{n}`, and `.../dependencies/blocked_by` for blockers. A `404` on the blockers path counts as none. Any other failure there fails the read.
+- Reads use `GET /repos/{owner}/{repo}/issues/{n}`, and `.../dependencies/blocked_by` for blockers. A `404` or `403` on the blockers path means the blockers are unknown (`openBlockers: null`), which is not the same as none: an authorized close stops with a `blocked` discrepancy until the blockers can be read. Any other failure there fails the read.
 - Close uses `PATCH` with `state: closed` and reason `completed`, then a best-effort comment carrying the origin marker.
 - It checks the response is the issue asked for (same number, repository and a stable `node_id`) and is not a pull request.
 - Redirects are never followed. `401` is `permission`. `403` with `retry-after`, an exhausted limit or the secondary-limit message, and `429`, are `rate_limited` with the wait capped at 24 hours. Other `403` is `permission`. `5xx`, network failure and timeout are `unavailable`.

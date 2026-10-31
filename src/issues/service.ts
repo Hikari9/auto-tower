@@ -51,6 +51,7 @@ import {
   loadConfigs,
   loadDiscrepancies,
   loadDiscrepancy,
+  loadEverRequiredUrls,
   loadHistory,
   loadLink,
   loadLinkByUrl,
@@ -113,7 +114,10 @@ export interface IssueServiceDeps {
 export interface LinkView {
   id: string;
   url: string;
-  classification: LinkClassification;
+  /** Null for a link an update removed from the mission after it counted as required. */
+  classification: LinkClassification | null;
+  /** True while the link still holds the mission open: tracked as required, not yet closed or exempt. */
+  countsAsRequired: boolean;
   provider: string | null;
   state: IssueLinkRecord['observedState'];
   observedSource: IssueLinkRecord['observedSource'];
@@ -248,7 +252,7 @@ export interface IssueService {
     note: string,
   ): MissionReport;
 
-  /** Reads every required link back from its provider. Writes nothing to a provider. */
+  /** Reads every link that holds the mission open back from its provider. Writes nothing to a provider. */
   verifyMission(ctx: CommandContext, missionId: string): Promise<MissionReport>;
   /** Closes required links the caller is authorized to close, then reads each back. */
   closeRequired(
@@ -256,7 +260,7 @@ export interface IssueService {
     missionId: string,
     urls?: readonly string[],
   ): Promise<MissionReport>;
-  /** Fallback for missed webhooks: reads required links of live missions and reconciles. */
+  /** Fallback for missed webhooks: reads links that hold live missions open, least recently polled first, and reconciles. */
   poll(
     ctx: Pick<CommandContext, 'workspaceId' | 'actor'>,
     options?: { limit?: number },
@@ -419,20 +423,40 @@ export function createIssueService(deps: IssueServiceDeps): IssueService {
     return created;
   }
 
+  /**
+   * URLs that hold the mission open: required now, or required at any earlier point. A removed or
+   * downgraded link stays in this set until a read-back closes it or a person exempts it.
+   */
+  function countingUrls(state: MissionState): Set<string> {
+    return new Set([
+      ...state.links
+        .filter((l) => l.classification === 'required')
+        .map((l) => l.url),
+      ...loadEverRequiredUrls(db, state.workspaceId, state.id),
+    ]);
+  }
+
+  /** Rows for the mission's links and for every counting link an update removed from it. */
   function trackAll(state: MissionState): IssueLinkRecord[] {
+    const urls = new Set([
+      ...state.links.map((l) => l.url),
+      ...countingUrls(state),
+    ]);
     return db.transaction((tx) =>
-      state.links.map((link) => track(tx, state, link.url)),
+      [...urls].map((url) => track(tx, state, url)),
     );
   }
 
   function view(
-    link: IssueLinkRef,
+    link: IssueLinkRef | undefined,
     row: IssueLinkRecord | undefined,
+    counts: boolean,
   ): LinkView {
     return {
       id: row?.id ?? '',
-      url: link.url,
-      classification: link.classification,
+      url: link?.url ?? row?.url ?? '',
+      classification: link?.classification ?? null,
+      countsAsRequired: counts && row?.exemption.status !== 'approved',
       provider: row?.provider ?? null,
       state: row?.observedState ?? 'unknown',
       observedSource: row?.observedSource ?? null,
@@ -450,20 +474,32 @@ export function createIssueService(deps: IssueServiceDeps): IssueService {
         approvedAt: null,
       },
       untrusted: {
-        linkTitle: link.title,
+        linkTitle: link?.title ?? null,
         observedTitle: row?.observedTitle ?? null,
       },
     };
   }
 
+  function viewRow(
+    state: MissionState,
+    row: IssueLinkRecord,
+    counting: Set<string> = countingUrls(state),
+  ): LinkView {
+    return view(
+      state.links.find((l) => l.url === row.url),
+      row,
+      counting.has(row.url),
+    );
+  }
+
   function viewOf(state: MissionState, linkId: string): LinkView {
-    const rows = loadLinks(db, state.workspaceId, state.id);
-    const row = rows.find((r) => r.id === linkId);
-    const link = state.links.find((l) => l.url === row?.url);
-    if (row === undefined || link === undefined) {
+    const row = loadLinks(db, state.workspaceId, state.id).find(
+      (r) => r.id === linkId,
+    );
+    if (row === undefined) {
       throw new IssueLinkNotFoundError(linkId);
     }
-    return view(link, row);
+    return viewRow(state, row);
   }
 
   function history(
@@ -530,11 +566,8 @@ export function createIssueService(deps: IssueServiceDeps): IssueService {
     seen: Seen,
   ): Applied {
     const at = nowIso();
-    const classification = state.links.find(
-      (l) => l.url === link.url,
-    )?.classification;
     const matters =
-      classification === 'required' && link.exemption.status !== 'approved';
+      countingUrls(state).has(link.url) && link.exemption.status !== 'approved';
     const done: Applied = {
       discrepancy: null,
       identityLost: false,
@@ -788,15 +821,13 @@ export function createIssueService(deps: IssueServiceDeps): IssueService {
     );
     return (
       countOpenAttention(db, state.workspaceId, state.id) === 0 &&
-      state.links
-        .filter((l) => l.classification === 'required')
-        .every((l) => {
-          const row = rows.get(l.url);
-          return (
-            row?.exemption.status === 'approved' ||
-            (row?.verifiedClosedAt != null && row.observedState === 'closed')
-          );
-        })
+      [...countingUrls(state)].every((url) => {
+        const row = rows.get(url);
+        return (
+          row?.exemption.status === 'approved' ||
+          (row?.verifiedClosedAt != null && row.observedState === 'closed')
+        );
+      })
     );
   }
 
@@ -810,7 +841,8 @@ export function createIssueService(deps: IssueServiceDeps): IssueService {
   ): Promise<{
     outcome: LinkOutcome;
     applied?: Applied;
-    snapshotOpenBlockers?: number;
+    /** Null: not read, or the provider would not say. Unknown is not zero. */
+    snapshotOpenBlockers?: number | null;
   }> {
     const base = { url: link.url, linkId: link.id };
     if (link.exemption.status === 'approved' && source === 'poll') {
@@ -923,7 +955,14 @@ export function createIssueService(deps: IssueServiceDeps): IssueService {
     };
   }
 
-  function requiredLinks(
+  /** Every link that holds the mission open, including ones an update removed or downgraded. */
+  function countingLinks(state: MissionState): IssueLinkRecord[] {
+    const counting = countingUrls(state);
+    return trackAll(state).filter((r) => counting.has(r.url));
+  }
+
+  /** Links Tower may close: required on the mission now. A downgraded link is read, never closed. */
+  function closableLinks(
     state: MissionState,
     urls?: readonly string[],
   ): IssueLinkRecord[] {
@@ -1061,19 +1100,27 @@ export function createIssueService(deps: IssueServiceDeps): IssueService {
         resolved: 0,
       };
     }
-    if ((read.snapshotOpenBlockers ?? 0) > 0) {
+    const blockers = read.snapshotOpenBlockers ?? null;
+    if (blockers === null || blockers > 0) {
       db.transaction((tx) =>
         addDiscrepancy(
           tx,
           env,
           link,
           'blocked',
-          `${read.snapshotOpenBlockers} open issue(s) block this one`,
+          blockers === null
+            ? 'Open blockers could not be read, so they are unknown and not counted as none'
+            : `${blockers} open issue(s) block this one`,
           true,
         ),
       );
       return {
-        outcome: { ...base, status: 'blocked', discrepancy: 'blocked' },
+        outcome: {
+          ...base,
+          status: 'blocked',
+          discrepancy: 'blocked',
+          ...(blockers === null ? { detail: 'blockers_unknown' } : {}),
+        },
         attention: true,
         resolved: 0,
       };
@@ -1322,17 +1369,16 @@ export function createIssueService(deps: IssueServiceDeps): IssueService {
         );
         return tracked;
       });
-      const link = result.mission.links.find((l) => l.url === url);
-      if (link === undefined) {
+      if (!result.mission.links.some((l) => l.url === url)) {
         throw new Error('Link was not stored');
       }
-      return { result, link: view(link, row) };
+      return { result, link: viewRow(result.mission, row) };
     },
 
     listLinks(workspaceId, missionId) {
       const state = mission(workspaceId, missionId);
-      const rows = new Map(trackAll(state).map((r) => [r.url, r]));
-      return state.links.map((l) => view(l, rows.get(l.url)));
+      const counting = countingUrls(state);
+      return trackAll(state).map((row) => viewRow(state, row, counting));
     },
 
     history: (workspaceId, missionId, page) => {
@@ -1417,7 +1463,7 @@ export function createIssueService(deps: IssueServiceDeps): IssueService {
       const results: LinkOutcome[] = [];
       let attention = false;
       let resolved = 0;
-      for (const link of requiredLinks(state)) {
+      for (const link of countingLinks(state)) {
         const read = await readOne(ctx.actor, state, link, 'readback');
         results.push(read.outcome);
         attention ||= read.applied?.attention === true;
@@ -1446,7 +1492,7 @@ export function createIssueService(deps: IssueServiceDeps): IssueService {
       const results: LinkOutcome[] = [];
       let attention = false;
       let resolved = 0;
-      for (const link of requiredLinks(state, urls)) {
+      for (const link of closableLinks(state, urls)) {
         // Each link sees the mission as it is now, since an earlier one may have moved it.
         const outcome = await closeOne(
           ctx,
@@ -1482,22 +1528,37 @@ export function createIssueService(deps: IssueServiceDeps): IssueService {
       let checked = 0;
       let skipped = 0;
       let discrepancies = 0;
+      const missionStates = new Map<
+        string,
+        { state: MissionState; counting: Set<string> } | undefined
+      >();
+      // Least recently polled first, so that more than `limit` links are all reached over time.
       for (const link of loadAllTrackedLinks(db, ctx.workspaceId)) {
         if (checked >= limit) {
           break;
         }
-        const state = core.missions.getMission(ctx.workspaceId, link.missionId);
-        const classification = state?.links.find(
-          (l) => l.url === link.url,
-        )?.classification;
+        if (!missionStates.has(link.missionId)) {
+          const found = core.missions.getMission(
+            ctx.workspaceId,
+            link.missionId,
+          );
+          missionStates.set(
+            link.missionId,
+            found === undefined
+              ? undefined
+              : { state: found, counting: countingUrls(found) },
+          );
+        }
+        const known = missionStates.get(link.missionId);
         if (
-          state === undefined ||
-          state.state === 'cancelled' ||
-          classification !== 'required'
+          known === undefined ||
+          known.state.state === 'cancelled' ||
+          !known.counting.has(link.url)
         ) {
           skipped += 1;
           continue;
         }
+        const { state } = known;
         const read = await readOne(ctx.actor, state, link, 'poll');
         if (
           read.outcome.status === 'backoff' ||
@@ -1506,6 +1567,16 @@ export function createIssueService(deps: IssueServiceDeps): IssueService {
           skipped += 1;
           continue;
         }
+        // Stamped whatever the answer was: a link that keeps failing must not hold the front of the queue.
+        db.transaction((tx) =>
+          updateLink(
+            tx,
+            state.workspaceId,
+            link.id,
+            { polledAt: nowIso() },
+            nowIso(),
+          ),
+        );
         checked += 1;
         byMission.set(state.id, [
           ...(byMission.get(state.id) ?? []),
@@ -1612,10 +1683,7 @@ export function createIssueService(deps: IssueServiceDeps): IssueService {
       const state = mission(ctx.workspaceId, missionId);
       requireLive(state, 'An exemption');
       const link = linkIn(state, linkId);
-      if (
-        state.links.find((l) => l.url === link.url)?.classification !==
-        'required'
-      ) {
+      if (!countingUrls(state).has(link.url)) {
         throw new IssueStateError(
           'link_not_required',
           'Only a required link needs an exemption',

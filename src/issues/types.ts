@@ -33,6 +33,8 @@ export interface IssueLinkRecord {
   observedAt: string | null;
   /** Untrusted text from the provider. */
   observedTitle: string | null;
+  /** Last time a poll tried this link. Null until the first poll. */
+  polledAt: string | null;
   verifiedClosedAt: string | null;
   closedByTowerAt: string | null;
   retryNotBefore: string | null;

@@ -22,8 +22,11 @@ export interface IssueSnapshot {
   state: 'open' | 'closed';
   /** Untrusted text. Stored and shown as data. */
   title: string;
-  /** Open issues that block this one. Counted only when the caller asked for blockers. */
-  openBlockers: number;
+  /**
+   * Open issues that block this one. Null when the caller did not ask, or when the provider would
+   * not say (the blockers endpoint answered 404 or 403). Unknown is never the same as zero.
+   */
+  openBlockers: number | null;
 }
 
 export const PROVIDER_FAILURES = [

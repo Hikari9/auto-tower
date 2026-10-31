@@ -28,7 +28,8 @@ interface FakeIssue {
   nodeId: string;
   state: 'open' | 'closed';
   title: string;
-  blockers: number;
+  /** Null models a provider that would not say (the blockers endpoint answered 404 or 403). */
+  blockers: number | null;
 }
 
 /** A provider the test controls. It never touches the network. */
@@ -103,7 +104,7 @@ export class FakeProvider implements IssueProvider {
         number: ref.number,
         state: issue.state,
         title: issue.title,
-        openBlockers: options?.includeBlockers === true ? issue.blockers : 0,
+        openBlockers: options?.includeBlockers === true ? issue.blockers : null,
       },
     };
   }

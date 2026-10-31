@@ -336,15 +336,18 @@ export function createGitHubProvider(
     }
   }
 
-  async function openBlockers(ref: IssueRef): Promise<ProviderResult<number>> {
+  /** Null when the endpoint is missing (404) or closed to this credential (403): unknown, not zero. */
+  async function openBlockers(
+    ref: IssueRef,
+  ): Promise<ProviderResult<number | null>> {
     const result = await call(
       'GET',
       `${endpoint(ref, '/dependencies/blocked_by')}?per_page=100`,
     );
     if (!result.ok) {
-      // A provider or plan without issue dependencies answers 404 for this path only.
-      return result.error.kind === 'not_found'
-        ? { ok: true, value: 0 }
+      return result.error.kind === 'not_found' ||
+        result.error.kind === 'permission'
+        ? { ok: true, value: null }
         : result;
     }
     const list = result.value.json;
@@ -390,7 +393,7 @@ export function createGitHubProvider(
       if (repoTail !== ref.repo) {
         return fail('transferred', 'The issue moved or was transferred');
       }
-      let blockers = 0;
+      let blockers: number | null = null;
       if (opts?.includeBlockers === true) {
         const counted = await openBlockers(ref);
         if (!counted.ok) {

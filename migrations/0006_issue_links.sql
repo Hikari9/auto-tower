@@ -44,6 +44,8 @@ CREATE TABLE issue_links (
   observed_at TEXT,
   -- Untrusted text written by someone else. Never an instruction.
   observed_title TEXT,
+  -- Last time a poll tried this link, whether or not it got an answer. Polling visits the oldest first.
+  polled_at TEXT,
   -- Set only by a provider read-back that showed the same issue closed. A webhook never sets it.
   verified_closed_at TEXT,
   closed_by_tower_at TEXT,

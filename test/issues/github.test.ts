@@ -104,7 +104,7 @@ describe('createGitHubProvider', () => {
         number: 5,
         state: 'open',
         title: 'A title',
-        openBlockers: 0,
+        openBlockers: null,
       },
     });
     expect(f.calls).toHaveLength(1);
@@ -115,7 +115,7 @@ describe('createGitHubProvider', () => {
     expect(f.calls[0]?.headers.authorization).toBe('Bearer ghs_secret_token');
   });
 
-  it('counts open blockers and treats a missing dependencies endpoint as none', async () => {
+  it('counts open blockers and reports a missing or forbidden dependencies endpoint as unknown', async () => {
     const withBlockers = provider([
       { status: 200, body: issueBody() },
       {
@@ -134,7 +134,23 @@ describe('createGitHubProvider', () => {
       { status: 404 },
     ]);
     const second = await unsupported.p.getIssue(REF, { includeBlockers: true });
-    expect(second.ok && second.value.openBlockers).toBe(0);
+    expect(second.ok).toBe(true);
+    expect(second.ok && second.value.openBlockers).toBeNull();
+
+    const forbidden = provider([
+      { status: 200, body: issueBody() },
+      { status: 403, body: { message: 'Resource not accessible' } },
+    ]);
+    const denied = await forbidden.p.getIssue(REF, { includeBlockers: true });
+    expect(denied.ok).toBe(true);
+    expect(denied.ok && denied.value.openBlockers).toBeNull();
+
+    const limited = provider([
+      { status: 200, body: issueBody() },
+      { status: 429, headers: { 'retry-after': '30' } },
+    ]);
+    const slowed = await limited.p.getIssue(REF, { includeBlockers: true });
+    expect(slowed.ok).toBe(false);
 
     const failing = provider([
       { status: 200, body: issueBody() },
