@@ -3,29 +3,29 @@
 Cost accounting for the Office arm of the 2026-10-31 comparison experiment (issue #1).
 Token totals include the orchestrator, every Office executor, reviewer and planner, and every subagent.
 
-| Field | Value |
-| --- | --- |
-| Arm | Office (Auto Office 3.13.0) |
-| Branch | `office/v1` |
-| Orchestrator | Claude Code, Opus 5.5 (high) |
+| Field             | Value                                  |
+| ----------------- | -------------------------------------- |
+| Arm               | Office (Auto Office 3.13.0)            |
+| Branch            | `office/v1`                            |
+| Orchestrator      | Claude Code, Opus 5.5 (high)           |
 | Claude session id | `62ce3cfa-81e7-4d86-8c85-ae451042030e` |
-| Start (UTC) | 2026-10-31T02:37:39Z |
-| End (UTC) | _pending_ |
+| Start (UTC)       | 2026-10-31T02:37:39Z                   |
+| End (UTC)         | _pending_                              |
 
 ## Office runs
 
-| Run id | Phases | Started (UTC) | Closed (UTC) | Outcome |
-| --- | --- | --- | --- | --- |
-| `89ad3c5d` | 0-5 (one run, one lane per phase) | 2026-10-31T02:58Z | | |
+| Run id     | Phases                            | Started (UTC)     | Closed (UTC) | Outcome |
+| ---------- | --------------------------------- | ----------------- | ------------ | ------- |
+| `89ad3c5d` | 0-5 (one run, one lane per phase) | 2026-10-31T02:58Z |              |         |
 
 ## Landed phases
 
-| Phase | Landed (UTC) | office/v1 merge | Office revisions | Gate |
-| --- | --- | --- | --- | --- |
-| 0+1 | 2026-10-31T05:32Z | `91c73ba` | T1 R1, T2 R2, T3 R4 (`0260a5f`) | RECHECK (CoS policy-ref bypass) then APPROVED; 846 tests green |
-| 3 | 2026-10-31T05:41Z | `04839b8` | T6 R7 (`da0d13a`) | RECHECK (required-link downgrade bypass, mission-link SSRF, poll starvation) then APPROVED; 1007 tests green |
-| 2 | 2026-10-31T08:04Z | `7be3f38` | T4 R11, T5 R14 (`e94f1d2`) | T4 APPROVED; T5 RECHECK (claim refusal not durable) then APPROVED; 1380 tests green |
-| 4 | 2026-10-31T08:46Z | `bd9521c` | T7 R15 (`a3e29a9`), T8 R18 (`f1554db`) | T7 APPROVED; T8 RECHECK (dashboard did not show authority holds) then APPROVED; 1639 tests green |
+| Phase | Landed (UTC)      | office/v1 merge | Office revisions                       | Gate                                                                                                         |
+| ----- | ----------------- | --------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| 0+1   | 2026-10-31T05:32Z | `91c73ba`       | T1 R1, T2 R2, T3 R4 (`0260a5f`)        | RECHECK (CoS policy-ref bypass) then APPROVED; 846 tests green                                               |
+| 3     | 2026-10-31T05:41Z | `04839b8`       | T6 R7 (`da0d13a`)                      | RECHECK (required-link downgrade bypass, mission-link SSRF, poll starvation) then APPROVED; 1007 tests green |
+| 2     | 2026-10-31T08:04Z | `7be3f38`       | T4 R11, T5 R14 (`e94f1d2`)             | T4 APPROVED; T5 RECHECK (claim refusal not durable) then APPROVED; 1380 tests green                          |
+| 4     | 2026-10-31T08:46Z | `bd9521c`       | T7 R15 (`a3e29a9`), T8 R18 (`f1554db`) | T7 APPROVED; T8 RECHECK (dashboard did not show authority holds) then APPROVED; 1639 tests green             |
 
 ## Notes
 
