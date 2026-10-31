@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,10 +21,18 @@ async function waitUntil(check: () => boolean, ms = 5_000): Promise<void> {
   }
 }
 
+/** A process that has exited but not been reaped is a zombie, and it is not running. */
 function alive(pid: number): boolean {
   try {
     process.kill(pid, 0);
-    return true;
+  } catch {
+    return false;
+  }
+  try {
+    const state = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], {
+      encoding: 'utf8',
+    }).trim();
+    return state !== '' && !state.startsWith('Z');
   } catch {
     return false;
   }
@@ -121,5 +130,22 @@ describe('a background child does not outlive a normal run', () => {
     const pid = Number(readFileSync(pidFile, 'utf8').trim());
     await waitUntil(() => !alive(pid));
     expect(alive(pid)).toBe(false);
+  });
+});
+
+describe('output is decoded across chunk boundaries', () => {
+  it('reassembles a multi-byte character that is written in two pieces', async () => {
+    const result = await execProcess({
+      argv: [
+        process.execPath,
+        '-e',
+        // An em dash is three bytes. Write the first byte, then the rest after a pause.
+        "const b=Buffer.from('\u2014'); process.stdout.write(b.subarray(0,1)); setTimeout(()=>process.stdout.write(b.subarray(1)),100)",
+      ],
+      cwd: process.cwd(),
+      timeoutMs: 10_000,
+      signal: new AbortController().signal,
+    });
+    expect(result.stdout).toBe('\u2014');
   });
 });
