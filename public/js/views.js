@@ -322,15 +322,16 @@ export function renderMission(ctx, params) {
   return page(
     'Mission',
     async () => {
-      const [{ mission }, links, activity, decisions] = await Promise.all([
-        ctx.api.get(`/missions/${id}`),
-        ctx.api.get(`/missions/${id}/issue-links`),
-        ctx.api.get(`/missions/${id}/activity`),
-        ctx.api.get('/decisions?status=open&limit=200'),
-      ]);
-      return { mission, links, activity, decisions };
+      const [{ mission, holds = [] }, links, activity, decisions] =
+        await Promise.all([
+          ctx.api.get(`/missions/${id}`),
+          ctx.api.get(`/missions/${id}/issue-links`),
+          ctx.api.get(`/missions/${id}/activity`),
+          ctx.api.get('/decisions?status=open&limit=200'),
+        ]);
+      return { mission, holds, links, activity, decisions };
     },
-    ({ mission, links, activity, decisions }) => {
+    ({ mission, holds, links, activity, decisions }) => {
       const packetsById = new Map(mission.packets.map((p) => [p.id, p]));
       const attemptsByPacket = new Map(
         mission.attempts.map((a) => [a.packetId, a]),
@@ -354,7 +355,13 @@ export function renderMission(ctx, params) {
           ' ',
           h('span', { class: 'meta' }, `Version ${mission.version}`),
         ),
-        blockedPanel(mission, packetsById, openForMission, discrepancies),
+        blockedPanel(
+          mission,
+          packetsById,
+          openForMission,
+          discrepancies,
+          holds,
+        ),
         section(
           'Outcome',
           h(
@@ -481,7 +488,14 @@ function fact(term, value) {
   return h('div', null, h('dt', null, term), h('dd', null, String(value)));
 }
 
-function blockedPanel(mission, packetsById, openDecisions, discrepancies) {
+/** One line per authority hold: the packet it refuses, why, and when it was last refused. */
+function blockedPanel(
+  mission,
+  packetsById,
+  openDecisions,
+  discrepancies,
+  holds,
+) {
   const reasons = [];
   if (mission.state === 'waiting-runner') {
     reasons.push(
@@ -504,6 +518,10 @@ function blockedPanel(mission, packetsById, openDecisions, discrepancies) {
   }
   for (const d of discrepancies.filter((x) => x.requiresAttention)) {
     reasons.push(`Issue discrepancy (${d.kind}): ${d.detail}`);
+  }
+  for (const hold of holds) {
+    const title = packetsById.get(hold.packetId)?.title ?? hold.packetId;
+    reasons.push(`${title} held (${when(hold.at)}): ${hold.reason}`);
   }
   if (reasons.length === 0) {
     return null;

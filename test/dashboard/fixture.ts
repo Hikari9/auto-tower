@@ -185,3 +185,115 @@ export async function createRule(
   const rule = (await json(res)).rule;
   return { id: rule.id as string, version: rule.version as number };
 }
+
+/** Enrolls and registers a runner, returning its id and its own bearer token (for runner-only routes). */
+export async function enrollRunnerWithToken(
+  tower: Tower,
+  name: string,
+): Promise<{ runnerId: string; token: string }> {
+  const enrolled = await tower.call('POST', '/runners/enrollments', {
+    name,
+    version: RUNNER_VERSION,
+    buildDigest: RUNNER_DIGEST,
+    allowedScopes: ['*'],
+  });
+  const enrollment = (await json(enrolled)).enrollment;
+  const registered = await tower.app.request('/runners/register', {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${enrollment.token}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      version: RUNNER_VERSION,
+      buildDigest: RUNNER_DIGEST,
+      capabilities: [],
+    }),
+  });
+  const body = await json(registered);
+  return { runnerId: body.runnerId as string, token: body.token as string };
+}
+
+/**
+ * A claim-time authority refusal, made through the HTTP API. A chief of staff authorizes a packet
+ * under a rule, the rule is revoked, and a runner claims the packet. The refusal is recorded as an
+ * authority hold on the mission, which GET /missions/:id returns.
+ */
+export async function seedAuthorityHold(
+  tower: Tower,
+): Promise<{ missionId: string; packetId: string }> {
+  const missionId = await createMission(tower);
+  let mission = (await json(await tower.call('GET', `/missions/${missionId}`)))
+    .mission;
+  const ready = await tower.call('POST', `/missions/${missionId}/transitions`, {
+    expectedVersion: mission.version,
+    to: 'ready',
+  });
+  if (ready.status !== 200) {
+    throw new Error(`transition to ready failed: ${ready.status}`);
+  }
+  const packetId = await addPacket(tower, missionId, 'Cited task');
+  const rule = (
+    await json(
+      await tower.call('POST', '/policy/rules', {
+        effect: 'allow',
+        action: 'repo.write',
+        resource: 'repo:app',
+        scope: 'repo:app',
+        maxRisk: 'low',
+        grantee: { kind: 'chief_of_staff' },
+        limits: {},
+        expiresAt: null,
+        note: null,
+      }),
+    )
+  ).rule;
+  const policy = await json(await tower.call('GET', '/policy'));
+  const cos = seedPrincipal(tower.db, { kind: 'chief_of_staff' });
+  mission = (await json(await tower.call('GET', `/missions/${missionId}`)))
+    .mission;
+  const authorized = await tower.app.request(
+    `/missions/${missionId}/work-packets/${packetId}/authorize`,
+    {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${cos.token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        expectedVersion: mission.version,
+        policyRefs: [`policy:v${policy.policyVersion}:rule:${rule.id}@1`],
+      }),
+    },
+  );
+  if (authorized.status !== 200) {
+    throw new Error(
+      `authorize failed: ${authorized.status} ${await authorized.text()}`,
+    );
+  }
+  const revoked = await tower.call('POST', `/policy/rules/${rule.id}/revoke`, {
+    expectedVersion: rule.version,
+    reason: 'withdrawn',
+  });
+  if (revoked.status !== 200) {
+    throw new Error(`revoke failed: ${revoked.status}`);
+  }
+  const runner = await enrollRunnerWithToken(tower, 'hold-runner');
+  const claim = await tower.app.request('/runners/claims', {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${runner.token}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      version: RUNNER_VERSION,
+      buildDigest: RUNNER_DIGEST,
+      capabilities: [],
+      active: [],
+    }),
+  });
+  if (claim.status !== 200) {
+    throw new Error(`claim failed: ${claim.status}`);
+  }
+  return { missionId, packetId };
+}

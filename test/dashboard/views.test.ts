@@ -11,6 +11,7 @@ import {
   createMission,
   createRule,
   enrollRunner,
+  seedAuthorityHold,
   seededTower,
   type Tower,
 } from './fixture.js';
@@ -2419,5 +2420,69 @@ describe('failure wording on proposals, caps, and paths', () => {
     for (const url of hostile) {
       expect(text(root)).toContain(url);
     }
+  });
+});
+
+// --- A28: authority holds never reach the dashboard ---------------------------
+
+describe('audit view and holds', () => {
+  it('does not show the detail of a claim refusal in the audit view', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: overrideGet(tower, '/runners/audit', () => ({
+        records: [
+          {
+            seq: 1,
+            at: '2026-10-31T08:00:00.000Z',
+            kind: 'claim.authority_denied',
+            runnerId: 'prn_1',
+            leaseId: null,
+            actorId: null,
+            detail: {
+              reason: 'SECRET denial reason',
+              attemptId: 'att_secret_2',
+            },
+          },
+        ],
+      })),
+    });
+
+    await dashboard.show('#/activity');
+
+    expect(text(root)).toContain('claim.authority_denied');
+    expect(text(root)).not.toContain('SECRET');
+    expect(text(root)).not.toContain('att_secret_2');
+  });
+});
+
+describe('authority holds on Mission Detail', () => {
+  it('shows a claim-time refusal as a line in the blocked panel, with its packet, reason and time', async () => {
+    const tower = seededTower();
+    const { missionId } = await seedAuthorityHold(tower);
+    const { root, dashboard } = mountFor(tower);
+
+    await dashboard.show(`#/missions/${missionId}`);
+
+    const panel = root.querySelector('section.blocked') as El;
+    expect(panel).not.toBeNull();
+    const lines = ([...panel.querySelectorAll('li')] as El[]).filter((li) =>
+      li.textContent?.includes('does not name a current rule'),
+    );
+    expect(lines).toHaveLength(1);
+    expect(lines[0].textContent).toContain('Cited task held (');
+    expect(lines[0].textContent).toMatch(/does not name a current rule$/);
+  });
+
+  it('shows the hold on a mission that is running, not only on one that is waiting', async () => {
+    const tower = seededTower();
+    const { missionId } = await seedAuthorityHold(tower);
+    const { root, dashboard } = mountFor(tower);
+
+    await dashboard.show(`#/missions/${missionId}`);
+
+    expect(root.querySelector('[data-state="running"]')).not.toBeNull();
+    expect(root.querySelector('section.blocked')?.textContent).toContain(
+      'does not name a current rule',
+    );
   });
 });
