@@ -24,10 +24,20 @@ function towerFor(env: Env): Tower {
   return new Tower({ db: new D1Driver(env.DB), providers: new IssueProviderRegistry([new GitHubProvider()], secret) });
 }
 
+// One Tower and API per isolate so the per-principal rate limiter keeps its buckets across requests.
+let cached: { env: Env; tower: Tower; api: (req: Request) => Promise<Response> } | null = null;
+function hostFor(env: Env) {
+  if (!cached || cached.env !== env) {
+    const tower = towerFor(env);
+    cached = { env, tower, api: createApi(tower) };
+  }
+  return cached;
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
-    const tower = towerFor(env);
+    const { tower, api } = hostFor(env);
     if (url.pathname === '/api/v1/setup' && req.method === 'POST') {
       try {
         const given = req.headers.get('x-setup-token') ?? '';
@@ -39,7 +49,7 @@ export default {
       }
     }
     if (url.pathname.startsWith('/api/') || url.pathname === '/mcp' || url.pathname.startsWith('/webhooks/') || url.pathname === '/healthz') {
-      return createApi(tower)(req);
+      return api(req);
     }
     return env.ASSETS ? env.ASSETS.fetch(req as never) as unknown as Response : new Response('not found', { status: 404 });
   },

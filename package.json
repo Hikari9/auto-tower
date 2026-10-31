@@ -5,7 +5,7 @@
   "description": "Durable mission control for AI chiefs of staff and distributed Auto-Office execution fleets.",
   "type": "module",
   "engines": {
-    "node": ">=22.13"
+    "node": ">=24"
   },
   "bin": {
     "tower": "./bin/tower.ts",

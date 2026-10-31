@@ -1,0 +1,29 @@
+# Cloudflare Workers configuration. NOT deployed by this repository.
+# Deploying needs an owner-approved Cloudflare account, a D1 database id and
+# secrets; see docs/OPERATIONS.md and DEFERRED.md (D1, D2).
+name = "auto-tower"
+main = "src/worker.ts"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/mcp", "/webhooks/*", "/healthz"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "auto-tower"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+# Scheduler sweep: leases, recovery, retries, reconciliation, provider polling.
+# Every 5 minutes keeps well inside free-tier request limits.
+[triggers]
+crons = ["*/5 * * * *"]
+
+# Secrets (set with `wrangler secret put`, never committed):
+#   TOWER_SETUP_TOKEN       one-time bootstrap; remove after setup
+#   GITHUB_TOKEN            only if the GitHub integration is enabled
+#   GITHUB_WEBHOOK_SECRET   only if GitHub webhooks are configured
