@@ -19,6 +19,9 @@ CREATE TABLE mcp_sessions (
 
 CREATE INDEX mcp_sessions_principal_idx ON mcp_sessions (workspace_id, principal_id, created_at);
 
+-- Keeps the per-principal session cap cheap however many closed rows there are.
+CREATE INDEX mcp_sessions_open_idx ON mcp_sessions (workspace_id, principal_id, last_seen_at) WHERE closed_at IS NULL;
+
 -- First result of each mutating tool call, so a retry with the same key returns it instead of
 -- acting twice. The same key with another tool or other arguments is refused. Scoped to the caller.
 CREATE TABLE mcp_idempotency (

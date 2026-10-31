@@ -292,6 +292,17 @@ describe('provider access tokens', () => {
       });
     link(human.principalId);
     expect(() => link(cos.principalId)).toThrow(/already linked/);
+    // The same link again changes nothing. A different scope set is refused, not ignored.
+    link(human.principalId);
+    expect(() =>
+      linkIdentity(env.db, {
+        issuer: ISSUER,
+        subject: 'erin',
+        principalId: human.principalId,
+        scopes: ['mission:read'],
+        linkedBy: human.principalId,
+      }),
+    ).toThrow(/already linked/);
     revokeIdentity(env.db, ISSUER, 'erin');
     link(cos.principalId);
     const row = env.db.get<{ principal_id: string; revoked_at: string | null }>(
@@ -299,6 +310,36 @@ describe('provider access tokens', () => {
       ['erin'],
     );
     expect(row).toEqual({ principal_id: cos.principalId, revoked_at: null });
+  });
+
+  it("never takes over another workspace's revoked link", () => {
+    const env = createMcpEnv();
+    const home = env.seed('human');
+    linkIdentity(env.db, {
+      issuer: ISSUER,
+      subject: 'frank',
+      principalId: home.principalId,
+      linkedBy: home.principalId,
+    });
+    revokeIdentity(env.db, ISSUER, 'frank');
+    const foreign = seedPrincipal(env.db, {
+      kind: 'human',
+      workspaceId: 'ws_other',
+    });
+    expect(() =>
+      linkIdentity(env.db, {
+        issuer: ISSUER,
+        subject: 'frank',
+        principalId: foreign.principalId,
+        linkedBy: foreign.principalId,
+      }),
+    ).toThrow(/already linked/);
+    const row = env.db.get<{ workspace_id: string; revoked_at: string | null }>(
+      'SELECT workspace_id, revoked_at FROM oauth_identities WHERE subject = ?',
+      ['frank'],
+    );
+    expect(row?.workspace_id).toBe('ws_test');
+    expect(row?.revoked_at).not.toBeNull();
   });
 
   it('lets only a human link an identity', () => {

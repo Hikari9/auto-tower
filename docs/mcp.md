@@ -134,4 +134,5 @@ linkIdentity(db, {
 - Tool arguments are validated by the same parsers as the HTTP API. The published `inputSchema` is a guide for clients, not the source of truth.
 - A principal holds at most 50 open sessions. Opening another closes the least recently used. Sessions are not otherwise expired by age.
 - Stored results answer a retry for 7 days, then are pruned. A retry that arrives while the first call is still running joins it instead of running the tool twice.
+- A tool must settle. A retry joins a call still running and waits as long as it does, so a hung provider call holds its key until it returns.
 - A result that cannot be stored does not fail a call that already took effect. The core's own idempotency key still deduplicates a retry for the tools that pass it.

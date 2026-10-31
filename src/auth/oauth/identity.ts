@@ -47,8 +47,9 @@ export function linkIdentity(db: SqlDatabase, input: LinkIdentityInput): void {
     throw new Error('An identity link needs at least one scope');
   }
   assertScopesAllowed(principal.kind, scopes);
-  // A revoked identity can be linked again, to the same principal or another. An active one
-  // cannot be silently re-pointed: revoke it first.
+  // A revoked identity can be linked again, to the same principal or another one in the same
+  // workspace. An active one cannot be silently changed, and another workspace's row is never
+  // taken over: revoke first.
   db.run(
     `INSERT INTO oauth_identities (workspace_id, issuer, subject, principal_id, scopes_json, linked_by, linked_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -56,7 +57,8 @@ export function linkIdentity(db: SqlDatabase, input: LinkIdentityInput): void {
        workspace_id = excluded.workspace_id, principal_id = excluded.principal_id,
        scopes_json = excluded.scopes_json, linked_by = excluded.linked_by,
        linked_at = excluded.linked_at, revoked_at = NULL
-     WHERE oauth_identities.revoked_at IS NOT NULL`,
+     WHERE oauth_identities.revoked_at IS NOT NULL
+       AND oauth_identities.workspace_id = excluded.workspace_id`,
     [
       principal.workspaceId,
       input.issuer,
@@ -67,13 +69,26 @@ export function linkIdentity(db: SqlDatabase, input: LinkIdentityInput): void {
       (input.now ?? new Date()).toISOString(),
     ],
   );
-  const stored = db.get<{ principal_id: string; revoked_at: string | null }>(
-    'SELECT principal_id, revoked_at FROM oauth_identities WHERE issuer = ? AND subject = ?',
+  const stored = db.get<{
+    workspace_id: string;
+    principal_id: string;
+    scopes_json: string;
+    revoked_at: string | null;
+  }>(
+    'SELECT workspace_id, principal_id, scopes_json, revoked_at FROM oauth_identities WHERE issuer = ? AND subject = ?',
     [input.issuer, input.subject],
   );
-  if (stored?.principal_id !== principal.id || stored.revoked_at !== null) {
+  // Linking exactly the same thing again is harmless. Anything that would change an active link,
+  // or touch another workspace's, is refused rather than ignored, so a narrowing is never lost.
+  const sorted = (list: readonly string[]) => JSON.stringify([...list].sort());
+  if (
+    stored?.workspace_id !== principal.workspaceId ||
+    stored.principal_id !== principal.id ||
+    stored.revoked_at !== null ||
+    sorted(storedScopes(stored.scopes_json)) !== sorted(scopes)
+  ) {
     throw new Error(
-      'That identity is already linked. Revoke it before linking it again',
+      'That identity is already linked, or cannot be. Revoke it before linking it again',
     );
   }
 }
