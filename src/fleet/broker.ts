@@ -1,5 +1,7 @@
 import type { RunnerPool } from '../core/scheduler.js';
-import type { WorkPacket } from '../core/types.js';
+import type { MissionState, WorkPacket } from '../core/types.js';
+import { refusalForPolicyRefs } from '../policy/packet-refs.js';
+import { createPolicyService } from '../policy/service.js';
 import type { SqlDatabase } from '../storage/database.js';
 import type { FleetConfig } from './config.js';
 import { redactString } from './redact.js';
@@ -35,6 +37,45 @@ export function ineligibleReason(
   const reason = reasonFor(...args);
   // The reason can echo an entry a packet author wrote, and it is sent to the runner.
   return reason === undefined ? undefined : redactString(reason).slice(0, 300);
+}
+
+/**
+ * Re-checks a chief of staff's cited policy at the point of a claim. A revoked, expired, deny-covered
+ * or replaced rule refuses only the packet it authorized, so other branches of the mission proceed.
+ * A human's authorization cites no rule and is not re-checked here.
+ */
+export function authorityReason(
+  db: SqlDatabase,
+  clock: () => Date,
+  workspaceId: string,
+  mission: Pick<MissionState, 'id' | 'risk'>,
+  packet: WorkPacket,
+): string | undefined {
+  const auth = packet.authorization;
+  if (auth === null) {
+    return undefined;
+  }
+  const cited = auth.policyRefs.filter((ref) => ref.startsWith('policy:'));
+  if (cited.length === 0) {
+    return undefined;
+  }
+  const actor = db.get<{ kind: string }>(
+    'SELECT kind FROM principals WHERE id = ? AND workspace_id = ?',
+    [auth.by, workspaceId],
+  );
+  // Only a confirmed human is exempt. Anything else, including a principal row that is missing, is
+  // re-checked, and an unknown principal is denied by the policy service.
+  if (actor?.kind === 'human') {
+    return undefined;
+  }
+  const refusal = refusalForPolicyRefs(
+    createPolicyService({ db, clock }),
+    { workspaceId, actor: { id: auth.by }, mission, packet },
+    cited,
+  );
+  return refusal === undefined
+    ? undefined
+    : `authority: ${redactString(refusal).slice(0, 280)}`;
 }
 
 function reasonFor(

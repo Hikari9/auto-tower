@@ -1,4 +1,6 @@
 import type { Context } from 'hono';
+import { ingestOfficeReceipt } from '../../adapters/office/ledger.js';
+import { parseOfficeReceipt } from '../../adapters/office/receipt.js';
 import type { Fleet, FleetErrorCode, RunnerCaller } from '../../fleet/index.js';
 import { FleetError } from '../../fleet/index.js';
 import {
@@ -320,17 +322,71 @@ const checkpoint: RouteSpec = {
   }),
 };
 
+/**
+ * Records the Office verdict for a receipt Tower has already accepted and stored. The runner's
+ * receipt is never rejected because of it: a body that is not an Office receipt is skipped, and a
+ * bad or conflicting one is logged with no content from the body.
+ */
+function ingestOfficeVerdict(
+  c: Context<AppEnv>,
+  caller: RunnerCaller,
+  leaseId: string,
+  receiptId: string,
+): void {
+  const { db, core, now } = c.get('deps');
+  if (core === undefined) {
+    return;
+  }
+  const detail = fleetOf(c).leaseDetail(caller.workspaceId, leaseId, {
+    principalId: caller.principalId,
+    kind: 'runner',
+  });
+  const stored = detail.receipts.find((r) => r.receiptId === receiptId);
+  const evidence = stored?.evidence as { contract?: unknown } | undefined;
+  if (
+    typeof evidence?.contract !== 'string' ||
+    !evidence.contract.startsWith('tower.office.')
+  ) {
+    return;
+  }
+  const mission = core.missions.getMission(
+    caller.workspaceId,
+    detail.lease.missionId,
+  );
+  if (mission === undefined) {
+    return;
+  }
+  try {
+    ingestOfficeReceipt(db, {
+      workspaceId: caller.workspaceId,
+      missionId: detail.lease.missionId,
+      packetId: detail.lease.packetId,
+      attemptId: detail.lease.attemptId,
+      producerIds: [caller.principalId],
+      risk: mission.risk,
+      receipt: parseOfficeReceipt(evidence),
+      recordedAt: (now ?? (() => new Date()))().toISOString(),
+    });
+  } catch (error) {
+    console.error(
+      `office receipt not recorded for lease ${leaseId}: ${error instanceof Error ? error.name : 'error'}`,
+    );
+  }
+}
+
 const receipt: RouteSpec = {
   method: 'post',
   path: '/runners/leases/:id/receipts',
   access: { scopes: ['runner:write'] },
   handler: fleetGuarded(async (c) => {
     const caller = runnerCaller(c);
+    const leaseId = c.req.param('id') ?? '';
     const result = fleetOf(c).receipt(
       caller,
-      c.req.param('id') ?? '',
+      leaseId,
       parseReceipt(await readJson(c)),
     );
+    ingestOfficeVerdict(c, caller, leaseId, result.receiptId);
     return c.json(result, result.replayed ? 200 : 201);
   }),
 };

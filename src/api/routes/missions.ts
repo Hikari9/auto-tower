@@ -1,4 +1,5 @@
 import type { Context } from 'hono';
+import { createOfficeReviewGuard } from '../../adapters/office/ledger.js';
 import {
   type CompletionGuardFailedError,
   CoreError,
@@ -6,6 +7,7 @@ import {
   MissionNotFoundError,
   ValidationError,
 } from '../../core/errors.js';
+import { createCompletionGuardRegistry } from '../../core/guards.js';
 import { type Core, createCore } from '../../core/index.js';
 import {
   parseActivity,
@@ -47,8 +49,11 @@ export function coreOf(c: Context<AppEnv>): Core {
   }
   let core = cores.get(deps);
   if (core === undefined) {
+    const guards = createCompletionGuardRegistry();
+    guards.register(createOfficeReviewGuard(deps.db));
     core = createCore({
       db: deps.db,
+      guards,
       ...(deps.now === undefined ? {} : { clock: deps.now }),
     });
     cores.set(deps, core);

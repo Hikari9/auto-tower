@@ -1,11 +1,13 @@
 import type { Context } from 'hono';
 import { Hono } from 'hono';
+import { createOfficeReviewGuard } from '../adapters/office/ledger.js';
 import {
   type AuthVariables,
   authenticate,
   requireScopes,
 } from '../auth/middleware.js';
 import type { Scope } from '../auth/principals.js';
+import { createCompletionGuardRegistry } from '../core/guards.js';
 import { type Core, createCore } from '../core/index.js';
 import type { Authority } from '../decisions/index.js';
 import {
@@ -61,6 +63,13 @@ export interface AppDependencies {
   fleetConfig?: FleetConfig;
 }
 
+/** The core's default completion guards, plus the Auto-Office high-risk review gate. */
+function officeGuards(db: SqlDatabase) {
+  const guards = createCompletionGuardRegistry();
+  guards.register(createOfficeReviewGuard(db));
+  return guards;
+}
+
 export function createApp(
   deps: AppDependencies,
   routes: readonly RouteSpec[] = ROUTES,
@@ -70,6 +79,7 @@ export function createApp(
     deps.core ??
     createCore({
       db: deps.db,
+      guards: officeGuards(deps.db),
       ...(deps.now === undefined ? {} : { clock: deps.now }),
       pool: createPool({
         db: deps.db,

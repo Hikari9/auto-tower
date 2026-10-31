@@ -9,7 +9,7 @@ import type {
 } from '../core/types.js';
 import type { SqlDatabase } from '../storage/database.js';
 import { backoffMs } from './backoff.js';
-import { ineligibleReason, pickRunner } from './broker.js';
+import { authorityReason, ineligibleReason, pickRunner } from './broker.js';
 import { type FleetContext, savepoint } from './context.js';
 import { FleetError } from './errors.js';
 import type {
@@ -761,14 +761,11 @@ function withholdReason(
   if (PAUSING_MISSION_STATES.includes(mission.state)) {
     return `mission is ${mission.state}`;
   }
-  return ineligibleReason(
-    tx,
-    ctx.config,
-    runner,
-    mission.id,
-    packet,
-    ctx.now(),
-    { requireLive: false, load: 'none' },
+  return (
+    ineligibleReason(tx, ctx.config, runner, mission.id, packet, ctx.now(), {
+      requireLive: false,
+      load: 'none',
+    }) ?? authorityReason(tx, ctx.now, runner.workspaceId, mission, packet)
   );
 }
 
@@ -842,6 +839,18 @@ function grant(
     );
     if (reason !== undefined) {
       hold(reason);
+      continue;
+    }
+    // A grant that was valid at dispatch is checked again here, at the point of effect.
+    const authority = authorityReason(
+      tx,
+      ctx.now,
+      workspaceId,
+      mission,
+      found.packet,
+    );
+    if (authority !== undefined) {
+      hold(authority);
       continue;
     }
     const waiting = tx.get<{ failures: number; not_before: string }>(
