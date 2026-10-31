@@ -29,6 +29,8 @@ The supported range is `FleetConfig.supportedVersions()`, read on every check. T
 4. If the runner has leases in recovery, the response lists them under `reconcile` and grants nothing: the runner **reconciles first**.
 5. Otherwise Tower grants a lease for each attempt dispatched to the runner, up to `maxConcurrent`, re-checking eligibility at that moment. Starting the attempt in the mission core happens in the same transaction as the lease insert.
 
+**Assignments are sent until confirmed.** A lease is unconfirmed until Tower sees matching evidence for it (evidence, progress or a checkpoint). Every claim re-sends the assignment of each unconfirmed lease the runner is still eligible for, so a response lost on the way, or a runner that restarted, does not strand the work. A runner confirms by listing the lease under `active` on its next poll. A reassigned lease reaches its new runner the same way. A paused runner, or one that lost eligibility, is told the assignment is `withheld` instead.
+
 The response carries `assignments`, `leases` (renewed), `unmatched`, `reconcile`, `withheld` (offers that were not granted, with a reason), and `retryAfterMs`.
 
 ### Broker
@@ -48,7 +50,7 @@ A packet's `scope` is a list of strings. The fleet reads:
 | `worktree:<name>` | Names the worktree. Defaults to `default` when `repo:` is set. |
 | anything else     | A scope the runner must be allowed.                            |
 
-The **execution scope key** is `repo:<r>#worktree:<w>`. A packet with no `repo:` entry shares nothing and is keyed by itself. A runner's `allowedScopes` match exactly, by trailing `*` prefix, or `*` for everything.
+The **execution scope key** is `repo:<r>#worktree:<w>`. The names are trimmed, lowercased and stripped of a trailing `/` or `.git`, so `Repo`, `repo/` and `repo.git` are one repository. A packet with no `repo:` entry shares nothing and is keyed by itself. A packet whose scope cannot be keyed is **never dispatched**: two `repo:` entries, two `worktree:` entries, a `worktree:` without a `repo:`, or a name that is not a plain name (`a-z 0-9 . _ / -`). It would otherwise lock only part of what it touches. The offer is withheld with `execution scope is ambiguous`, and a human fixes the packet. A runner's `allowedScopes` match exactly, by trailing `*` prefix, or `*` for everything.
 
 ### Exactly one live lease per scope
 
@@ -82,9 +84,9 @@ A lease lives `leaseTtlMs` (default 60 s) past its last **matching evidence**.
 2. A held lease past its expiry, or held by a quarantined runner, moves to **`recovering`**. The attempt is not failed: the core attempt stays `running`, the packet stays `running`.
 3. A lease that has been `recovering` for `reassignGraceMs` (default 120 s) may move to another runner, **only if a portable checkpoint was recorded**, and only by fencing the old lease: the old lease is closed as `fenced` and a new lease, on a higher fence, is created for the new runner. Without a checkpoint the work **waits**. If no other runner is eligible the retry is backed off with the same bounded policy.
 
-**Checkpoints.** `POST /runners/leases/:id/checkpoints` records a `ref` (a branch or tag name another runner can fetch, letters, digits and `. _ / -` only) and an optional full `commit`. It is the runner's own claim that the ref was pushed. Tower does not fetch it.
+**Checkpoints.** `POST /runners/leases/:id/checkpoints` records a `ref` and an optional full `commit`. The ref is a branch or tag name another runner can fetch: it starts with a letter or digit, uses only letters, digits and `. _ / -`, has no `..` or `//`, does not end in `/` or `.lock`, and must not look like a credential, so the runner that receives it cannot read it as a git option. It is the runner's own claim that the ref was pushed. Tower does not fetch it.
 
-**Reconcile.** `POST /runners/leases/:id/reconcile` is the original runner coming back. If the lease is still its own (no one took over) it becomes `held` again under a **new fence** and the old token dies. The response carries `resume` (Tower's stored progress sequence and latest checkpoint). A retry whose answer was lost, presenting the replaced fence, gets the same lease back. If the work moved, the old fence gets `lease_fenced`.
+**Reconcile.** `POST /runners/leases/:id/reconcile` is the original runner coming back. If the lease is still its own (no one took over) it becomes `held` again under a **new fence** and the old token dies. The response carries `resume` (Tower's stored progress sequence and latest checkpoint). A retry whose answer was lost, presenting the replaced fence, gets the same lease back, until the runner shows matching evidence under the new fence. After that the replaced fence is `lease_fenced`. The response also carries `assignment`, the packet and mission context, for a runner that lost its state. If the work moved, the old fence gets `lease_fenced`.
 
 **Reassigned work and the core.** The mission core allows a runner to report only an attempt dispatched to it, and offers no way to un-dispatch one. After a reassignment the new holder's receipt is therefore relayed to the core as Tower's fleet principal, with the summary prefixed `[runner <id>]`. See Limits.
 
@@ -92,12 +94,12 @@ A lease lives `leaseTtlMs` (default 60 s) past its last **matching evidence**.
 
 - **Cancel.** When a mission is cancelled the core cancels its attempts. The next fleet operation closes the lease as `cancelled`, frees the scope, and answers heartbeat evidence with `cancel: true`. Progress, checkpoints and receipts get `attempt_cancelled`.
 - **Pause.** A human pauses a runner with `PATCH /runners/:id {"paused": true}`: it gets no new work, and its leases carry `directives.pause`. A mission in `waiting-external` or `needs-attention` pauses its leases the same way and withholds its offers.
-- **Quarantine.** `POST /runners/:id/quarantine` (human). The runner cannot claim, heartbeat, write progress or reconcile (`runner_quarantined`, recorded). Its held leases move to recovery at once. Its work is **not** reassigned automatically, because its checkpoint is its own word. `POST /runners/:id/unquarantine` restores it.
-- **Release.** `POST /runners/leases/:id/release` (human) gives up on a stuck lease: the scope is freed and the attempt is reported failed, which puts the packet on the usual reject and requeue path.
+- **Quarantine.** `POST /runners/:id/quarantine` (human). The runner cannot claim, heartbeat, write progress or reconcile (`runner_quarantined`, recorded). Its held leases move to recovery at once. Its work is **not** reassigned automatically, because its checkpoint is its own word. `PATCH` cannot lift a quarantine. `POST /runners/:id/unquarantine` restores the status the runner had before (a pause survives) and restarts the grace period of its recovering leases, so the runner can reconcile before its work moves.
+- **Release.** `POST /runners/leases/:id/release` (human) gives up on a stuck lease: the scope is freed and the attempt is reported failed, which puts the packet on the usual reject and requeue path. `POST /runners/attempts/:id/release` does the same for an attempt that was dispatched but never claimed, which has no lease. It is the way out when that runner is quarantined, retired or no longer eligible.
 
 ## Secrets
 
-Progress, receipts, summaries, evidence objects, operator reasons and every audit detail are scanned and redacted **before** they are written (`src/fleet/redact.ts`). Token formats (GitHub, GitLab, Slack, Stripe, npm, Google, AWS key ids, provider `sk-` keys, JWTs, Tower tokens), PEM private keys, URL credentials, `Bearer` values and `name=value` assignments with a secret-like name are replaced by `[REDACTED]`. Any value under a secret-named key is replaced whatever it looks like. Checkpoint refs are limited to ref characters. The receipt summary that reaches the mission event log is the redacted one. Redaction is best effort: it cannot see a secret split across fields or encoded.
+Progress, receipts, summaries, evidence objects, operator reasons, the lease id in an audit row and every audit detail are scanned and redacted **before** they are written (`src/fleet/redact.ts`). Token formats (GitHub, GitLab, Slack, Stripe, npm, Google, AWS key ids, provider `sk-` keys, JWTs, Tower tokens), PEM and PGP private key blocks, URL credentials, webhook URLs, signed-URL parameters, `Bearer` values, `Authorization` header values and `name=value` assignments with a secret-like name (a quoted value is taken whole) are replaced by `[REDACTED]`. Any value under a secret-named key is replaced whatever it looks like. A receipt id or checkpoint ref that looks like a credential is refused, because both are stored as identifiers. The receipt summary that reaches the mission event log is the redacted one. Every pattern is bounded, so scanning is linear in the input, and a string over 100,000 characters is truncated first. Redaction is best effort: it cannot see a secret split across fields or encoded.
 
 ## Routes
 
@@ -117,6 +119,7 @@ Progress, receipts, summaries, evidence objects, operator reasons and every audi
 | `PATCH /runners/:id`                            | human                        | `allowedScopes`, `maxConcurrent`, `paused`.          |
 | `POST /runners/:id/quarantine`, `/unquarantine` | human                        | Stop or restore a runner.                            |
 | `POST /runners/leases/:id/release`              | human                        | Give up on a stuck lease.                            |
+| `POST /runners/attempts/:id/release`            | human                        | Give up on a dispatched attempt nobody claimed.      |
 
 Scopes alone cannot tell a human from a runner here, since both hold `runner:write`. Operator routes also require the `human` principal kind. Runner routes require the `runner` kind and the bound credential. Runner credentials hold only `runner:read` and `runner:write`, and the kind ceiling in `src/auth/principals.ts` keeps `policy:*`, `decision:*`, `admin:tokens` and `provider:sync` out of any token a runner can hold. They get 403 on every policy, decision and write route (`test/api/runners.test.ts` walks the route table).
 
@@ -138,12 +141,13 @@ Each entry names the control and where it is tested.
 
 **Residual risk, version and digest are self-reported.** The pinned version and build digest are what the runner **says** it is. The runner is a machine the owner controls, and Tower has no hardware attestation, signed build, or measured boot to check the claim against. The pin stops an honest mistake and an unenrolled client. It does not stop a compromised or modified runner from presenting the pinned values. The controls that limit that case are the narrow credential scopes, fencing, redaction, human verification of every packet, and quarantine.
 
-Other residual risks: a checkpoint ref is the runner's own claim that it pushed work. A quarantined runner's work is never moved automatically for that reason. Redaction is pattern-based. A `human` principal holds every scope and so can use any operator route.
+Other residual risks: a runner **declares its own capabilities** on every poll, and only `allowedScopes` is a ceiling a human sets, so a compromised runner can claim any `cap:`-only work inside its allowed scopes. A checkpoint ref is the runner's own claim that it pushed work. A quarantined runner's work is never moved automatically for that reason. Redaction is pattern-based. A `human` principal holds every scope and so can use any operator route.
 
 ## Limits
 
-- The mission core has no `attempt.cancelled` or re-dispatch event, and `attempt.dispatched` needs a `ready` packet. Tower cannot withdraw a dispatched attempt. An attempt dispatched to a runner that never polls again waits (visible as a `withheld` offer or a `recovering` lease) until the runner returns or a human releases it. After a reassignment the core still records the original runner as the attempt's runner, and the receipt is relayed by the fleet principal.
+- The mission core has no `attempt.cancelled` or re-dispatch event, and `attempt.dispatched` needs a `ready` packet. Tower cannot withdraw a dispatched attempt. An attempt dispatched to a runner that never polls again waits (visible as a `withheld` offer or a `recovering` lease) until the runner returns or a human releases the attempt or its lease. After a reassignment the core still records the original runner as the attempt's runner, and the receipt is relayed by the fleet principal.
 - The fleet principal (`prn_fleet_<workspace>`) is a disabled principal of kind `chief_of_staff`. No token can be issued to it. It is the actor on scheduler events and relayed reports, and the producer of a relayed report, so it never verifies.
 - Quota and scope changes do not revoke work already running. They stop new claims.
-- Leases, receipts and audit rows are never deleted. There is no retention job yet.
+- Leases, receipts, progress and audit rows are never deleted, and there is no per-runner rate limit or per-lease row cap. One credential can grow the tables, and every refused call writes an audit row. A retention job and rate limits belong with the quota work (T-14).
+- The lease claim, the audit-after-rollback second transaction and the core commands joined to the fleet transaction rely on `BEGIN IMMEDIATE` and `SAVEPOINT`. D1 supports neither, so the D1 adapter in `DEFERRED.md` has to replace them with a batch guarded by the expected state, and re-run the lease race test.
 - Tower does not run the scheduler on a timer. The poll runs it, as does `POST /work/schedule`.
