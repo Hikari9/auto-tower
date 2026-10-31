@@ -2,6 +2,7 @@ import type { RunnerPool } from '../core/scheduler.js';
 import type { WorkPacket } from '../core/types.js';
 import type { SqlDatabase } from '../storage/database.js';
 import type { FleetConfig } from './config.js';
+import { redactString } from './redact.js';
 import { requirementsOf, scopeAllowed } from './scope.js';
 import {
   listRunners,
@@ -29,6 +30,14 @@ export interface EligibilityOptions {
  * takes effect on the next dispatch and the next claim with no separate refresh step.
  */
 export function ineligibleReason(
+  ...args: Parameters<typeof reasonFor>
+): string | undefined {
+  const reason = reasonFor(...args);
+  // The reason can echo an entry a packet author wrote, and it is sent to the runner.
+  return reason === undefined ? undefined : redactString(reason).slice(0, 300);
+}
+
+function reasonFor(
   db: SqlDatabase,
   config: FleetConfig,
   runner: Runner,

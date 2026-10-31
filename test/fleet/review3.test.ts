@@ -472,3 +472,147 @@ describe('scope names, limits and exact reasons', () => {
     }
   });
 });
+
+describe('what a withheld runner is told', () => {
+  it('quotes the entry it refused, and redacts and caps it', async () => {
+    const { requirementsOf: req } = await import('../../src/fleet/scope.js');
+    expect(req('m', { id: 'p', scope: [' repo:foo'] }).invalid).toBe(
+      '" repo:foo" is not in canonical form, write repo:foo',
+    );
+    const token = `ghp_${'zz9yy8xx7ww6vv5uu4tt3'}${'ss2rr1'}`;
+    const h = createFleetHarness();
+    const runner = await h.runner({ allowedScopes: ['repo:*'] });
+    h.mission([{ scope: [`repo:${token}`] }]);
+    const held = (await runner.claim()).body.assignments[0];
+    await h.call(h.owner.token, 'PATCH', `/runners/${runner.id}`, {
+      allowedScopes: ['repo:other'],
+    });
+    h.clock.advance(TTL + 1_000);
+    await runner.claim();
+    const back = await runner.reconcile(held.leaseId, 1);
+    // The refusal names the scope it was about, with anything credential-shaped removed.
+    expect(back.body.withheld).toBe('scope repo:[REDACTED] is not allowed');
+    expect(JSON.stringify(back.body.withheld)).not.toContain(token);
+  });
+});
+
+describe('canonical form, in every order and on every path', () => {
+  const req = (scope: string[]) => requirementsOf('m', { id: 'p', scope });
+
+  it('keeps a refusal whatever order the entries come in', () => {
+    for (const scope of [
+      ['repo:Foo', 'repo:foo'],
+      ['repo:foo', 'repo:Foo'],
+      ['REPO:foo', 'repo:foo', 'worktree:x'],
+      ['worktree:X', 'repo:foo', 'worktree:x'],
+      ['repo:foo', 'worktree:x', 'worktree:X'],
+    ]) {
+      expect(req(scope).invalid, scope.join(',')).toBeDefined();
+      expect(req(scope).scopeKey, scope.join(',')).toMatch(/^packet:/);
+    }
+  });
+
+  it('says exactly which entry was refused and what to write', () => {
+    expect(req(['repo:foo.git']).invalid).toBe(
+      '"repo:foo.git" is not in canonical form, write repo:foo',
+    );
+    expect(req([' repo:foo ']).invalid).toBe(
+      '" repo:foo " is not in canonical form, write repo:foo',
+    );
+    expect(req(['REPO:foo']).invalid).toBe(
+      '"REPO:foo" is not in canonical form, write repo:foo',
+    );
+    // Two refused entries: the last one is reported.
+    expect(req(['repo:Foo', 'worktree:X']).invalid).toBe(
+      '"worktree:X" is not in canonical form, write worktree:x',
+    );
+  });
+
+  it('dispatches nothing from a packet that mixes a spelling policy never saw with the canonical one', async () => {
+    const h = createFleetHarness();
+    const runner = await h.runner();
+    const { id } = h.mission([{ scope: [' repo:foo', 'repo:foo'] }]);
+    h.tick();
+    expect((await runner.claim()).body.assignments).toEqual([]);
+    expect(h.getMission(id).attempts).toHaveLength(0);
+    const aliasFirst = h.mission([
+      { scope: [' repo:bar'] },
+      { scope: ['repo:bar'] },
+    ]);
+    h.tick();
+    const got = (await runner.claim()).body.assignments;
+    expect(got).toHaveLength(1);
+    expect(h.getMission(aliasFirst.id).attempts).toHaveLength(1);
+    expect(h.getMission(aliasFirst.id).attempts[0]?.packetId).toBe(
+      got[0].packetId,
+    );
+  });
+
+  it('states the reason from the broker itself, for dispatch and for a claim', async () => {
+    const { ineligibleReason } = await import('../../src/fleet/broker.js');
+    const h = createFleetHarness();
+    const runner = await h.runner();
+    await runner.claim();
+    const { getRunner } = await import('../../src/fleet/store.js');
+    const row = getRunner(h.db, TEST_WORKSPACE, runner.id);
+    if (row === undefined) {
+      throw new Error('runner missing');
+    }
+    for (const options of [
+      { requireLive: true, load: 'dispatched' as const },
+      { requireLive: false, load: 'none' as const },
+    ]) {
+      expect(
+        ineligibleReason(
+          h.db,
+          h.config,
+          row,
+          'm',
+          { id: 'p', scope: ['repo:Foo'] },
+          h.clock.now(),
+          options,
+        ),
+      ).toBe(
+        'execution scope is ambiguous: "repo:Foo" is not in canonical form, write repo:foo',
+      );
+    }
+  });
+
+  it('withholds work that was dispatched before the rule, on claim and on reconcile, with the reason', async () => {
+    const h = createFleetHarness();
+    const runner = await h.runner();
+    await runner.claim();
+    const { id } = h.mission([{ scope: ['repo:foo'] }]);
+    h.tick(); // dispatched, not yet claimed
+    h.db.run(
+      'UPDATE missions SET snapshot_json = replace(snapshot_json, \'"repo:foo"\', \'"repo:Foo"\')',
+    );
+    const offer = await runner.claim();
+    expect(offer.body.assignments).toEqual([]);
+    expect(offer.body.withheld[0].reason).toBe(
+      'execution scope is ambiguous: "repo:Foo" is not in canonical form, write repo:foo',
+    );
+    expect(h.db.all('SELECT id FROM runner_leases')).toEqual([]);
+
+    // The same for a lease that already exists and is reconciled.
+    h.db.run(
+      'UPDATE missions SET snapshot_json = replace(snapshot_json, \'"repo:Foo"\', \'"repo:foo"\')',
+    );
+    const held = (await runner.claim()).body.assignments[0];
+    expect(held.missionId).toBe(id);
+    h.clock.advance(TTL + 1_000);
+    await runner.claim();
+    h.db.run(
+      'UPDATE missions SET snapshot_json = replace(snapshot_json, \'"repo:foo"\', \'"repo:Foo"\')',
+    );
+    const back = await runner.reconcile(held.leaseId, 1);
+    expect(back.body.assignment).toBeNull();
+    expect(back.body.withheld).toBe(
+      'execution scope is ambiguous: "repo:Foo" is not in canonical form, write repo:foo',
+    );
+    expect(lease(h, held.leaseId)).toMatchObject({
+      status: 'recovering',
+      fence: 1,
+    });
+  });
+});

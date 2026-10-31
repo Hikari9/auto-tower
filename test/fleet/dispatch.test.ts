@@ -238,7 +238,9 @@ describe('when the mission core refuses a start', () => {
     const res = await other.claim();
     expect(res.body.assignments).toEqual([]);
     expect(res.body.withheld).toHaveLength(1);
-    expect(res.body.withheld[0].reason).toMatch(/^the mission core refused: /);
+    expect(res.body.withheld[0].reason).toBe(
+      'the mission core refused: forbidden_actor',
+    );
     expect(h.db.all('SELECT id FROM runner_leases')).toEqual([]);
     expect(auditKinds(h)).not.toContain('lease.granted');
     expect(h.getMission(id).attempts[0]?.status).toBe('leased');
