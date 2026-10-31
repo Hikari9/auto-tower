@@ -7,7 +7,7 @@ import type { PolicyRule } from '../policy/types.js';
 import type { SqlDatabase } from '../storage/database.js';
 import type { FleetConfig } from './config.js';
 import { redactString } from './redact.js';
-import { requirementsOf, scopeAllowed } from './scope.js';
+import { canonicalEntry, requirementsOf, scopeAllowed } from './scope.js';
 import {
   listRunners,
   liveLeaseCount,
@@ -144,13 +144,26 @@ function deniedClaim(
     .filter((rule) => denyApplies(rule, id, mission.id));
   for (const scope of scopes) {
     const rule = denies.find((candidate) =>
-      matchesPattern(candidate.scope, scope),
+      coversScope(candidate.scope, scope),
     );
     if (rule !== undefined) {
       return `denied by rule ${rule.id} for scope ${scope}`;
     }
   }
   return undefined;
+}
+
+/**
+ * Whether a deny rule's scope covers a packet scope. A literal or wildcard pattern matches by name.
+ * A `repo:` or `worktree:` rule also covers any spelling of the same entry, so `repo:Foo` covers
+ * `repo:foo`, as the fleet itself treats them as one scope.
+ */
+function coversScope(pattern: string, scope: string): boolean {
+  if (matchesPattern(pattern, scope)) {
+    return true;
+  }
+  const canonical = canonicalEntry(pattern);
+  return canonical !== undefined && canonical === canonicalEntry(scope);
 }
 
 /** Whether an active deny rule names this claim's principal, action and mission, not its resource. */

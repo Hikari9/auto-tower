@@ -841,3 +841,33 @@ describe('claim-time authority: a failed refusal write does not change the claim
     expect(denials(h)).toHaveLength(0);
   });
 });
+
+describe('claim-time authority: a deny rule in another spelling of the same repository', () => {
+  it.each([
+    ['capitalised', 'repo:Foo'],
+    ['git suffix', 'repo:foo.git'],
+    ['trailing slash', 'repo:foo/'],
+  ])(
+    'refuses a human packet on repo:foo under a deny rule spelled %s',
+    async (_label, ruleScope) => {
+      const { h, policy } = setup();
+      const repo = h.mission([{ title: 'repo', scope: ['repo:foo'] }]);
+      policy.createRule(
+        h.ctx(),
+        ruleInput({
+          effect: 'deny',
+          action: '*',
+          resource: '*',
+          scope: ruleScope,
+          grantee: { kind: null, principalId: null },
+        }),
+      );
+      const runner = await h.runner({ maxConcurrent: 10 });
+      const claim = (await runner.claim()) as Claim;
+      expect(packetsGranted(claim)).not.toContain(repo.packetIds[0]);
+      expect(reasons(claim)).toContainEqual(
+        expect.stringMatching(/^authority: denied by rule/),
+      );
+    },
+  );
+});
