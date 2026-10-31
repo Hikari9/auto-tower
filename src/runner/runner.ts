@@ -135,6 +135,7 @@ export class TowerRunner {
   private stopping = false;
   /** A fatal refusal that a running job hit. run() throws it. */
   private fatal: unknown;
+  private readonly fatalWake = new AbortController();
   /** Leases whose receipt or reconcile Tower refused for good. They are not retried in this process. */
   private readonly parked = new Set<string>();
 
@@ -295,7 +296,13 @@ export class TowerRunner {
       if (this.fatal !== undefined) {
         throw this.fatal;
       }
-      await sleep(Math.min(wait, MAX_TIMER_MS), signal);
+      // Each pass yields to the event loop, so a loop that spins cannot starve timers.
+      await new Promise((resolve) => setImmediate(resolve));
+      // A fatal refusal from a job wakes the sleep, so it is raised without waiting a full interval.
+      await sleep(
+        Math.min(wait, MAX_TIMER_MS),
+        AbortSignal.any([signal, this.fatalWake.signal]),
+      );
     }
   }
 
@@ -325,12 +332,13 @@ export class TowerRunner {
     try {
       await work();
     } catch (error) {
-      if (
-        isFatal(error) ||
-        error instanceof TransportError ||
-        isTransient(error)
-      ) {
+      if (isFatal(error) || error instanceof TransportError) {
         throw error;
+      }
+      if (isTransient(error)) {
+        // Overload or a server fault. The receipt is sent again on a later poll, and nothing is parked.
+        this.log(`lease ${leaseId} will retry: ${describeError(error)}`);
+        return;
       }
       this.parked.add(leaseId);
       this.log(`lease ${leaseId} parked: ${describeError(error)}`);
@@ -441,6 +449,7 @@ export class TowerRunner {
         .catch((error: unknown) => {
           if (isFatal(error)) {
             this.fatal = error;
+            this.fatalWake.abort();
             this.stop();
           }
           // The lease keeps its receipt, so the next poll sends it again.

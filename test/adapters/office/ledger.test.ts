@@ -350,3 +350,58 @@ describe('the gate counts only a packet’s latest attempt', () => {
     expect(failures.ok).toBe(false);
   });
 });
+
+describe('an unproven integrated pass is stored as unproven', () => {
+  it('writes the unproven value to the database, and the gate does not count it', () => {
+    const handle = db();
+    const result = ingest(
+      handle,
+      'pkt_1',
+      'att_1',
+      receipt('r9', {
+        integratedVerification: {
+          result: 'passed',
+          testsRun: 0,
+          commitSha: null,
+        },
+      }),
+    );
+    expect(result.ready).toBe(false);
+    const row = handle.get<{ integrated_verification: string }>(
+      'SELECT integrated_verification FROM office_receipts WHERE receipt_id = ?',
+      ['r9'],
+    );
+    expect(row?.integrated_verification).toBe('unproven');
+  });
+});
+
+describe('the latest-attempt rule, with its positive control', () => {
+  it('passes when the latest attempt has a ready receipt, and names the packet when it does not', () => {
+    const handle = db();
+    ingest(handle, 'pkt_1', 'att_1', receipt('r1'));
+    ingest(handle, 'pkt_1', 'att_2', receipt('r2'));
+    const withAttempts = (ids: Array<{ id: string; number: number }>) => ({
+      mission: {
+        id: 'mis_1',
+        workspaceId: TEST_WORKSPACE,
+        risk: 'high',
+        packets: [{ id: 'pkt_1', required: true }],
+        attempts: ids.map((a) => ({ ...a, packetId: 'pkt_1' })),
+      },
+    });
+    const guard = createOfficeReviewGuard(handle);
+    expect(
+      guard.check(
+        withAttempts([
+          { id: 'att_1', number: 1 },
+          { id: 'att_2', number: 2 },
+        ]),
+      ),
+    ).toEqual({ ok: true });
+    const stale = guard.check(withAttempts([{ id: 'att_3', number: 1 }]));
+    expect(stale.ok).toBe(false);
+    if (!stale.ok) {
+      expect(stale.reason).toMatch(/pkt_1/);
+    }
+  });
+});

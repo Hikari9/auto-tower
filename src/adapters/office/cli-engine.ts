@@ -146,7 +146,8 @@ export const execProcess: ProcessRunner = ({ argv, cwd, timeoutMs, signal }) =>
       }
     };
     const stop = (reason: string) => {
-      if (stopped !== undefined || settled) {
+      // A leader that already exited cleanly has finished its work. A late stop must not undo that.
+      if (stopped !== undefined || settled || exitCode !== null) {
         return;
       }
       stopped = reason;

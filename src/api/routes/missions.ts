@@ -270,23 +270,32 @@ function recordRiskRefusal(
   error: RiskLoweringRefusedError,
 ): void {
   const { db, now } = c.get('deps');
-  const policyVersion = createPolicyService({ db }).policyVersion(workspaceId);
-  db.run(
-    `INSERT INTO policy_receipts (workspace_id, principal_id, action, resource, scope, risk, mission_id,
+  try {
+    const policyVersion = createPolicyService({ db }).policyVersion(
+      workspaceId,
+    );
+    db.run(
+      `INSERT INTO policy_receipts (workspace_id, principal_id, action, resource, scope, risk, mission_id,
        effect, code, reason, rule_id, rule_version, policy_version, evaluated_at)
      VALUES (?, ?, 'mission.risk.lower', ?, 'risk', ?, ?, 'deny', ?, ?, NULL, NULL, ?, ?)`,
-    [
-      workspaceId,
-      actorId,
-      `mission:${missionId}`,
-      error.to,
-      missionId,
-      error.code,
-      error.message,
-      policyVersion,
-      (now ?? (() => new Date()))().toISOString(),
-    ],
-  );
+      [
+        workspaceId,
+        actorId,
+        `mission:${missionId}`,
+        error.from,
+        missionId,
+        error.code,
+        error.message,
+        policyVersion,
+        (now ?? (() => new Date()))().toISOString(),
+      ],
+    );
+  } catch (auditError) {
+    // The refusal still stands. Its receipt could not be written, which is logged without the body.
+    console.error(
+      `risk refusal receipt not recorded: ${auditError instanceof Error ? auditError.name : 'error'}`,
+    );
+  }
 }
 
 const updateMission: RouteSpec = {

@@ -1,13 +1,5 @@
-import { realpathSync } from 'node:fs';
-import {
-  basename,
-  dirname,
-  isAbsolute,
-  join,
-  relative,
-  resolve,
-  sep,
-} from 'node:path';
+import { statSync } from 'node:fs';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { OfficeCliEngine } from '../adapters/office/cli-engine.js';
 import { officeRunnerEngine } from '../adapters/office/engine.js';
 import { TowerRunner } from './runner.js';
@@ -64,30 +56,41 @@ function checkUrl(raw: string): void {
   throw new UsageError('--url must use https, except for a loopback address');
 }
 
-/**
- * A path with symlinks resolved. A file that does not exist yet is placed under its directory's real
- * location, so a link to the repository cannot hide the state file inside it.
- */
-function canonical(path: string): string {
-  const absolute = resolve(path);
+/** The device and inode of an existing path, which identify a directory whatever it is called. */
+function identityOf(path: string): { dev: number; ino: number } | undefined {
   try {
-    return realpathSync(absolute);
+    const info = statSync(path);
+    return { dev: info.dev, ino: info.ino };
   } catch {
-    try {
-      return join(realpathSync(dirname(absolute)), basename(absolute));
-    } catch {
-      return absolute;
-    }
+    return undefined;
   }
 }
 
-/** Whether `child` is `parent` or lies under it. A directory named `..cache` is not a parent step. */
+/**
+ * Whether `child` is `parent` or lies under it. Identity is compared rather than the path text, so a
+ * symlink, a different spelling of the same folder (case on macOS), or a directory that does not exist
+ * yet cannot hide the state file inside the repository. The state file's ancestors are checked
+ * upward until one of them is the repository.
+ */
 function isInside(child: string, parent: string): boolean {
-  const rel = relative(canonical(parent), canonical(child));
-  return (
-    rel === '' ||
-    (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
-  );
+  const target = identityOf(resolve(parent));
+  if (target === undefined) {
+    // No repository to compare with yet. Fall back to the path text, which only ever refuses more.
+    const rel = relative(resolve(parent), resolve(child));
+    return (
+      rel === '' ||
+      (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+    );
+  }
+  for (let current = resolve(child); ; current = dirname(current)) {
+    const id = identityOf(current);
+    if (id !== undefined && id.dev === target.dev && id.ino === target.ino) {
+      return true;
+    }
+    if (dirname(current) === current) {
+      return false;
+    }
+  }
 }
 
 /** Reads the arguments. Unknown flags and missing required values are refused, not ignored. */

@@ -258,5 +258,55 @@ describe('the high-risk gate in production wiring', () => {
       [TEST_WORKSPACE],
     );
     expect(rows.map((r) => r.independent_review)).toEqual(['self-reviewed']);
+    // With the only review self-supplied, the mission must not complete.
+    let version = (await s.call(s.owner.token, 'GET', `/missions/${id}`)).body
+      .mission.version as number;
+    const verified = await s.call(
+      s.cos.token,
+      'POST',
+      `/missions/${id}/work-packets/${packetId}/verify`,
+      {
+        expectedVersion: version,
+        evidenceRefs: ['ci:run/3'],
+      },
+    );
+    expect(verified.status).toBe(200);
+    version += 1;
+    const verifying = await s.call(
+      s.owner.token,
+      'POST',
+      `/missions/${id}/transitions`,
+      {
+        expectedVersion: version,
+        to: 'verifying',
+      },
+    );
+    expect(verifying.status).toBe(200);
+    version += 1;
+    const outcome = await s.call(
+      s.cos.token,
+      'POST',
+      `/missions/${id}/outcome-verification`,
+      {
+        expectedVersion: version,
+        evidenceRefs: ['ci:run/4'],
+      },
+    );
+    expect(outcome.status).toBe(200);
+    version += 1;
+    const completion = await s.call(
+      s.owner.token,
+      'POST',
+      `/missions/${id}/transitions`,
+      {
+        expectedVersion: version,
+        to: 'completed',
+      },
+    );
+    expect(completion.status).toBe(409);
+    const guards = (
+      completion.body.error.details.failures as Array<{ guard: string }>
+    ).map((f) => f.guard);
+    expect(guards).toContain('office-high-risk-review');
   });
 });

@@ -74,7 +74,7 @@ describe('mission risk can only be lowered by a human', () => {
       code: string;
       resource: string;
     }>(
-      'SELECT action, effect, code, resource FROM policy_receipts WHERE workspace_id = ?',
+      'SELECT action, effect, code, resource, risk FROM policy_receipts WHERE workspace_id = ?',
       [TEST_WORKSPACE],
     );
     expect(receipts).toEqual([
@@ -83,6 +83,8 @@ describe('mission risk can only be lowered by a human', () => {
         effect: 'deny',
         code: 'risk_lowering_refused',
         resource: `mission:${m.id}`,
+        // The risk the mission holds, which the refused change would have lowered.
+        risk: 'high',
       },
     ]);
   });

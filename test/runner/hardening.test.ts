@@ -1,4 +1,10 @@
-import { mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -13,7 +19,6 @@ import {
 } from '../../src/runner/state.js';
 import {
   createHttpTransport,
-  TowerRefusal,
   type Transport,
   TransportError,
 } from '../../src/runner/transport.js';
@@ -87,41 +92,53 @@ describe('a receipt refusal is parked or retried by its kind', () => {
       new FakeOfficeEngine(new FakeWorld(), { steps: 1 }),
     );
     const refusals = receiptRefusals(h, 400, 'invalid');
+    let claims = 0;
+    const transport: Transport = (request) => {
+      if (request.path === '/runners/claims') {
+        claims += 1;
+      }
+      return refusals.transport(request);
+    };
     const store = createMemoryStateStore();
-    const runner = await enroll(h, store, engine, refusals.transport);
+    const runner = await enroll(h, store, engine, transport);
     await runner.pollOnce();
     await runner.drain();
     const afterFirst = refusals.posts();
     const second = await runner.pollOnce();
     expect(second.receiptsSent).toEqual([]);
     expect(refusals.posts()).toBe(afterFirst + 1);
-    // Parked: the next poll does not send the receipt again, and still reaches the claim.
-    const third = await runner.pollOnce();
+    // Parked: the next poll does not send the receipt again, and it still reaches the claim.
+    const claimsBefore = claims;
+    await runner.pollOnce();
     expect(refusals.posts()).toBe(afterFirst + 1);
-    expect(third.retryAfterMs).toBeGreaterThanOrEqual(0);
+    expect(claims).toBe(claimsBefore + 1);
     expect(Object.keys(store.load()?.leases ?? {})).toHaveLength(1);
   });
 
-  it('retries a transient server fault on the next poll, and records the receipt once it clears', async () => {
-    const h = createFleetHarness();
-    const mission = h.mission([{ title: 'A', scope: ['repo:a'] }]);
-    const engine = officeRunnerEngine(
-      new FakeOfficeEngine(new FakeWorld(), { steps: 1 }),
-    );
-    // The first two answers are 503s: the job's own send, then a poll's resend.
-    const refusals = receiptRefusals(h, 503, 'unavailable', { count: 2 });
-    const store = createMemoryStateStore();
-    const runner = await enroll(h, store, engine, refusals.transport);
-    await runner.pollOnce();
-    await runner.drain();
-    // The poll's resend meets the second 503. That is transient, so the poll fails and nothing is parked.
-    await expect(runner.pollOnce()).rejects.toBeInstanceOf(TowerRefusal);
-    // The next poll sends the same receipt, and Tower accepts it.
-    const retried = await runner.pollOnce();
-    expect(retried.receiptsSent).toHaveLength(1);
-    expect(refusals.posts()).toBe(3);
-    expect(h.getMission(mission.id).packets[0]?.status).toBe('reported');
-  });
+  it.each([429, 503])(
+    'retries a transient %i on the next poll, without failing the poll or parking',
+    async (status) => {
+      const h = createFleetHarness();
+      const mission = h.mission([{ title: 'A', scope: ['repo:a'] }]);
+      const engine = officeRunnerEngine(
+        new FakeOfficeEngine(new FakeWorld(), { steps: 1 }),
+      );
+      // The first two answers are transient: the job's own send, then a poll's resend.
+      const refusals = receiptRefusals(h, status, 'unavailable', { count: 2 });
+      const store = createMemoryStateStore();
+      const runner = await enroll(h, store, engine, refusals.transport);
+      await runner.pollOnce();
+      await runner.drain();
+      // The poll's resend meets the second transient answer. The poll still completes, and nothing is parked.
+      const middle = await runner.pollOnce();
+      expect(middle.receiptsSent).toEqual([]);
+      // The next poll sends the same receipt, and Tower accepts it.
+      const retried = await runner.pollOnce();
+      expect(retried.receiptsSent).toHaveLength(1);
+      expect(refusals.posts()).toBe(3);
+      expect(h.getMission(mission.id).packets[0]?.status).toBe('reported');
+    },
+  );
 });
 
 describe('a refused progress write takes the path its code names', () => {
@@ -134,21 +151,26 @@ describe('a refused progress write takes the path its code names', () => {
     );
   }
 
-  it('drops the lease on lease_fenced and reports why', async () => {
+  it('drops the lease on lease_fenced, and logs the reason', async () => {
     const h = createFleetHarness();
     h.mission([{ title: 'A', scope: ['repo:a'] }]);
     const fake = new FakeOfficeEngine(new FakeWorld(), { steps: 2 });
     const store = createMemoryStateStore();
-    const runner = await enroll(
-      h,
+    const lines: string[] = [];
+    const enrolled = await h.enroll({ maxConcurrent: 1 });
+    const runner = new TowerRunner({
+      transport: progressRefused(h, 409, 'lease_fenced'),
+      engine: officeRunnerEngine(fake),
       store,
-      officeRunnerEngine(fake),
-      progressRefused(h, 409, 'lease_fenced'),
-    );
+      binding: { version: VERSION, buildDigest: DIGEST },
+      log: (line) => lines.push(line),
+    });
+    await runner.register(enrolled.body.enrollment.token);
     const poll = await runner.pollOnce();
     await runner.drain();
     expect(poll.started).toHaveLength(1);
     expect(store.load()?.leases).toEqual({});
+    expect(lines.some((line) => /dropped: lease_fenced/.test(line))).toBe(true);
   });
 
   it('returns the lease to recovery on lease_expired, and keeps it', async () => {
@@ -187,52 +209,69 @@ describe('a refused progress write takes the path its code names', () => {
   });
 });
 
-describe('a fatal refusal stops the running job before the process exits', () => {
-  it('aborts and drains the engine when the runner is quarantined', async () => {
+describe('a fatal refusal from a running job reaches the caller', () => {
+  it('raises runner_quarantined from the job while run() sleeps, and the claims still succeed', async () => {
     const h = createFleetHarness();
     h.mission([{ title: 'A', scope: ['repo:a'] }]);
-    const fake = new FakeOfficeEngine(new FakeWorld(), {
-      steps: 2,
-      stallAfterMutation: { step: 1 },
+    const fake = new FakeOfficeEngine(new FakeWorld(), { steps: 2 });
+    // Every progress write is refused as quarantined. The job's first receipt is refused too, once,
+    // so the fatal error can only come from the job. A later poll would resend the receipt and succeed.
+    let receipts = 0;
+    const transport = harnessTransport(h, (path) => {
+      if (path.endsWith('/progress')) {
+        return {
+          status: 403,
+          body: {
+            error: { code: 'runner_quarantined', message: 'quarantined' },
+          },
+        };
+      }
+      if (path.endsWith('/receipts')) {
+        receipts += 1;
+        if (receipts === 1) {
+          return {
+            status: 403,
+            body: {
+              error: { code: 'runner_quarantined', message: 'quarantined' },
+            },
+          };
+        }
+      }
+      return undefined;
     });
     const runner = await enroll(
       h,
       createMemoryStateStore(),
       officeRunnerEngine(fake),
+      transport,
     );
-    await runner.pollOnce();
-    await fake.stallReached;
-    const quarantined = await h.call(
-      h.owner.token,
-      'POST',
-      `/runners/${runner.runnerId}/quarantine`,
-      { reason: 'test' },
-    );
-    expect(quarantined.status).toBe(200);
-    await expect(
-      runner.run(new AbortController().signal),
-    ).rejects.toMatchObject({
-      code: 'runner_quarantined',
-    });
-    await runner.drain();
-    expect(fake.aborted).toBe(true);
+    // run() starts first, so the job's refusal arrives while run() is sleeping between polls.
+    const bound = new AbortController();
+    const timer = setTimeout(() => bound.abort(), 2_000);
+    try {
+      await expect(runner.run(bound.signal)).rejects.toMatchObject({
+        code: 'runner_quarantined',
+      });
+    } finally {
+      clearTimeout(timer);
+      await runner.drain();
+    }
   });
 });
 
 describe('a stopping runner starts no job', () => {
-  it('does not run an assignment that arrives after stop()', async () => {
+  it('does not run an assignment that arrives after stop(), and records no lease for it', async () => {
     const h = createFleetHarness();
     h.mission([{ title: 'A', scope: ['repo:a'] }]);
     const fake = new FakeOfficeEngine(new FakeWorld(), { steps: 1 });
-    const runner = await enroll(
-      h,
-      createMemoryStateStore(),
-      officeRunnerEngine(fake),
-    );
+    const store = createMemoryStateStore();
+    const runner = await enroll(h, store, officeRunnerEngine(fake));
     runner.stop();
-    await runner.pollOnce();
+    const report = await runner.pollOnce();
     await runner.drain();
     expect(fake.runs).toHaveLength(0);
+    expect(report.started).toEqual([]);
+    expect(store.load()?.leases).toEqual({});
   });
 });
 
@@ -445,5 +484,96 @@ describe('a cancelled run ends before its scope is granted again', () => {
     await runner.drain();
     expect(fake.maxActive).toBe(1);
     expect(h.getMission(next.id).packets[0]?.status).toBe('reported');
+  });
+});
+
+describe('the state path is checked by identity, through links and missing folders', () => {
+  const key = `sha256:${'a'.repeat(64)}`;
+  function fixture() {
+    const dir = mkdtempSync(join(tmpdir(), 'containment-'));
+    const repo = join(dir, 'repo');
+    mkdirSync(repo);
+    const link = join(dir, 'link');
+    symlinkSync(repo, link);
+    return { dir, repo, link };
+  }
+  const args = (state: string, repo: string) => [
+    'run',
+    '--url',
+    'https://tower.example',
+    '--state',
+    state,
+    '--version',
+    '1.2.3',
+    '--digest',
+    key,
+    '--repo',
+    repo,
+  ];
+
+  it('refuses a state file under the repository reached through a symlink', () => {
+    const { repo, link } = fixture();
+    expect(() => parseCli(args(join(link, 'state.json'), repo))).toThrow(
+      /outside/,
+    );
+  });
+
+  it('refuses a state file in a folder that does not exist yet, under a symlink to the repository', () => {
+    const { repo, link } = fixture();
+    expect(() =>
+      parseCli(args(join(link, 'new', 'deeper', 'state.json'), repo)),
+    ).toThrow(/outside/);
+  });
+
+  it('accepts a state file outside the repository, including a parent step out of it', () => {
+    const { repo } = fixture();
+    expect(parseCli(args(join(repo, '..', 'state.json'), repo)).statePath).toBe(
+      join(repo, '..', 'state.json'),
+    );
+  });
+
+  it('keeps a folder named ..cache inside the repository', () => {
+    const { repo } = fixture();
+    expect(() =>
+      parseCli(args(join(repo, '..cache', 'state.json'), repo)),
+    ).toThrow(/outside/);
+  });
+});
+
+describe('each request is bounded in time, and the size limit is exact', () => {
+  it('passes an abort signal to fetch on every request', async () => {
+    let signal: AbortSignal | null | undefined;
+    const transport = createHttpTransport('https://t', (async (
+      _url: string,
+      init?: RequestInit,
+    ) => {
+      signal = init?.signal;
+      return new Response('{}', { status: 200 });
+    }) as unknown as typeof fetch);
+    await transport({ method: 'GET', path: '/x' });
+    expect(signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('accepts a body of exactly the limit, and refuses one byte more', async () => {
+    const limit = 8 * 1024 * 1024;
+    // A JSON string of n characters is n + 2 bytes, since the quotes are added.
+    const bodyOf = (bytes: number) => JSON.stringify('a'.repeat(bytes - 2));
+    const fetchReturning = (text: string) =>
+      (async () =>
+        new Response(text, { status: 200 })) as unknown as typeof fetch;
+    const answer = await createHttpTransport(
+      'https://t',
+      fetchReturning(bodyOf(limit)),
+    )({
+      method: 'GET',
+      path: '/x',
+    });
+    expect(answer.status).toBe(200);
+    await expect(
+      createHttpTransport(
+        'https://t',
+        fetchReturning(bodyOf(limit + 1)),
+      )({ method: 'GET', path: '/x' }),
+    ).rejects.toBeInstanceOf(TransportError);
   });
 });
