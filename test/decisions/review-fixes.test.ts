@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ValidationError } from '../../src/core/errors.js';
+import { PacketNotFoundError, ValidationError } from '../../src/core/errors.js';
 import { AuthorityForbiddenError } from '../../src/policy/errors.js';
 import {
   type AuthorityHarness,
@@ -211,9 +211,13 @@ describe('tier 1 checks the packet and rejects paths that climb out of scope', (
       { title: 'follow-up', scope: ['src/*'] },
     ]);
     expect(ask(h, m, 'src/utils')).toEqual({ tier: 1, outcome: 'proceed' });
+    // A request that climbs out of its subtree is invalid, and is refused before any tier looks at it.
     for (const scope of ['src/../../etc/secrets', 'src/..', 'src\\..\\x']) {
-      expect(ask(h, m, scope).outcome, scope).toBe('decision_required');
+      expect(() => ask(h, m, scope), scope).toThrow(ValidationError);
     }
+    expect(h.authority.decisions.list('ws_test', { status: 'all' })).toEqual(
+      [],
+    );
   });
 
   it('does not proceed when the packet itself declares more than was authorized', () => {
@@ -458,5 +462,242 @@ describe('a rejected request leaves no receipt', () => {
     expect(
       h.authority.policy.receipts('ws_test', { afterSeq: 0, limit: 10 }),
     ).toEqual([]);
+  });
+});
+
+describe('requests that name a packet that is not there, or climb out of a path', () => {
+  it('fails for an unknown packet instead of approving it', () => {
+    const { h, route } = setup();
+    grant(h, STAGING);
+    const m = missionWith(h, [{ title: 'prod', scope: ['env:production'] }]);
+    for (const requester of [h.cos, h.runner]) {
+      expect(() =>
+        route(
+          expansion(h, {
+            requester,
+            missionId: m.driver.id,
+            packetId: 'pkt_bogus',
+            action: 'deploy.staging',
+            resource: 'repo:app',
+            scope: 'env:staging',
+          }),
+        ),
+      ).toThrow(PacketNotFoundError);
+    }
+    const other = missionWith(h, [
+      { title: 'elsewhere', scope: ['env:staging'] },
+    ]);
+    expect(() =>
+      route(
+        expansion(h, {
+          requester: h.cos,
+          missionId: m.driver.id,
+          packetId: other.ids[0] as string,
+          action: 'deploy.staging',
+          resource: 'repo:app',
+          scope: 'env:staging',
+        }),
+      ),
+    ).toThrow(PacketNotFoundError);
+    expect(packetStatus(other.driver, other.ids[0] as string).authorized).toBe(
+      false,
+    );
+  });
+
+  it.each([
+    ['resource', { resource: 'repo:/app/../secret' }],
+    ['scope', { scope: 'env:staging/../production' }],
+  ])(
+    'refuses a %s with a .. segment in evaluation, the router and a decision',
+    (_k, over) => {
+      const { h, route, inbox } = setup();
+      grant(h, { ...STAGING, resource: 'repo:/app/*', scope: 'env:*' });
+      const m = missionWith(h, [{ title: 'x', scope: ['env:*'] }]);
+      const request = {
+        action: 'deploy.staging',
+        resource: 'repo:/app/x',
+        scope: 'env:staging',
+        risk: 'low' as const,
+        ...over,
+      };
+      expect(() =>
+        h.authority.policy.authorize({
+          workspace: 'ws_test',
+          principal: h.cos.id,
+          ...request,
+        }),
+      ).toThrow(ValidationError);
+      expect(() =>
+        route(
+          expansion(h, {
+            requester: h.cos,
+            missionId: m.driver.id,
+            packetId: m.ids[0] as string,
+            ...request,
+          }),
+        ),
+      ).toThrow(ValidationError);
+      expect(() =>
+        inbox.create(
+          owner(h),
+          decisionInput(
+            [{ missionId: m.driver.id, packetId: m.ids[0] as string }],
+            { request: { ...request, amount: null } },
+          ),
+        ),
+      ).toThrow(ValidationError);
+    },
+  );
+});
+
+describe('repeating an answer', () => {
+  it('is a replay only for the principal who gave it', () => {
+    const { h, inbox } = setup();
+    const m = missionWith(h, [{ title: 'w' }]);
+    const decision = inbox.create(
+      owner(h),
+      decisionInput([{ missionId: m.driver.id, packetId: m.ids[0] as string }]),
+    ).decision;
+    const answer = { version: 1, choice: 'approve', note: 'ok' };
+    inbox.answer(owner(h), decision.id, answer);
+    // A Chief of Staff with no delegation is refused, and cannot probe the stored note by guessing.
+    expect(() =>
+      inbox.answer(
+        { workspaceId: 'ws_test', actor: h.cos },
+        decision.id,
+        answer,
+      ),
+    ).toThrow();
+    expect(() =>
+      inbox.answer({ workspaceId: 'ws_test', actor: h.cos }, decision.id, {
+        ...answer,
+        note: 'guess',
+      }),
+    ).toThrow(/needs a person|delegated/);
+    // Another human may repeat it, and a different one conflicts.
+    expect(
+      inbox.answer(
+        { workspaceId: 'ws_test', actor: h.other },
+        decision.id,
+        answer,
+      ).replayed,
+    ).toBe(true);
+    expect(() =>
+      inbox.answer({ workspaceId: 'ws_test', actor: h.other }, decision.id, {
+        ...answer,
+        note: 'x',
+      }),
+    ).toThrow(/different answer/);
+  });
+});
+
+describe('packets that declare nothing, and housekeeping names', () => {
+  it.each([['*'], ['**'], ['*:*']])(
+    'does not let a packet scope of %s bind anything for a Chief of Staff',
+    (scope) => {
+      const { h, route } = setup();
+      grant(h, STAGING);
+      const m = missionWith(h, [{ title: 'anything', scope: [scope] }]);
+      const outcome = route(
+        expansion(h, {
+          requester: h.cos,
+          missionId: m.driver.id,
+          packetId: m.ids[0] as string,
+          action: 'deploy.staging',
+          resource: 'repo:app',
+          scope: 'env:staging',
+        }),
+      );
+      expect(outcome.outcome).toBe('decision_required');
+      expect(packetStatus(m.driver, m.ids[0] as string).authorized).toBe(false);
+    },
+  );
+
+  it('does not let housekeeping proceed at tier 1, even inside an authorized scope', () => {
+    const { h, route } = setup();
+    const m = missionWith(h, [
+      { title: 'base', scope: ['src/*'], authorized: true },
+      { title: 'follow-up', scope: ['src/utils'] },
+    ]);
+    const outcome = route(
+      expansion(h, {
+        missionId: m.driver.id,
+        packetId: m.ids[1] as string,
+        action: 'cleanup.tmp',
+        scope: 'src/utils',
+      }),
+    );
+    expect(outcome.outcome).toBe('decision_required');
+  });
+
+  it('does not let a name hide a sensitive effect behind cleanup', () => {
+    const { h } = setup();
+    const ask = (action: string, extra: object = {}) =>
+      h.authority.policy.authorize({
+        workspace: 'ws_test',
+        principal: h.runner.id,
+        action,
+        resource: 'db:prod',
+        scope: 'prod',
+        risk: 'high',
+        ...extra,
+      });
+    expect(ask('cleanup.tmp').code).toBe('safe_cleanup');
+    expect(ask('cleanup.drop-prod-db').effect).toBe('deny');
+    expect(ask('cleanup.spend.refund', { amount: 1_000_000 }).effect).toBe(
+      'deny',
+    );
+    expect(ask('cleanup.spend.refund').code).toBe('amount_required');
+    expect(ask('cleanup.deploy.prod').effect).toBe('deny');
+  });
+
+  it('ignores branches that already resumed when it checks a Chief of Staff answer', () => {
+    const { h, inbox } = setup();
+    grant(h, { action: 'scope.extend', resource: 'repo:app', scope: 'infra' });
+    const covered = missionWith(h, [{ title: 'ok', scope: ['infra'] }]);
+    const other = missionWith(h, [
+      { title: 'unrelated', scope: ['elsewhere'] },
+    ]);
+    const decision = inbox.create(
+      owner(h),
+      decisionInput(
+        [
+          { missionId: covered.driver.id, packetId: covered.ids[0] as string },
+          { missionId: other.driver.id, packetId: other.ids[0] as string },
+        ],
+        {
+          requiredAuthority: 'chief_of_staff',
+          request: {
+            action: 'scope.extend',
+            resource: 'repo:app',
+            scope: 'infra',
+            risk: 'low',
+            amount: null,
+          },
+        },
+      ),
+    ).decision;
+    const cos = { workspaceId: 'ws_test', actor: h.cos };
+    // While one branch is blocked and its packet does not cover the request, the Chief of Staff is refused.
+    expect(() =>
+      inbox.answer(cos, decision.id, {
+        version: 1,
+        choice: 'approve',
+        note: null,
+      }),
+    ).toThrow(/not covered/);
+    // After a person resumed both, nothing is left for that check to protect.
+    inbox.answer(owner(h), decision.id, {
+      version: 1,
+      choice: 'approve',
+      note: null,
+    });
+    expect(
+      inbox.answer(cos, decision.id, {
+        version: 2,
+        choice: 'decline',
+        note: null,
+      }).applied,
+    ).toBe(true);
   });
 });

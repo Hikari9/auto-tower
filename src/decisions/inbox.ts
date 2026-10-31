@@ -10,6 +10,7 @@ import { createMissionService } from '../core/service.js';
 import type { Actor, MissionState } from '../core/types.js';
 import { createEventLog, type EventLog } from '../events/event-log.js';
 import { AuthorityForbiddenError } from '../policy/errors.js';
+import { hasTraversal } from '../policy/patterns.js';
 import { createPolicyService } from '../policy/service.js';
 import { joinTransaction } from '../policy/transaction.js';
 import type { HistoryPage } from '../policy/types.js';
@@ -283,8 +284,12 @@ export function createDecisionInbox(deps: DecisionInboxDeps): DecisionInbox {
       );
       tx.exec('RELEASE resume_branch');
     } catch (error) {
-      tx.exec('ROLLBACK TO resume_branch');
-      tx.exec('RELEASE resume_branch');
+      try {
+        tx.exec('ROLLBACK TO resume_branch');
+        tx.exec('RELEASE resume_branch');
+      } catch {
+        // The transaction itself is gone. Report the failure that caused it, not this one.
+      }
       // Mission state that locks the breakdown (verifying, cancelled) is a stale branch, not a failure.
       if (error instanceof CommandNotAllowedError) {
         return { status: 'skipped', reason: error.reason };
@@ -361,11 +366,15 @@ export function createDecisionInbox(deps: DecisionInboxDeps): DecisionInbox {
       const at = clock().toISOString();
       return inTransaction((tx, log) => {
         for (const key of ['resource', 'scope'] as const) {
-          if (input.request?.[key].includes('*')) {
+          const value = input.request?.[key];
+          if (
+            value !== undefined &&
+            (value.includes('*') || hasTraversal(value))
+          ) {
             throw new ValidationError([
               {
                 path: `request.${key}`,
-                message: 'must name one thing, without *',
+                message: 'must name one thing, without * or ..',
               },
             ]);
           }
@@ -488,10 +497,11 @@ export function createDecisionInbox(deps: DecisionInboxDeps): DecisionInbox {
           ]);
         }
         // A repeat of an answer that was already accepted is returned as it was, even if the
-        // answerer's delegation has changed since.
+        // answerer's delegation has changed since. Only the answerer gets that: anyone else is
+        // checked first, so a repeat cannot be used to read another principal's answer.
         const prior = loadAnswers(tx, ctx.workspaceId, decisionId);
         const same = prior.find((a) => a.version === answer.version);
-        if (same !== undefined) {
+        if (same !== undefined && same.answeredBy === ctx.actor.id) {
           if (same.choice !== answer.choice || same.note !== answer.note) {
             throw new AnswerConflictError(decisionId, answer.version);
           }
@@ -507,6 +517,19 @@ export function createDecisionInbox(deps: DecisionInboxDeps): DecisionInbox {
         const authority = answererAuthority(tx, ctx, decision);
         if ('refused' in authority) {
           return authority;
+        }
+        if (same !== undefined) {
+          // Authorized, but not the principal who answered at this version.
+          if (same.choice !== answer.choice || same.note !== answer.note) {
+            throw new AnswerConflictError(decisionId, answer.version);
+          }
+          return {
+            decision,
+            applied: false,
+            superseded: false,
+            replayed: true,
+            branches: [],
+          };
         }
 
         const at = clock().toISOString();

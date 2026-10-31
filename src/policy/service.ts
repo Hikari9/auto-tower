@@ -23,7 +23,7 @@ import {
 } from './errors.js';
 import { evaluate, riskAtMost } from './evaluate.js';
 import type { CreateRuleInput, NarrowInput, RuleChanges } from './inputs.js';
-import { isNarrowerPattern } from './patterns.js';
+import { hasTraversal, isNarrowerPattern } from './patterns.js';
 import {
   clearPolicyProjection,
   loadPolicyVersion,
@@ -502,11 +502,16 @@ export function createPolicyService(deps: PolicyServiceDeps): PolicyService {
       });
     }
     for (const key of ['resource', 'scope'] as const) {
-      if (request[key] === '' || request[key].includes('*')) {
-        // A request names one thing. A `*` in it would be matched as literal text by a rule.
+      if (
+        request[key] === '' ||
+        request[key].includes('*') ||
+        hasTraversal(request[key])
+      ) {
+        // A request names one thing. A `*` in it would be matched as literal text by a rule, and a
+        // `..` segment would let a pattern like `dir/*` reach outside `dir`.
         issues.push({
           path: key,
-          message: 'must name one thing: not empty and without *',
+          message: 'must name one thing: not empty, without * and without ..',
         });
       }
     }
@@ -537,10 +542,10 @@ export function createPolicyService(deps: PolicyServiceDeps): PolicyService {
     const producers = producersOf(workspaceId, request);
     // Rules and their version are separate reads. Read the version on both sides and go again if a
     // writer got in between, so the version named in the result is the one the rules came from.
-    for (let attempt = 0; ; attempt++) {
+    for (let attempt = 0; attempt < 4; attempt++) {
       const before = loadPolicyVersion(db, workspaceId);
       const rules = loadRules(db, workspaceId);
-      if (attempt >= 3 || loadPolicyVersion(db, workspaceId) === before) {
+      if (loadPolicyVersion(db, workspaceId) === before) {
         return evaluate({
           rules,
           policyVersion: before,
@@ -558,6 +563,8 @@ export function createPolicyService(deps: PolicyServiceDeps): PolicyService {
         });
       }
     }
+    // Fail closed: an evaluation that cannot name the policy it used authorizes nothing.
+    throw new Error('Policy kept changing while it was being read');
   }
 
   const service: PolicyService = {

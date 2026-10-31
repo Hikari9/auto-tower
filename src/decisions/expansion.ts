@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { MissionNotFoundError } from '../core/errors.js';
+import { MissionNotFoundError, PacketNotFoundError } from '../core/errors.js';
 import type { CompletionGuardRegistry } from '../core/guards.js';
 import { loadMission } from '../core/projection.js';
 import { createMissionService } from '../core/service.js';
@@ -153,6 +153,13 @@ export function createExpansionRouter(
       const mission = loadMission(tx, request.workspaceId, request.missionId);
       if (mission === undefined) {
         throw new MissionNotFoundError(request.missionId);
+      }
+      // Only a null packet id is a mission-level request. An id that names nothing is an error.
+      if (
+        request.packetId !== null &&
+        !mission.packets.some((p) => p.id === request.packetId)
+      ) {
+        throw new PacketNotFoundError(request.packetId);
       }
       const evaluationRequest: AuthorizeRequest = {
         workspace: request.workspaceId,

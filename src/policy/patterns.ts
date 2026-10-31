@@ -52,3 +52,11 @@ export function isNarrowerPattern(
 ): boolean {
   return candidate === original || matchesPattern(original, candidate);
 }
+
+/**
+ * `*` matches `/` and `..` like any other text, so a path that climbs out of a subtree has to be
+ * refused before it is matched against a pattern.
+ */
+export function hasTraversal(value: string): boolean {
+  return value.split(/[\\/]/).some((segment) => segment === '..');
+}

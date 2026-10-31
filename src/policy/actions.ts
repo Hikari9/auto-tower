@@ -21,6 +21,8 @@ const DESTRUCTIVE_VERBS: readonly string[] = [
   'drop',
   'purge',
   'wipe',
+  'truncate',
+  'remove',
   'force-push',
 ];
 
@@ -28,41 +30,52 @@ function under(action: string, prefix: string): boolean {
   return action === prefix || action.startsWith(`${prefix}.`);
 }
 
-/**
- * Sensitive words match as the start of any segment, so `deploy.prod-eu`, `db.drop_table` and
- * `billing.spend.create` are caught as well as the plain names. This errs toward asking.
- */
 const startsWithAny = (segment: string, words: readonly string[]): boolean =>
   words.some((word) => segment.startsWith(word));
 
-export function categoryOf(action: string): ActionCategory {
-  if (under(action, 'cleanup')) {
-    return 'cleanup';
-  }
+/**
+ * The category of every part of the name but a leading `cleanup`. Sensitive words match as the
+ * start of any segment, and `_` reads as `-`, so `deploy.prod-eu`, `db.drop_table`, `git.push_force`
+ * and `billing.spend.create` are all caught. This errs toward asking.
+ */
+function sensitiveCategory(action: string): ActionCategory {
   if (under(action, 'review.independent')) {
     return 'independent_review';
   }
-  const segments = action.split('.');
-  const last = segments[segments.length - 1] ?? '';
-  if (segments.some((s) => s.startsWith('spend'))) {
+  const segments = action.replaceAll('_', '-').split('.');
+  const any = (words: readonly string[]) =>
+    segments.some((s) => startsWithAny(s, words));
+  if (any(['spend'])) {
     return 'spend';
   }
-  if (
-    under(action, 'deploy.prod') ||
-    (segments[0] === 'deploy' && startsWithAny(segments[1] ?? '', ['prod']))
-  ) {
+  if ((any(['deploy']) || any(['release'])) && any(['prod'])) {
     return 'production_deploy';
   }
-  if (segments.some((s) => s.startsWith('security'))) {
+  if (any(['security'])) {
     return 'security';
   }
   if (under(action, 'issue.close')) {
     return 'external_issue_close';
   }
-  if (under(action, 'destructive') || startsWithAny(last, DESTRUCTIVE_VERBS)) {
+  if (
+    under(action, 'destructive') ||
+    any(DESTRUCTIVE_VERBS) ||
+    /force.*push|push.*force/.test(action)
+  ) {
     return 'destructive';
   }
   return 'standard';
+}
+
+/**
+ * A `cleanup.*` name is safe cleanup only when nothing else in the name is sensitive, so a
+ * caller cannot present `cleanup.drop-prod-db` or `cleanup.spend.refund` as housekeeping.
+ */
+export function categoryOf(action: string): ActionCategory {
+  const category = sensitiveCategory(action);
+  return category === 'standard' && under(action, 'cleanup')
+    ? 'cleanup'
+    : category;
 }
 
 /**

@@ -256,6 +256,15 @@ describe('rules over HTTP', () => {
     expect(inactive.body.rules).toHaveLength(1);
   });
 
+  it('accepts a leap day', async () => {
+    const api = createApi();
+    const created = await createRule(api, {
+      ...RULE,
+      expiresAt: '2028-02-29T23:59:59Z',
+    });
+    expect(created.body.rule.expiresAt).toBe('2028-02-29T23:59:59.000Z');
+  });
+
   it('reads an expiry with an offset as the instant it names', async () => {
     const api = createApi();
     const created = await createRule(api, {
@@ -301,6 +310,12 @@ describe('rules over HTTP', () => {
       { ...RULE, expiresAt: '2030-01-01T00:00:00' },
     ],
     ['an expiry with only a date', { ...RULE, expiresAt: '2030-01-01' }],
+    [
+      'a date that does not exist',
+      { ...RULE, expiresAt: '2030-02-30T00:00:00Z' },
+    ],
+    ['an hour of 24', { ...RULE, expiresAt: '2030-12-31T24:00:00Z' }],
+    ['a thirty-first of April', { ...RULE, expiresAt: '2030-04-31T00:00:00Z' }],
     ['a free-form expiry', { ...RULE, expiresAt: 'Jan 1 2030 10:00' }],
     ['a negative cap', { ...RULE, limits: { maxAmount: -1 } }],
     ['a fractional cap', { ...RULE, limits: { maxAmount: 1.5 } }],

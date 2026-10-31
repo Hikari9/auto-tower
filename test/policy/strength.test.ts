@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { PolicyDeniedError } from '../../src/policy/errors.js';
+import { createPolicyService } from '../../src/policy/service.js';
 import { seedFixedPrincipal } from '../core/helpers.js';
 import {
   createAuthorityHarness,
@@ -152,5 +153,42 @@ describe('rule lifecycle details', () => {
         null,
       ),
     ).toThrow(/not found/);
+  });
+});
+
+describe('reading rules and their version together', () => {
+  /** A database whose policy version moves each time it is read, `moves` times. */
+  function drifting(moves: number) {
+    const h = createAuthorityHarness();
+    grant(h);
+    let reads = 0;
+    const db = {
+      ...h.db,
+      get: <T>(
+        sql: string,
+        params?: readonly (string | number | bigint | null)[],
+      ) => {
+        const row = h.db.get<T>(sql, params);
+        if (sql.includes('FROM policy_state') && reads < moves) {
+          reads += 1;
+          h.db.run('UPDATE policy_state SET version = version + 1');
+        }
+        return row;
+      },
+    };
+    return { h, db };
+  }
+
+  it('names the version the rules were read at, going again when a writer got in between', () => {
+    const { h, db } = drifting(2);
+    const policy = createPolicyService({ db, clock: h.clock.now });
+    // Two reads were disturbed. The result carries the version that finally held still.
+    expect(policy.authorize(request()).policyVersion).toBe(3);
+  });
+
+  it('fails closed when the policy never holds still', () => {
+    const { h, db } = drifting(1_000);
+    const policy = createPolicyService({ db, clock: h.clock.now });
+    expect(() => policy.authorize(request())).toThrow(/kept changing/);
   });
 });

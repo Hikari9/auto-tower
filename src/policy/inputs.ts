@@ -17,6 +17,21 @@ const MAX_AMOUNT = 1e12;
 const MAX_PREFERENCE_BYTES = 4_096;
 const RFC3339 =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
+/** `Date.parse` rolls 30 February forward into March. A date that does not exist is refused instead. */
+function realDate(value: string): boolean {
+  const [y, mo, d, h, mi, sec] = value.slice(0, 19).split(/[-T:]/).map(Number);
+  const inMonth = new Date(Date.UTC(y ?? 0, mo ?? 0, 0)).getUTCDate();
+  return (
+    (mo ?? 0) >= 1 &&
+    (mo ?? 13) <= 12 &&
+    (d ?? 0) >= 1 &&
+    (d ?? 99) <= inMonth &&
+    (h ?? 99) <= 23 &&
+    (mi ?? 99) <= 59 &&
+    (Number.isNaN(sec ?? Number.NaN) ? 0 : (sec ?? 0)) <= 59
+  );
+}
+
 const CONTROL_CHARS = /\p{Cc}/u;
 
 export interface CreateRuleInput {
@@ -98,7 +113,8 @@ function checkInstant(
     return value;
   }
   // An offset is required: without one `Date.parse` reads the host's local time zone.
-  const ms = RFC3339.test(value) ? Date.parse(value) : Number.NaN;
+  const ms =
+    RFC3339.test(value) && realDate(value) ? Date.parse(value) : Number.NaN;
   if (Number.isNaN(ms)) {
     reader.fail(
       key,

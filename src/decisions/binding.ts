@@ -1,14 +1,20 @@
 import type { WorkPacket } from '../core/types.js';
-import { isNarrowerPattern, matchesPattern } from '../policy/patterns.js';
+import {
+  hasTraversal,
+  isNarrowerPattern,
+  matchesPattern,
+} from '../policy/patterns.js';
 
-/** `*` matches `/` and `..` like any other text, so a path that climbs out of a subtree has to be refused first. */
-export function hasTraversal(value: string): boolean {
-  return value.split(/[\\/]/).some((segment) => segment === '..');
-}
-
-/** A scope of `*` declares nothing, so it never vouches for anything. */
+/**
+ * A scope that declares something names at least one letter or digit and holds no segment that
+ * `*` and dots could expand to `..`. `*`, `**`, `*:*` and `.*` declare nothing.
+ */
 const declared = (pattern: string): boolean =>
-  pattern !== '' && !/^\*+$/.test(pattern) && !hasTraversal(pattern);
+  /[A-Za-z0-9]/.test(pattern) &&
+  !hasTraversal(pattern) &&
+  !pattern
+    .split(/[\\/]/)
+    .some((segment) => segment.includes('.') && /^[.*]+$/.test(segment));
 
 /**
  * True when what a request claims to touch lies inside what the packet itself declared. The
