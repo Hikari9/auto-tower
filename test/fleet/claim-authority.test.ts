@@ -411,9 +411,8 @@ describe('claim-time refusals: coverage of each record and hold', () => {
     );
     const runner = await h.runner({ maxConcurrent: 10 });
     await runner.claim();
-    const humanAttempt = denials(h).find(
-      (d) => d.detail.packetId === human,
-    )?.detail.attemptId as string;
+    const humanAttempt = denials(h).find((d) => d.detail.packetId === human)
+      ?.detail.attemptId as string;
     const missionOf = (attemptId: string) =>
       h.db.all<{ mission_id: string }>(
         'SELECT mission_id FROM execution_attempts WHERE workspace_id = ? AND id = ?',
@@ -520,7 +519,9 @@ describe('claim-time refusals: coverage of each record and hold', () => {
     expect(claim.status).toBe(200);
     expect(packetsGranted(claim)).not.toContain(cited);
     expect(reasons(claim)).toEqual([
-      expect.stringMatching(/^authority: the authorizing principal .* is not in this workspace/),
+      expect.stringMatching(
+        /^authority: the authorizing principal .* is not in this workspace/,
+      ),
     ]);
     const rows = denials(h);
     expect(rows).toHaveLength(1);
@@ -572,7 +573,9 @@ describe('claim-time refusals: resource, principal state, live holds and durabil
     const claim = (await runner.claim()) as Claim;
     expect(packetsGranted(claim)).not.toContain(human);
     expect(reasons(claim)).toContainEqual(
-      expect.stringMatching(/^authority: the authorizing principal .* is not in this workspace/),
+      expect.stringMatching(
+        /^authority: the authorizing principal .* is not in this workspace/,
+      ),
     );
     expect(denials(h).map((d) => d.detail.packetId)).toContain(human);
     // The authorizer has no row to attribute a receipt to, so the refusal is audited without one.
@@ -749,9 +752,7 @@ describe('claim-time authority: deny scope, effect, grantee and disabled coverag
     );
     const claim = (await runner.claim()) as Claim;
     expect(packetsGranted(claim)).not.toContain(cited);
-    expect(reasons(claim)).toEqual([
-      'authority: the principal is disabled',
-    ]);
+    expect(reasons(claim)).toEqual(['authority: the principal is disabled']);
   });
 });
 
@@ -773,7 +774,9 @@ describe('claim-time authority: scope spelling', () => {
     const claim = (await runner.claim()) as Claim;
     expect(packetsGranted(claim)).not.toContain(padded.packetIds[0]);
     expect(reasons(claim)).toContainEqual(
-      expect.stringMatching(/^authority: packet .* declares a scope a deny rule cannot be checked against/),
+      expect.stringMatching(
+        /^authority: packet .* declares a scope a deny rule cannot be checked against/,
+      ),
     );
   });
 });
@@ -795,9 +798,7 @@ describe('claim-time authority: a failed refusal write does not change the claim
       const claim = (await runner.claim()) as Claim;
       expect(claim.status).toBe(200);
       expect(packetsGranted(claim)).toContain(human);
-      expect(errors).toHaveBeenCalledWith(
-        'claim refusals not recorded: Error',
-      );
+      expect(errors).toHaveBeenCalledWith('claim refusals not recorded: Error');
     } finally {
       spy.mockRestore();
       errors.mockRestore();

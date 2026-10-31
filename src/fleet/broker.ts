@@ -168,11 +168,7 @@ function denyApplies(rule: PolicyRule, principalId: string, missionId: string) {
 
 /** A scope a deny rule can be matched against: literal, with no wildcard, traversal or padding. */
 function checkableScope(scope: string): boolean {
-  return (
-    !scope.includes('*') &&
-    !hasTraversal(scope) &&
-    scope === scope.trim()
-  );
+  return !scope.includes('*') && !hasTraversal(scope) && scope === scope.trim();
 }
 
 /** The policy version now. Read inside the claim, so a refusal names the version it was decided under. */

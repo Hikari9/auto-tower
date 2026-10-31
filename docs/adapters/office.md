@@ -178,6 +178,12 @@ that principal still stands behind it.
   is refused, since the rules cannot check it. A missing allow rule is not a refusal, because a human's
   authorization needs none.
 
+A scopeless packet (`scope: []`) authorized by a human is evaluated under `packet:<id>`. A scope-specific
+deny rule (for example `env:prod`) does not narrow it, and neither does the runner's `allowedScopes`, since
+a scopeless packet declares nothing those would match. A chief of staff's scopeless packet is refused,
+because its cited rule cannot be checked against no scope. This is a residual for human packets: they are
+still dispatched with no scope gate. Runner-dispatched packets are to declare a scope (T9).
+
 A refused packet is not granted. Its offer comes back in `withheld` with a reason that starts with
 `authority:`. The branch is held and other branches of the mission proceed as before.
 
@@ -241,6 +247,7 @@ These are accepted, and the code does not mitigate them.
 - **Same-user engine.** The engine runs as the runner's user. It can read any file that user can read. Keeping the state file outside the repository limits what the engine sees by default, and it does not stop a same-user process.
 - **Enrollment token.** Registration redeems the token before the credential is saved. If the save fails after a successful redeem, the credential is lost, and a human must issue a new enrollment.
 - **Durability.** The state write is fsynced, but on macOS `fsync` does not force the disk cache. A power loss can still lose the most recent save, and the runner then reconciles from Tower's record.
+- **Scopeless human packets.** A human-authorized packet with no scope is evaluated under `packet:<id>`, so no scope-specific deny rule or runner `allowedScopes` narrows it. T9 will require runner-dispatched packets to declare a scope.
 - **Running work after revocation.** The claim-time check governs new grants and re-sent assignments. A lease already running continues until it ends, as `docs/runner-protocol.md` describes for quota and scope changes.
 - **Pause.** The runner does not act on a `pause` directive. Tower withholds new work from a paused runner, and the runner's in-flight step runs to its end.
 - **Homoglyphs.** Look-alike letters from other scripts are not folded in identity comparison (see Identities above).
