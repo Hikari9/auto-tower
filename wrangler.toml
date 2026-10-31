@@ -5,3 +5,10 @@ name = "auto-tower"
 main = "src/hosting/worker.ts"
 compatibility_date = "2026-10-01"
 compatibility_flags = ["nodejs_compat"]
+
+# Static dashboard files. The Workers entry serves /dashboard through this binding (src/hosting/worker.ts).
+# html_handling "none" keeps "/" serving index.html without redirects; the entry asks for "/" only.
+[assets]
+directory = "public"
+binding = "ASSETS"
+html_handling = "none"

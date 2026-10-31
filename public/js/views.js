@@ -180,7 +180,7 @@ function confirmAction({
                 }
                 confirm.disabled = false;
                 cancel.disabled = false;
-                error.textContent = describeError(caught);
+                error.textContent = describeWriteError(caught);
               }
             },
           },
@@ -223,7 +223,15 @@ export function describeError(error) {
     }
     return error.message;
   }
-  return 'The request failed. Check the connection. A write may already have been applied, so reload before retrying.';
+  return 'The request failed. Check the connection and try again.';
+}
+
+/** Errors from a write. A network failure may still have applied it, so the message says so. */
+export function describeWriteError(error) {
+  if (error instanceof ApiError) {
+    return describeError(error);
+  }
+  return 'The request failed. Check the connection. The change may already have been applied, so reload before retrying.';
 }
 
 /** A rejected token or a stale record is not fixed by retrying here. The view reloads instead. */
@@ -812,7 +820,7 @@ function confirmButton(ctx, decision, alt, note, error, cancel) {
           }
           button.disabled = false;
           cancel.disabled = false;
-          error.textContent = describeError(caught);
+          error.textContent = describeWriteError(caught);
         }
       },
     },
@@ -910,12 +918,10 @@ function preferencesList(preferences) {
 }
 
 function limitsText(limits) {
-  const amount =
-    limits.maxAmount === null ? 'no amount cap' : `up to ${limits.maxAmount}`;
+  const { maxAmount = null, missionIds = null } = limits ?? {};
+  const amount = maxAmount === null ? 'no amount cap' : `up to ${maxAmount}`;
   const missions =
-    limits.missionIds === null
-      ? 'all missions'
-      : `missions ${limits.missionIds.join(', ')}`;
+    missionIds === null ? 'all missions' : `missions ${missionIds.join(', ')}`;
   return `Limits: ${amount}; ${missions}.`;
 }
 
@@ -1102,7 +1108,12 @@ export function renderHealth(ctx) {
             { class: 'facts' },
             fact('API', health.status),
             fact('Missions', String(missions.total)),
-            fact('Open decisions', String(decisions.decisions.length)),
+            fact(
+              'Open decisions',
+              decisions.decisions.length >= 200
+                ? '200 or more'
+                : String(decisions.decisions.length),
+            ),
             fact('Runners', String(runners.length)),
           ),
           h(

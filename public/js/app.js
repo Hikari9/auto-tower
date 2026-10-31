@@ -144,11 +144,14 @@ export function mountDashboard({
   let current = '#/missions';
   let generation = 0;
   /** A message to show above the next render, such as a rejected write. */
+  /** @type {{ hash: string, message: string } | null} */
   let notice = null;
 
   /** @param {string} hash */
   async function show(hash) {
     current = hash || current;
+    // The view this render belongs to. A write it started reports back to this view only.
+    const viewHash = current;
     const gen = ++generation;
     const resolved = resolveRoute(current);
     markNav(
@@ -176,9 +179,10 @@ export function mountDashboard({
         {
           api,
           persona: brand,
-          refresh: () => show(current),
+          // After navigating away, a finished write must not re-render a different page.
+          refresh: () => (current === viewHash ? show(viewHash) : undefined),
           flash: (message) => {
-            notice = message;
+            notice = { hash: viewHash, message };
           },
         },
         resolved.params,
@@ -208,10 +212,11 @@ export function mountDashboard({
     if (gen !== generation) {
       return;
     }
+    // A notice belongs to the view that raised it. Any render consumes it, so it cannot reappear later.
     const alert =
-      notice === null
-        ? null
-        : h('p', { role: 'alert', class: 'error' }, notice);
+      notice?.hash === current
+        ? h('p', { role: 'alert', class: 'error' }, notice.message)
+        : null;
     notice = null;
     replaceChildren(main, alert, node);
     main.removeAttribute('aria-busy');

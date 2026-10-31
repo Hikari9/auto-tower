@@ -1709,3 +1709,481 @@ describe('label associations', () => {
     }
   });
 });
+
+// --- Second self-review: conflicts, notices, and the gaps the re-review named ---
+
+function pendingProposal(id: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    status: 'pending',
+    action: 'repo.read',
+    resource: 'repo:app',
+    scope: 'repo:app',
+    maxRisk: 'low',
+    granteeKind: 'chief_of_staff',
+    limits: { maxAmount: null, missionIds: null },
+    evidence: [],
+    approvals: 3,
+    createdAt: '2026-10-31T00:00:00.000Z',
+    resolvedAt: null,
+    resolvedBy: null,
+    resolutionNote: null,
+    resultingRuleId: null,
+    ...overrides,
+  };
+}
+
+/** Serves one pending proposal on the policy page and answers every POST with `status`. */
+function policyWithProposal(
+  tower: Tower,
+  proposal: Record<string, unknown>,
+  postStatus: number | null,
+) {
+  return async (path: string, init: RequestInit) => {
+    if (init.method === 'POST' && postStatus !== null) {
+      return jsonResponse(
+        { error: { code: 'x', message: 'Proposal changed' } },
+        postStatus,
+      );
+    }
+    if (path === '/policy' && init.method === 'GET') {
+      const real = (await (
+        await tower.fetchFor(null)(path, init)
+      ).json()) as Record<string, unknown>;
+      return jsonResponse({ ...real, proposals: [proposal] });
+    }
+    return tower.fetchFor(null)(path, init);
+  };
+}
+
+describe('write conflicts and expiry on proposals and rules', () => {
+  it('reloads the policy page with a notice when an accept is refused as stale', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: policyWithProposal(tower, pendingProposal('prp_stale'), 409),
+    });
+
+    await dashboard.show('#/policy');
+    buttonNamed(root, 'Accept…').click();
+    buttonNamed(root, 'Accept proposal').click();
+
+    await vi.waitFor(() =>
+      expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+        'changed since it was loaded',
+      ),
+    );
+    expect(root.querySelector('[role="group"]')).toBeNull();
+    expect(root.querySelector('h1')?.textContent).toBe(
+      'Permissions & preferences',
+    );
+  });
+
+  it('reloads the policy page with a notice when a revoke is refused as stale', async () => {
+    const tower = seededTower();
+    await createRule(tower);
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) => {
+        if (init.method === 'POST') {
+          return jsonResponse(
+            { error: { code: 'version_conflict', message: 'Rule changed' } },
+            409,
+          );
+        }
+        return tower.fetchFor(null)(path, init);
+      },
+    });
+
+    await dashboard.show('#/policy');
+    buttonNamed(root, 'Revoke repo.write').click();
+    buttonNamed(root, 'Revoke rule').click();
+
+    await vi.waitFor(() =>
+      expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+        'changed since it was loaded',
+      ),
+    );
+    expect(root.querySelector('[role="group"]')).toBeNull();
+    expect(text(root)).toContain('Policy version');
+  });
+
+  it('shows sign-in and clears the token when an accept is rejected as unauthorized', async () => {
+    const tower = seededTower();
+    const { root, dashboard, storage } = mountFor(tower, {
+      fetchImpl: policyWithProposal(tower, pendingProposal('prp_expired'), 401),
+    });
+
+    await dashboard.show('#/policy');
+    buttonNamed(root, 'Accept…').click();
+    buttonNamed(root, 'Accept proposal').click();
+
+    await vi.waitFor(() =>
+      expect(root.querySelector('input[type="password"]')).not.toBeNull(),
+    );
+    expect(storage.getItem(TOKEN_KEY)).toBeNull();
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+      'Your session token was rejected',
+    );
+  });
+
+  it('does not show a conflict notice on a page the user moved to while the write was in flight', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const packetId = await addPacket(tower, missionId, 'Draft spec');
+    await tower.call('POST', '/decisions', {
+      dedupeKey: 'navigated',
+      category: 'scope_expansion',
+      urgency: 'normal',
+      question: 'Answer after navigating?',
+      recommendation: { alternativeId: 'approve', rationale: 'Low risk.' },
+      consequences: 'x',
+      evidence: [],
+      affectedScope: [],
+      advisory: { confidencePercent: 80 },
+      branches: [{ missionId, packetId }],
+    });
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) => {
+        if (init.method === 'POST') {
+          await gate;
+          return jsonResponse(
+            {
+              error: { code: 'version_conflict', message: 'Decision changed' },
+            },
+            409,
+          );
+        }
+        return tower.fetchFor(null)(path, init);
+      },
+    });
+
+    await dashboard.show('#/decisions');
+    buttonNamed(root, 'Answer…').click();
+    buttonNamed(root, 'Confirm answer').click();
+    await dashboard.show('#/runners');
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(root.querySelector('h1')?.textContent).toBe('Runner fleet');
+    expect(root.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('does not repeat a conflict notice on a later visit to the same page', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: policyWithProposal(tower, pendingProposal('prp_repeat'), 409),
+    });
+
+    await dashboard.show('#/policy');
+    buttonNamed(root, 'Accept…').click();
+    buttonNamed(root, 'Accept proposal').click();
+    await vi.waitFor(() =>
+      expect(root.querySelector('[role="alert"]')).not.toBeNull(),
+    );
+
+    await dashboard.show('#/runners');
+    await dashboard.show('#/policy');
+
+    expect(root.querySelector('[role="alert"]')).toBeNull();
+  });
+});
+
+describe('failure wording and the Cancel button after an error', () => {
+  it('says a failed answer may already have been applied when the network dropped', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const packetId = await addPacket(tower, missionId, 'Draft spec');
+    await tower.call('POST', '/decisions', {
+      dedupeKey: 'dropped',
+      category: 'scope_expansion',
+      urgency: 'normal',
+      question: 'Dropped?',
+      recommendation: { alternativeId: 'approve', rationale: 'Low risk.' },
+      consequences: 'x',
+      evidence: [],
+      affectedScope: [],
+      advisory: { confidencePercent: 80 },
+      branches: [{ missionId, packetId }],
+    });
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) => {
+        if (init.method === 'POST') {
+          throw new TypeError('fetch failed');
+        }
+        return tower.fetchFor(null)(path, init);
+      },
+    });
+
+    await dashboard.show('#/decisions');
+    buttonNamed(root, 'Answer…').click();
+    buttonNamed(root, 'Confirm answer').click();
+
+    await vi.waitFor(() =>
+      expect(
+        root.querySelector('[role="group"] [role="alert"]')?.textContent,
+      ).toContain('reload before retrying'),
+    );
+  });
+
+  it('does not talk about writes when a read fails', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async () => {
+        throw new TypeError('fetch failed');
+      },
+    });
+
+    await dashboard.show('#/missions');
+
+    const alert = root.querySelector('[role="alert"]')?.textContent ?? '';
+    expect(alert).toContain('Check the connection');
+    expect(alert).not.toContain('reload before retrying');
+  });
+
+  it('re-enables Cancel and Confirm after a failed answer', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const packetId = await addPacket(tower, missionId, 'Draft spec');
+    await tower.call('POST', '/decisions', {
+      dedupeKey: 'retry',
+      category: 'scope_expansion',
+      urgency: 'normal',
+      question: 'Retry me?',
+      recommendation: { alternativeId: 'approve', rationale: 'Low risk.' },
+      consequences: 'x',
+      evidence: [],
+      affectedScope: [],
+      advisory: { confidencePercent: 80 },
+      branches: [{ missionId, packetId }],
+    });
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) => {
+        if (init.method === 'POST') {
+          return jsonResponse(
+            {
+              error: {
+                code: 'internal_error',
+                message: 'Internal server error',
+              },
+            },
+            500,
+          );
+        }
+        return tower.fetchFor(null)(path, init);
+      },
+    });
+
+    await dashboard.show('#/decisions');
+    buttonNamed(root, 'Answer…').click();
+    buttonNamed(root, 'Confirm answer').click();
+
+    await vi.waitFor(() =>
+      expect(
+        root.querySelector('[role="group"] [role="alert"]')?.textContent,
+      ).toContain('Internal server error'),
+    );
+    expect(buttonNamed(root, 'Cancel').disabled).toBe(false);
+    expect(buttonNamed(root, 'Confirm answer').disabled).toBe(false);
+  });
+});
+
+describe('every view and every field', () => {
+  it('sends the token only as a bearer header on every view', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const rec = recorder(tower);
+    const { dashboard } = mountFor(tower, { fetchImpl: rec.fetchImpl });
+
+    for (const hash of [
+      '#/missions',
+      `#/missions/${missionId}`,
+      '#/runners',
+      '#/decisions',
+      '#/policy',
+      '#/integrations',
+      '#/activity',
+      '#/health',
+    ]) {
+      await dashboard.show(hash);
+    }
+
+    expect(rec.requests.length).toBeGreaterThan(8);
+    for (const { path, init } of rec.requests) {
+      expect(path).not.toContain(tower.token);
+      expect((init.headers as Record<string, string>).authorization).toBe(
+        `Bearer ${tower.token}`,
+      );
+    }
+  });
+
+  it('counts every mission, not just the first page', async () => {
+    const tower = seededTower();
+    await createMission(tower);
+    await createMission(tower);
+    const { root, dashboard } = mountFor(tower);
+
+    await dashboard.show('#/health');
+
+    expect(factValue(root, 'Missions')).toBe('2');
+  });
+
+  it('renders a runner whose capabilities field is absent', async () => {
+    const tower = seededTower();
+    await enrollRunner(tower, 'bare-runner');
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: overrideGet(tower, '/runners', (body) => ({
+        runners: body.runners.map((r: Record<string, unknown>) => {
+          const copy = { ...r };
+          delete copy.capabilities;
+          return copy;
+        }),
+      })),
+    });
+
+    await dashboard.show('#/runners');
+
+    expect(root.querySelector('[role="alert"]')).toBeNull();
+    const row = ([...root.querySelectorAll('tbody tr')] as El[]).find((tr) =>
+      tr.textContent?.includes('bare-runner'),
+    );
+    expect(row?.textContent).toContain('none');
+  });
+
+  it('renders markup in policy, integrations and activity as text', async () => {
+    const tower = seededTower();
+    const payload = '<img src=x onerror="window.__pwned=2"><b>bold</b>';
+    const views: [
+      string,
+      (path: string, init: RequestInit) => Promise<Response>,
+    ][] = [
+      [
+        '#/policy',
+        policyWithProposal(
+          tower,
+          pendingProposal('prp_xss', { action: payload }),
+          null,
+        ),
+      ],
+      [
+        '#/integrations',
+        overrideGet(tower, '/issues/sync-config', () => ({
+          configs: [
+            {
+              provider: 'github',
+              repo: payload,
+              mode: 'observe',
+              readScope: true,
+              writeScope: false,
+              version: 1,
+              updatedBy: 'x',
+              updatedAt: '2026-10-31T00:00:00.000Z',
+            },
+          ],
+        })),
+      ],
+      [
+        '#/activity',
+        overrideGet(tower, '/runners/audit', () => ({
+          records: [
+            {
+              seq: 1,
+              at: '2026-10-31T00:00:00.000Z',
+              kind: payload,
+              runnerId: null,
+              leaseId: null,
+              actorId: null,
+              detail: {},
+            },
+          ],
+        })),
+      ],
+    ];
+    for (const [hash, fetchImpl] of views) {
+      const { root, dashboard } = mountFor(tower, { fetchImpl });
+      await dashboard.show(hash);
+      expect(root.querySelector('img'), hash).toBeNull();
+      expect(root.querySelector('b'), hash).toBeNull();
+      expect(text(root), hash).toContain(payload);
+    }
+    expect(
+      (window as unknown as { __pwned?: unknown }).__pwned,
+    ).toBeUndefined();
+  });
+
+  it('treats a hostile scheme with tabs or newlines inside it as unsafe', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const hostile = [
+      'java\tscript:alert(1)',
+      'java\nscript:alert(1)',
+      'data\t:text/html,x',
+      'javascript:alert(1)',
+    ];
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: overrideGet(
+        tower,
+        `/missions/${missionId}/issue-links`,
+        () => ({
+          links: hostile.map((url, i) => ({
+            id: `lnk_${i}`,
+            url,
+            observedState: 'unknown',
+            observedSource: null,
+            polledAt: null,
+          })),
+          discrepancies: [],
+        }),
+      ),
+    });
+
+    await dashboard.show(`#/missions/${missionId}`);
+
+    const hrefs = [...root.querySelectorAll('a')].map(
+      (a) => (a as El).getAttribute('href') ?? '',
+    );
+    expect(
+      hrefs.some((href) =>
+        /^(javascript|data|vbscript):/i.test(
+          href.replace(/[\t\n\r]/g, '').trim(),
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it('shows the limits and the action in the decline and accept text', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: policyWithProposal(tower, pendingProposal('prp_text'), null),
+    });
+
+    await dashboard.show('#/policy');
+    expect(text(root)).toContain('Limits: no amount cap; all missions.');
+    buttonNamed(root, 'Accept…').click();
+    expect(root.querySelector('[role="group"]')?.textContent).toContain(
+      'repo.read on repo:app',
+    );
+  });
+
+  it('shows the accept button for a proposal that omits limits, without failing the page', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: policyWithProposal(
+        tower,
+        pendingProposal('prp_nolimits', { limits: undefined }),
+        null,
+      ),
+    });
+
+    await dashboard.show('#/policy');
+
+    expect(root.querySelector('[role="alert"]')).toBeNull();
+    expect(
+      ([...root.querySelectorAll('button')] as El[]).some(
+        (b) => b.textContent === 'Accept…',
+      ),
+    ).toBe(true);
+  });
+});

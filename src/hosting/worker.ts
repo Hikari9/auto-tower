@@ -35,8 +35,9 @@ export interface WorkerEnv {
 }
 
 const DASHBOARD_PATHS = new Map<string, string>([
-  ['/dashboard', 'index.html'],
-  ['/dashboard/', 'index.html'],
+  // The shell is requested at "/". Workers static assets answer /index.html with a 307 to "/".
+  ['/dashboard', ''],
+  ['/dashboard/', ''],
   ...WORKER_DASHBOARD_FILES.map(
     (name) => [`/dashboard/${name}`, name] as const,
   ),

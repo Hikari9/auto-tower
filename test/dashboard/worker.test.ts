@@ -38,7 +38,12 @@ const TYPES: Record<string, string> = {
 function assetsBinding(): NonNullable<WorkerEnv['ASSETS']> {
   return {
     fetch(request: Request) {
-      const rel = new URL(request.url).pathname.replace(/^\//, '');
+      const { pathname } = new URL(request.url);
+      // Workers static assets redirect /index.html to "/" (html_handling auto-trailing-slash).
+      if (pathname === '/index.html') {
+        return new Response(null, { status: 307, headers: { location: '/' } });
+      }
+      const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\//, '');
       try {
         const body = readFileSync(join(PUBLIC_DIR, rel), 'utf8');
         return new Response(body, {
@@ -150,5 +155,18 @@ describe('Node route serves the same policy', () => {
 
     expect(res.headers.get('content-security-policy')).toBe(EXPECTED_CSP);
     expect(res.headers.get('content-type')).toContain('text/javascript');
+  });
+});
+
+describe('Workers deployment config', () => {
+  it('binds the public directory as ASSETS, which the Workers entry reads', () => {
+    const toml = readFileSync(
+      join(import.meta.dirname, '../../wrangler.toml'),
+      'utf8',
+    );
+
+    expect(toml).toMatch(
+      /\[assets\]\s*\ndirectory = "public"\s*\nbinding = "ASSETS"/,
+    );
   });
 });
