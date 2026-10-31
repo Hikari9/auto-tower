@@ -57,7 +57,7 @@ export interface QuotaGuard {
 export type GuardedDatabase = SqlDatabase & { readonly quota: QuotaGuard };
 
 const ACTION =
-  'Free storage or raise the plan limit, take a backup (reads still work), then clear the guard with `pnpm ops quota-reset` or the ops_quota_reset action.';
+  'Free storage or raise the plan limit, take a backup (reads still work), then clear the guard with the reset_storage_guard tool or restart the server. It trips again at once if the store is still full.';
 
 /** Wraps a database so an exhausted quota refuses every mutation until cleared. Shares the inner handle's health signals. */
 export function guardStorage(

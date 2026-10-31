@@ -11,7 +11,7 @@ import {
 } from '../../src/ops/index.js';
 import { createPolicyService } from '../../src/policy/service.js';
 import { mission } from '../core/helpers.js';
-import { TEST_WORKSPACE } from '../helpers/tower.js';
+import { seedPrincipal, TEST_WORKSPACE } from '../helpers/tower.js';
 import { ruleInput } from '../policy/helpers.js';
 import { createFleetHarness } from './helpers.js';
 
@@ -57,7 +57,7 @@ describe('mission holds name rules only to a person or a chief of staff', () => 
   it('shows the rule id to a human and a chief of staff, and not to a runner or a provider', async () => {
     const { h, rule, missionId } = await revoked();
     const current = h.getMission(missionId);
-    const read = (viewer?: Parameters<typeof authorityHoldsFor>[4]) =>
+    const read = (viewer: Parameters<typeof authorityHoldsFor>[4]) =>
       authorityHoldsFor(h.db, h.clock.now, TEST_WORKSPACE, current, viewer);
     for (const viewer of ['human', 'chief_of_staff'] as const) {
       expect(read(viewer)[0]?.reason).toContain(rule.id);
@@ -69,6 +69,28 @@ describe('mission holds name rules only to a person or a chief of staff', () => 
       expect(holds[0]?.reason).not.toContain(rule.id);
       expect(holds[0]?.reason).not.toMatch(/policy:v\d+:rule:/);
     }
+  });
+
+  it('shows the rule id over HTTP to a person, and not to a runner token', async () => {
+    const { h, rule, missionId } = await revoked();
+    // A runner-kind token that may read missions, as a runner principal can be given.
+    const reader = seedPrincipal(h.db, { kind: 'runner', name: 'reader' });
+    const asRunner = await h.call(
+      reader.token,
+      'GET',
+      `/missions/${missionId}`,
+    );
+    expect(asRunner.status).toBe(200);
+    expect(asRunner.body.holds).toHaveLength(1);
+    expect(JSON.stringify(asRunner.body.holds)).not.toContain(rule.id);
+    const asOwner = await h.call(
+      h.owner.token,
+      'GET',
+      `/missions/${missionId}`,
+    );
+    expect(asOwner.body.holds[0].reason).toContain(rule.id);
+    const asCos = await h.call(h.cos.token, 'GET', `/missions/${missionId}`);
+    expect(asCos.body.holds[0].reason).toContain(rule.id);
   });
 
   it('keeps the rule id out of what a polling runner is told is withheld', async () => {

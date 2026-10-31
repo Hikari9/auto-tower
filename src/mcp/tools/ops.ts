@@ -1,10 +1,12 @@
 import { InputReader } from '../../core/validation.js';
+import { HaltForbiddenError } from '../../ops/halt.js';
 import {
   engageHalt,
   haltHistory,
   healthReport,
   liftHalt,
 } from '../../ops/index.js';
+import type { GuardedDatabase } from '../../ops/quota.js';
 import type { ToolDefinition } from '../tool.js';
 
 const REASON_MAX = 500;
@@ -83,6 +85,29 @@ export const opsTools: readonly ToolDefinition[] = [
           }),
         },
       };
+    },
+  },
+  {
+    name: 'reset_storage_guard',
+    title: 'Clear the storage guard',
+    description:
+      'Clears the storage guard after an operator freed space or raised the limit. Until then every mutation is refused. If the store is still full the guard trips again on the next write. Only a person can.',
+    readOnly: false,
+    scopes: ['policy:write'],
+    material: true,
+    effect: 'Lets writes be tried against the store again.',
+    properties: {},
+    run(ctx, args) {
+      new InputReader(args).finish();
+      if (ctx.caller.actor.kind !== 'human') {
+        throw new HaltForbiddenError(ctx.caller.actor.kind);
+      }
+      const guard = (ctx.services.db as Partial<GuardedDatabase>).quota;
+      if (guard === undefined) {
+        return { data: { guarded: false, tripped: false } };
+      }
+      guard.reset();
+      return { data: { guarded: true, tripped: guard.tripped } };
     },
   },
 ];

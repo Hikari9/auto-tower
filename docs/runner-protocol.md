@@ -70,6 +70,10 @@ A lease carries a **fencing token** (`fence`), a per-scope counter that only gro
 
 The token is compared first, so a token from before a reconcile or reassignment is always `lease_fenced`.
 
+**A lost race is a 409.** Two claims on one execution scope or attempt cannot both insert a lease: the unique indexes below refuse the second. When that refusal reaches the claim, the claim rolls back and answers `409 claim_conflict` ("Poll again"), not a 500. Nothing is left behind, and the next poll succeeds or reports the real reason under `withheld`. `test/fleet/double-claim-process.test.ts` races two claimers in separate processes, each with its own connection to one database file.
+
+**An Office receipt tells the runner what became of it.** When a receipt body claims the `tower.office.*` contract, the response adds `office: { ingested: true }`, or `office: { ingested: false, reason, message }` when Tower stored the receipt but read no verdict from it (`invalid_receipt`, `unsupported_contract`, `conflict`, `failed`). A runner that sees `ingested: false` must not treat the work as reviewed. A receipt that does not claim that contract has no `office` field.
+
 **Receipts are idempotent.** A receipt carries a `receiptId`, unique per runner. Repeating the same receipt (same lease, outcome, summary, evidence) returns the first result with `replayed: true` and reports to the mission core once. The same id with a different body is `receipt_conflict`. The repeat is answered before lease checks, because the first receipt closed the lease. Progress is ordered by `seq` and idempotent the same way.
 
 ## Liveness, recovery and reassignment

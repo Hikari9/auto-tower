@@ -271,6 +271,7 @@ describe('tool declarations', () => {
       'request_dispatch',
       'request_expansion',
       'request_reconciliation',
+      'reset_storage_guard',
       'resume_workspace',
       'revoke_policy',
       'set_feature_flag',

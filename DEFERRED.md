@@ -30,7 +30,7 @@ Items here are real, planned, and intentionally not done. Each names its **adapt
 6. **Apply migrations.** `pnpm dlx wrangler d1 migrations apply auto-tower --remote`. Run the same command against a preview or staging database first. Confirm `schema_migrations` matches the local run.
 7. **Bootstrap an owner token.** Issue it locally against a copy of the schema, or add a one-time bootstrap route. Store only the digest. Do not paste the raw token into logs or chat.
 8. **Deploy.** `pnpm dlx wrangler deploy`, after explicit approval. Then check `GET /health` and one authenticated route.
-9. **Schedule the sweep.** Add a cron trigger to `wrangler.toml` (`[triggers] crons = ["* * * * *"]`) and a `scheduled` handler in `src/hosting/worker.ts` that calls `runSweep` (`src/ops/sweep.ts`) over the D1 adapter. Cron's finest grain is one minute, so lease recovery waits up to a minute on this host. The Node server sweeps on an interval.
+9. **Supply the sweep.** The cron trigger is already declared in `wrangler.toml` (every minute) and `scheduled` in `src/hosting/worker.ts` runs `env.SWEEP`. Build the D1-backed app in the Worker, and pass `SWEEP: () => runSweep(db, fleet)` (`src/ops/sweep.ts`). Cron's finest grain is one minute, so lease recovery waits up to a minute on this host. Wrap the D1 database in `guardStorage` as the Node host does.
 10. **Drill the restore.** `pnpm ops backup` and `restore` work on a SQLite file, not on D1. Test D1 Time Travel on a scratch database first: restore to a timestamp, then read a mission. Do the drill in `docs/backup-restore.md` against the restored copy.
 11. **Roll back.** Use `wrangler rollback` for the Worker. For data, use D1 Time Travel to restore to a timestamp before the change, after the drill in step 10.
 
@@ -177,17 +177,21 @@ Items here are real, planned, and intentionally not done. Each names its **adapt
 5. **Treat an engine-named reviewer as `missing`** for a high-risk mission once the route exists. Keep the old path off by default.
 6. **Roll back** by disabling the reviewer principal (`pnpm ops disable-principal`). High-risk missions then wait for a person's review.
 
-## Hosting wiring for operations (T9)
+## HTTP routes for flag history and operational health (T9)
 
-**Status:** Deferred, pending T8's changes to `src/api/` and `src/hosting/` landing. Everything in `src/ops/` is built and tested. These hooks into the hosts are not:
+**Status:** Deferred, optional. Both are available over MCP (`read_audit` with `source: feature_flags`, and `read_health`) and on the host (`pnpm ops status`). There is no plain HTTP route for either, so a client that does not speak MCP cannot read them. `/health` stays liveness only on purpose.
 
-- the quota guard (`guardStorage`) around the database in `startHost`,
-- the sweep interval in the Node server (`startSweepInterval`) and the cron `scheduled` handler in the Workers entry,
-- an authenticated HTTP route for health (`read_health` is MCP and `pnpm ops status` is the CLI),
-- the HTTP routes that pass a webhook's payload hash, the `overrideUnknownBlockers` flag, the viewer kind for holds, and the Office ingestion outcome into the services that already accept them.
+**Adapter:** two routes in `src/api/routes/` (for example `GET /policy/flag-history` with `policy:read`, and `GET /ops/health` with `mission:read`), calling `createFlagServiceFor(...).history` and `healthReport` from `src/ops/`.
 
-**Adapter:** `src/hosting/host.ts`, `src/hosting/worker.ts` and `src/api/routes/`, calling `src/ops/` and the services.
+**Fake:** `createIssueApi`-style harnesses in `test/api/` and `createMcpEnv`, which already exercise both services.
 
-**Fake:** `test/e2e/world.ts`, which wires the same services in-process, and the Hono `app.request` the route tests use.
+**Activation steps:**
 
-**Activation steps:** see the follow-up list in the task that wires them. Each is a few lines, and each has a test already waiting in `test/ops/` or `test/issues/`.
+1. **Decide the audience.** Health names signals and halt reasons, so it needs a token and a read scope. It must never move onto the public `/health`.
+2. **Add the routes** as read-only `RouteSpec`s with declared scopes, so `test/api/*` access tables list them.
+3. **Test** that a token without the scope is refused, that a runner sees no rule ids, and that the output matches the MCP tools.
+4. **Document** them in `docs/operations.md`, in the table of where to look.
+
+## Auto-Office D1 sweep supply (T9)
+
+**Status:** Deferred with the D1 adapter. The cron trigger is declared in `wrangler.toml` and `scheduled` in `src/hosting/worker.ts` runs `env.SWEEP`. Nothing supplies `SWEEP` yet, because there is no D1-backed store to sweep. See step 9 of the Cloudflare entry above.

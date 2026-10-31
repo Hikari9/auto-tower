@@ -173,6 +173,55 @@ describe('signature and delivery checks', () => {
     ).toHaveLength(1);
   });
 
+  it('gives a captured signed body no second effect when it is replayed under a new delivery id', async () => {
+    const api = createIssueApi();
+    const driver = await completedMission(api);
+    const body = encode(PAYLOAD());
+    const first = await send(api, body, { delivery: 'D-A' });
+    const history = api.h.issues.history('ws_test', driver.id, {
+      afterSeq: 0,
+      limit: 100,
+    }).length;
+    // The attacker has the body and its valid signature, and picks fresh delivery ids.
+    const replays = await Promise.all(
+      ['D-B', 'D-C', 'D-D'].map((id) => send(api, body, { delivery: id })),
+    );
+
+    expect(((await first.json()) as { status: string }).status).toBe(
+      'processed',
+    );
+    for (const replay of replays) {
+      expect(replay.status).toBe(200);
+      expect(((await replay.json()) as { status: string }).status).toBe(
+        'duplicate',
+      );
+    }
+    expect(
+      api.h.issues.discrepancies('ws_test', driver.id, 'all'),
+    ).toHaveLength(1);
+    expect(
+      api.h.issues.history('ws_test', driver.id, { afterSeq: 0, limit: 100 }),
+    ).toHaveLength(history);
+    expect(
+      api.h.db.get<{ n: number }>(
+        'SELECT COUNT(*) AS n FROM webhook_deliveries',
+      )?.n,
+    ).toBe(1);
+  });
+
+  it('still processes a different signed body under a new delivery id', async () => {
+    const api = createIssueApi();
+    const driver = await completedMission(api);
+    await send(api, encode(PAYLOAD('reopened')), { delivery: 'D-1' });
+    const other = await send(api, encode(PAYLOAD('closed')), {
+      delivery: 'D-2',
+    });
+    expect(((await other.json()) as { status: string }).status).toBe(
+      'processed',
+    );
+    expect(driver.refresh().state).toBeDefined();
+  });
+
   it('refuses a verified request without a delivery id, with invalid JSON, or that is too large', async () => {
     const api = createIssueApi();
     const body = encode(PAYLOAD());

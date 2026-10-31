@@ -47,7 +47,7 @@ When the store refuses a write because it is out of space or over its plan limit
 - **Nothing is half done and nothing is falsely reported.** A mission moves by appending an event, a claim writes its lease, and an outbound issue close writes its marker before it calls the provider. A store that cannot take those writes cannot be told that work happened, so the work does not start. A transaction that hits the limit rolls back as a whole.
 - **The signal `storage.quota_exhausted` stays up** until an operator clears it, even if space comes back by itself. Clearing is a decision, not a timer.
 
-To recover: free space or raise the plan limit, take a backup (`pnpm ops backup`), then clear the guard. In-process this is `db.quota.reset()`, which the server exposes through the `ops` tooling when it is wired in `src/hosting/host.ts`. A restart also clears it, and the guard trips again at once if the store is still full.
+To recover: free space or raise the plan limit, take a backup (`pnpm ops backup`), then clear the guard with the MCP tool `reset_storage_guard` (a person only, `confirm: true`) or by restarting the server. The guard trips again at once if the store is still full. The Node server runs on the guarded database (`startHost`).
 
 Tool-call audit rows are written on a best-effort basis, so while the guard is tripped the audit cannot record the refusals themselves. The health signal is the record of that window.
 
@@ -76,7 +76,7 @@ Resuming does not restore anything that was revoked. Dispatch runs again under t
 A mission should never wait for a runner to poll before it moves. A sweep ticks every workspace on an interval: it expires and recovers leases, then runs the scheduler.
 
 - **Node server:** an interval, default 15 seconds (`TOWER_SWEEP_INTERVAL_MS`, `0` turns it off). The timer does not keep the process alive, and a sweep still running when the next tick fires is skipped, not stacked.
-- **Workers:** a cron trigger calls the same sweep. Add the trigger to `wrangler.toml` when the D1 host is activated (`DEFERRED.md`).
+- **Workers:** a cron trigger (`[triggers]` in `wrangler.toml`, every minute) calls `scheduled` in `src/hosting/worker.ts`, which runs the sweep the host supplies as `env.SWEEP`. Until the D1 adapter exists there is no store and it does nothing (`DEFERRED.md`). A failing sweep fails the trigger, so Cloudflare records it.
 - One workspace failing does not stop the others. A failure raises `ops.sweep_failed` with the error name only, never its message.
 
 A halted workspace is swept for lease expiry and not scheduled.
