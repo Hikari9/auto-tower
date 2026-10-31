@@ -72,7 +72,8 @@ newer major fails with `unsupported_major` before any field is read. Unknown fie
 `factsOf` reads what Tower takes from a receipt:
 
 - **Independent review is satisfied** only when the reviewer is not a producer. The producers are
-  Tower's runner principal and the engine's executor id. Identities compare case-insensitively,
+  every runner principal that held the attempt, including each one it was reassigned from, and the
+  engine's executor id. Identities compare case-insensitively,
   ignoring surrounding space. A reviewer equal to a producer is recorded as `self-reviewed` and
   satisfies nothing.
 - **Self-verification** passing is needed for any completion, and is not review.
@@ -237,18 +238,19 @@ The implementation is in `src/fleet/broker.ts` (`authorityReason`, `recordClaimR
 
 ## Production wiring
 
-`createApp` and the mission route register `createOfficeReviewGuard` on the core they build. The runner receipt route ingests a `tower.office.v1` receipt into `office_receipts` after Tower has accepted and stored the receipt. An ingestion error is logged, and the runner's receipt is not rejected. `test/adapters/office/production-gate.test.ts` drives the whole path through the routes: a high-risk mission is refused without an independent review, and completes once one is recorded.
+`createApp` and the mission route register `createOfficeReviewGuard` on the core they build. The runner receipt route ingests a `tower.office.v1` receipt into `office_receipts` after Tower has accepted and stored the receipt. An ingestion error is logged, and the runner's receipt is not rejected. The response says what became of the verdict: for a body that claims the Office contract, `office.ingested` is `false` with a `reason` (`invalid_receipt`, `unsupported_contract`, `conflict` or `failed`) when Tower stored the receipt but read no verdict from it. A runner that sees it must not treat the work as reviewed, and `PollReport.officeNotIngested` lists those leases. `test/adapters/office/production-gate.test.ts` drives the whole path through the routes: a high-risk mission is refused without an independent review, and completes once one is recorded.
 
 ## Residual risks
 
 These are accepted, and the code does not mitigate them.
 
 - **Engine-named reviewer.** The engine supplies the reviewer identity. Tower compares it with the producer identities, but it cannot confirm the reviewer is a separate session. Independence is only as strong as the engine's own report. A reviewer principal that Tower can verify is not defined by this contract.
+  - **Path to a Tower-verifiable reviewer.** Make the reviewer a principal Tower knows. (1) Add a `reviewer` principal kind, or a `provider_adapter` principal named for the review engine, with its own credential, enrolled by a person the way a runner is. (2) Have that principal post its verdict to Tower itself, as a signed receipt bound to the attempt id, instead of the producing runner relaying it inside its own receipt. (3) Compare principal ids, which Tower issues, in place of the engine's free-text name, and refuse a review whose principal also held the attempt. (4) Treat an engine-named reviewer as `missing` for a high-risk mission once step 2 is in place. Until then, a person who needs real independence for a high-risk mission reviews it and records the verdict through a Tower principal, and the release checklist asks for that (docs/release-review.md).
 - **Process table.** The goal is one argument to `office`, so anyone who can list processes on the host can read the packet text while the run is alive. Run the runner only on a single-user host, or keep secrets out of packet instructions.
 - **Same-user engine.** The engine runs as the runner's user. It can read any file that user can read. Keeping the state file outside the repository limits what the engine sees by default, and it does not stop a same-user process.
 - **Enrollment token.** Registration redeems the token before the credential is saved. If the save fails after a successful redeem, the credential is lost, and a human must issue a new enrollment.
 - **Durability.** The state write is fsynced, but on macOS `fsync` does not force the disk cache. A power loss can still lose the most recent save, and the runner then reconciles from Tower's record.
-- **Scopeless human packets.** A human-authorized packet with no scope is evaluated under `packet:<id>`, so no scope-specific deny rule or runner `allowedScopes` narrows it. T9 will require runner-dispatched packets to declare a scope.
+- **Packets without a scope.** Tower refuses to authorize a packet that declares no execution scope, for a person and a chief of staff alike, so every packet a runner can claim has a scope for scope-specific deny rules and a runner's `allowedScopes` to act on. A packet added without one waits, unauthorized, until someone gives it a scope.
 - **Running work after revocation.** The claim-time check governs new grants and re-sent assignments. A lease already running continues until it ends, as `docs/runner-protocol.md` describes for quota and scope changes.
 - **Pause.** The runner does not act on a `pause` directive. Tower withholds new work from a paused runner, and the runner's in-flight step runs to its end.
 - **Homoglyphs.** Look-alike letters from other scripts are not folded in identity comparison (see Identities above).
