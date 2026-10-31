@@ -3,7 +3,10 @@ import { DEFAULT_PERSONA, mountDashboard } from './app.js';
 /** Persona text is data. Missing or malformed values fall back to the defaults. */
 export async function loadPersona() {
   try {
-    const res = await fetch('/dashboard/persona.json', { cache: 'no-store' });
+    const res = await fetch('/dashboard/persona.json', {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(3000),
+    });
     if (!res.ok) {
       return DEFAULT_PERSONA;
     }

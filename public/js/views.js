@@ -24,6 +24,13 @@ import {
 
 const LIST_LIMIT = 100;
 let confirmSeq = 0;
+/** Unsaved choice and note per decision id. A refresh rebuilds the card, so these carry over. */
+const decisionDrafts = new Map();
+
+/** @param {string} id @param {{choice?: string, note?: string}} patch */
+function rememberDraft(id, patch) {
+  decisionDrafts.set(id, { ...decisionDrafts.get(id), ...patch });
+}
 
 /** @param {string} iso */
 function when(iso) {
@@ -178,7 +185,8 @@ function confirmAction({
                   await ctx.refresh();
                   return;
                 }
-                confirm.disabled = false;
+                // Only a server answer proves the write did not happen. After a network failure, Confirm stays off until reload.
+                confirm.disabled = !(caught instanceof ApiError);
                 cancel.disabled = false;
                 error.textContent = describeWriteError(caught);
               }
@@ -337,7 +345,7 @@ export function renderMission(ctx, params) {
         mission.attempts.map((a) => [a.packetId, a]),
       );
       const openForMission = decisions.decisions.filter((d) =>
-        d.links.some(
+        (d.links ?? []).some(
           (l) => l.missionId === mission.id && l.status === 'blocked',
         ),
       );
@@ -680,8 +688,11 @@ export function renderDecisions(ctx) {
 /** @param {Context} ctx @param {any} decision */
 function decisionCard(ctx, decision) {
   const titleId = `decision-${decision.id}`;
+  const alternatives = decision.alternatives ?? [];
+  const links = decision.links ?? [];
+  const draft = decisionDrafts.get(decision.id) ?? {};
   const choice = h('fieldset', null, h('legend', null, 'Choose an answer'));
-  for (const alt of decision.alternatives) {
+  for (const alt of alternatives) {
     const radioId = `${titleId}-${alt.id}`;
     choice.append(
       h(
@@ -692,7 +703,8 @@ function decisionCard(ctx, decision) {
           name: `${titleId}-choice`,
           id: radioId,
           value: alt.id,
-          checked: alt.id === decision.alternatives[0]?.id,
+          checked: alt.id === (draft.choice ?? alternatives[0]?.id),
+          onchange: () => rememberDraft(decision.id, { choice: alt.id }),
         }),
         h(
           'label',
@@ -708,7 +720,9 @@ function decisionCard(ctx, decision) {
     id: `${titleId}-note`,
     rows: '2',
     maxlength: '2000',
+    oninput: () => rememberDraft(decision.id, { note: note.value }),
   });
+  note.value = draft.note ?? '';
   const status = h('p', { role: 'status', class: 'meta' });
   const submit = h(
     'button',
@@ -716,7 +730,7 @@ function decisionCard(ctx, decision) {
       type: 'button',
       onclick: () => {
         const selected = choice.querySelector('input:checked');
-        const alt = decision.alternatives.find((a) => a.id === selected?.value);
+        const alt = alternatives.find((a) => a.id === selected?.value);
         if (!alt) {
           status.textContent = 'Choose an answer first.';
           return;
@@ -788,7 +802,7 @@ function decisionCard(ctx, decision) {
     h(
       'p',
       { class: 'meta' },
-      `Blocks ${decision.links.filter((l) => l.status === 'blocked').length} branch(es). Requested by ${decision.createdBy} at ${when(decision.createdAt)}.`,
+      `Blocks ${links.filter((l) => l.status === 'blocked').length} branch(es). Requested by ${decision.createdBy} at ${when(decision.createdAt)}.`,
     ),
     h(
       'form',
@@ -829,6 +843,7 @@ function confirmButton(ctx, decision, alt, note, error, cancel) {
               note: note.value.trim() || null,
             },
           );
+          decisionDrafts.delete(decision.id);
           await ctx.refresh();
         } catch (caught) {
           if (needsReload(caught)) {
@@ -836,7 +851,8 @@ function confirmButton(ctx, decision, alt, note, error, cancel) {
             await ctx.refresh();
             return;
           }
-          button.disabled = false;
+          // A network failure may have applied the answer. Keep Confirm off until reload.
+          button.disabled = !(caught instanceof ApiError);
           cancel.disabled = false;
           error.textContent = describeWriteError(caught);
         }
@@ -901,7 +917,7 @@ function rulesTable(ctx, rules) {
       rule.resource,
       rule.scope,
       rule.maxRisk,
-      rule.grantee.kind ?? 'any',
+      rule.grantee?.kind ?? 'any',
       rule.expiresAt ? when(rule.expiresAt) : 'never',
       confirmAction({
         trigger: `Revoke ${rule.action}`,
@@ -942,7 +958,9 @@ function limitsText(limits) {
   const { maxAmount = null, missionIds = null } = limits;
   const amount = maxAmount === null ? 'no amount cap' : `up to ${maxAmount}`;
   const missions =
-    missionIds === null ? 'all missions' : `missions ${missionIds.join(', ')}`;
+    missionIds === null || missionIds === undefined
+      ? 'all missions'
+      : `missions ${missionIds.join(', ')}`;
   return `Limits: ${amount}; ${missions}.`;
 }
 

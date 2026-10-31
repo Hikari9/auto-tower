@@ -1,7 +1,21 @@
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createApp, ROUTES } from '../../src/api/app.js';
 import { dashboardRoutes } from '../../src/api/routes/dashboard.js';
 import { openTestDatabase, seedPrincipal } from '../helpers/tower.js';
+
+/** The policy the Node route sends. Written out so a change to the header fails here. */
+const EXPECTED_CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self'",
+  "img-src 'self' data:",
+  "connect-src 'self'",
+  "base-uri 'none'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join('; ');
 
 function appWithDashboard() {
   const db = openTestDatabase();
@@ -20,10 +34,9 @@ describe('dashboard shell', () => {
 
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/html');
-    expect(res.headers.get('content-security-policy')).toContain(
-      "script-src 'self'",
-    );
+    expect(res.headers.get('content-security-policy')).toBe(EXPECTED_CSP);
     expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(res.headers.get('referrer-policy')).toBe('no-referrer');
     const html = await res.text();
     expect(html).toContain(
       'name="viewport" content="width=device-width, initial-scale=1"',
@@ -32,6 +45,8 @@ describe('dashboard shell', () => {
       '<script type="module" src="/dashboard/js/boot.js">',
     );
     expect(html).not.toMatch(/<script(?![^>]*\ssrc=)/);
+    // The policy has no 'unsafe-inline', so inline styles and event handler attributes would be blocked anyway.
+    expect(html).not.toMatch(/<style|\sstyle=|\son[a-z]+=/i);
   });
 
   it('answers /dashboard/ the same as /dashboard', async () => {
@@ -54,10 +69,9 @@ describe('dashboard shell', () => {
     expect(style.headers.get('content-type')).toContain('text/css');
     expect(persona.headers.get('content-type')).toContain('application/json');
     for (const res of [script, style, persona]) {
-      expect(res.headers.get('content-security-policy')).toContain(
-        "default-src 'self'",
-      );
+      expect(res.headers.get('content-security-policy')).toBe(EXPECTED_CSP);
       expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
     }
     expect(await persona.json()).toMatchObject({
       name: expect.any(String),
@@ -80,7 +94,9 @@ describe('dashboard shell', () => {
     ]) {
       const res = await app.request(path);
       expect(res.status, path).toBe(404);
-      expect(await res.text(), path).not.toContain('auto-tower');
+      expect(await res.json(), path).toEqual({
+        error: { code: 'not_found', message: 'Route not found' },
+      });
     }
   });
 
@@ -103,5 +119,19 @@ describe('dashboard shell', () => {
 
     expect(css).toContain('@media (min-width: 720px)');
     expect(css).toMatch(/\.table-wrap\s*\{[^}]*overflow-x:\s*auto/);
+  });
+});
+
+describe('client code never parses markup', () => {
+  it('builds the DOM with createElement and textContent only, with no HTML sinks', () => {
+    const dir = join(import.meta.dirname, '../../public/js');
+    const sinks =
+      /innerHTML|outerHTML|insertAdjacentHTML|document\.write|srcdoc|createContextualFragment|DOMParser/;
+    const files = readdirSync(dir).filter((name) => name.endsWith('.js'));
+
+    expect(files.length).toBeGreaterThan(0);
+    for (const file of files) {
+      expect(readFileSync(join(dir, file), 'utf8'), file).not.toMatch(sinks);
+    }
   });
 });

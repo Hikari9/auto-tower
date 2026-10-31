@@ -52,6 +52,15 @@ function notConfigured(message: string): Response {
   );
 }
 
+/** Decodes the path the way the Node router does (Hono applies decodeURI). Malformed input stays raw and misses the allowlist. */
+function decodePath(pathname: string): string {
+  try {
+    return decodeURI(pathname);
+  } catch {
+    return pathname;
+  }
+}
+
 async function serveDashboard(
   request: Request,
   env: WorkerEnv,
@@ -69,7 +78,8 @@ async function serveDashboard(
       { status: 404 },
     );
   }
-  return new Response(upstream.body, {
+  // HEAD gets the same headers as GET and no body, as the Node router answers it.
+  return new Response(request.method === 'HEAD' ? null : upstream.body, {
     headers: {
       'content-type':
         upstream.headers.get('content-type') ?? 'application/octet-stream',
@@ -83,9 +93,10 @@ async function serveDashboard(
 
 export default {
   fetch(request?: Request, env: WorkerEnv = {}): Response | Promise<Response> {
-    const pathname = request === undefined ? '' : new URL(request.url).pathname;
+    const pathname =
+      request === undefined ? '' : decodePath(new URL(request.url).pathname);
     if (
-      request?.method === 'GET' &&
+      (request?.method === 'GET' || request?.method === 'HEAD') &&
       (pathname === '/dashboard' || pathname.startsWith('/dashboard/'))
     ) {
       const file = DASHBOARD_PATHS.get(pathname);

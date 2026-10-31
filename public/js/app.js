@@ -54,9 +54,36 @@ const ROUTES = [
     label: 'Mission Overview',
     view: 'mission',
     match: /^\/missions\/([^/]+)$/,
-    params: (m) => ({ id: decodeURIComponent(m[1] ?? '') }),
+    params: (m) => {
+      const id = decodeURIComponent(m[1] ?? '');
+      // `.` and `..` survive encodeURIComponent and normalize away in the request path.
+      if (id === '.' || id === '..') {
+        throw new Error('not a mission id');
+      }
+      return { id };
+    },
   },
 ];
+
+/**
+ * Session storage when the browser grants it. Otherwise an in-memory copy, so the
+ * dashboard still works, with the token kept only for this page load.
+ */
+function sessionTokenStore() {
+  try {
+    const store = globalThis.sessionStorage;
+    store.getItem(TOKEN_KEY);
+    return store;
+  } catch {
+    const memory = new Map();
+    return {
+      getItem: (/** @type {string} */ key) => memory.get(key) ?? null,
+      setItem: (/** @type {string} */ key, /** @type {string} */ value) =>
+        memory.set(key, value),
+      removeItem: (/** @type {string} */ key) => memory.delete(key),
+    };
+  }
+}
 
 /** Reads the route from a hash such as `#/missions/msn_1`. An empty hash goes to the overview. An unknown path returns null. */
 export function resolveRoute(hash) {
@@ -92,7 +119,7 @@ export function resolveRoute(hash) {
 export function mountDashboard({
   root,
   fetchImpl,
-  storage = globalThis.sessionStorage,
+  storage = sessionTokenStore(),
   persona = DEFAULT_PERSONA,
 }) {
   const api = createApiClient({
@@ -129,7 +156,19 @@ export function mountDashboard({
   const header = h(
     'header',
     { class: 'site-header' },
-    h('a', { class: 'skip', href: '#main' }, 'Skip to content'),
+    h(
+      'a',
+      {
+        class: 'skip',
+        href: '#main',
+        // Focus moves to main. The hash stays put, so the link does not route to "#main".
+        onclick: (/** @type {Event} */ event) => {
+          event.preventDefault();
+          main.focus();
+        },
+      },
+      'Skip to content',
+    ),
     h(
       'div',
       { class: 'brand' },

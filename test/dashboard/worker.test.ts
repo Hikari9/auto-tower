@@ -89,16 +89,31 @@ describe('Workers entry serves the dashboard', () => {
     expect(script.status).toBe(200);
     expect(script.headers.get('content-type')).toContain('text/javascript');
     expect(persona.headers.get('content-type')).toContain('application/json');
+    for (const res of [script, persona]) {
+      expect(res.headers.get('content-security-policy')).toBe(EXPECTED_CSP);
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+    }
   });
 
   it('refuses paths outside its file list, even when the binding has them', async () => {
-    const env = { ASSETS: assetsBinding() };
+    const binding = assetsBinding();
+    const env = { ASSETS: binding };
 
     for (const path of [
       '/dashboard/secret.txt',
       '/dashboard/js%2f..%2f..%2fpackage.json',
       '/dashboard/constructor',
+      '/dashboard/js/app.d.ts',
+      '/dashboard/js/boot.d.ts',
     ]) {
+      if (path.endsWith('.d.ts')) {
+        // The binding serves these, so the 404 below can only come from the allowlist.
+        const direct = await binding.fetch(
+          new Request(`${origin}${path.replace('/dashboard', '')}`),
+        );
+        expect(direct.status, `binding serves ${path}`).toBe(200);
+      }
       expect(
         (await worker.fetch(new Request(`${origin}${path}`), env)).status,
         path,
@@ -168,6 +183,34 @@ describe('Workers deployment config', () => {
     expect(toml).toMatch(
       /\[assets\]\s*\ndirectory = "public"\s*\nbinding = "ASSETS"/,
     );
+  });
+});
+
+describe('Workers HEAD and encoded paths match the Node router', () => {
+  it('answers HEAD with the shell headers and no body', async () => {
+    const res = await worker.fetch(
+      new Request(`${origin}/dashboard`, { method: 'HEAD' }),
+      { ASSETS: assetsBinding() },
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-security-policy')).toBe(EXPECTED_CSP);
+    expect(await res.text()).toBe('');
+  });
+
+  it('decodes an encoded file name the way the Node router does', async () => {
+    const app = createApp({ db: openTestDatabase() }, [
+      ...ROUTES,
+      ...dashboardRoutes,
+    ]);
+    const path = '/dashboard/styles%2Ecss';
+
+    expect((await app.request(path)).status).toBe(200);
+    const res = await worker.fetch(new Request(`${origin}${path}`), {
+      ASSETS: assetsBinding(),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/css');
   });
 });
 

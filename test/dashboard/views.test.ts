@@ -6,6 +6,7 @@ import {
   TOKEN_KEY,
 } from '../../public/js/app.js';
 import { loadPersona } from '../../public/js/boot.js';
+import { LEASE_STATES } from '../../public/js/status.js';
 import {
   addPacket,
   createMission,
@@ -132,11 +133,11 @@ describe('Mission Overview', () => {
     expect(text(root)).toContain('Draft');
     const table = root.querySelector('table');
     expect(table?.querySelector('caption')?.textContent).toBe('Missions');
-    expect(
-      [...(table?.querySelectorAll('th') ?? [])].every(
-        (th) => th.getAttribute('scope') === 'col',
-      ),
-    ).toBe(true);
+    const headers = [...(table?.querySelectorAll('th') ?? [])];
+    expect(headers.length).toBeGreaterThan(0);
+    expect(headers.every((th) => th.getAttribute('scope') === 'col')).toBe(
+      true,
+    );
     expect(
       root
         .querySelector('[role="region"][aria-label="Missions"]')
@@ -198,6 +199,9 @@ describe('Mission Detail', () => {
 
     const blocked = root.querySelector('section.blocked');
     expect(blocked?.getAttribute('aria-labelledby')).toBe('blocked-title');
+    expect(root.querySelector('#blocked-title')?.textContent).toBe(
+      'Why this is blocked',
+    );
     expect(blocked?.textContent).toContain('Build it is blocked by Draft spec');
     const row = [...root.querySelectorAll('tbody tr')].find((tr) =>
       tr.textContent?.includes('Build it'),
@@ -513,12 +517,20 @@ describe('Integrations, Activity and Health', () => {
     expect(text(root)).toContain('link-only');
   });
 
-  it('lists fleet audit records', async () => {
+  it('lists fleet audit records and policy history', async () => {
     const tower = seededTower();
     await enrollRunner(tower, 'audited-runner');
+    await createRule(tower);
     const { root, dashboard } = mountFor(tower);
 
     await dashboard.show('#/activity');
+
+    const history = [
+      ...root.querySelectorAll('[aria-label="Policy history"] tbody tr'),
+    ] as El[];
+    expect(history.length).toBeGreaterThan(0);
+    expect(history[0].querySelectorAll('td')[0].textContent).toMatch(/^\d+$/);
+    expect(history[0].querySelectorAll('td')[3].textContent).not.toBe('');
 
     expect(
       root.querySelector(
@@ -538,7 +550,7 @@ describe('Integrations, Activity and Health', () => {
 
     await dashboard.show('#/health');
 
-    expect(text(root)).toContain('ok');
+    expect(factValue(root, 'API')).toBe('ok');
     expect(text(root)).toContain('Missions1');
     expect(text(root)).not.toContain('ws_test');
   });
@@ -558,6 +570,7 @@ describe('navigation and accessibility', () => {
       'Sections',
     );
     expect(root.querySelector('.skip')?.getAttribute('href')).toBe('#main');
+    expect(root.querySelector('#main')?.tagName).toBe('MAIN');
     expect(document.activeElement?.tagName).toBe('H1');
   });
 
@@ -588,8 +601,20 @@ describe('navigation and accessibility', () => {
     await dashboard.show('#/missions');
     expect(root.querySelector('.brand-name')?.textContent).toBe('Pilot Desk');
 
-    const other = mountFor(tower);
-    await other.dashboard.show('#/missions');
+    // The rendered pages carry the configured persona and no name from the build.
+    for (const hash of [
+      '#/missions',
+      '#/runners',
+      '#/decisions',
+      '#/policy',
+      '#/integrations',
+      '#/activity',
+      '#/health',
+    ]) {
+      const page = mountFor(tower);
+      await page.dashboard.show(hash);
+      expect(text(page.root), hash).not.toMatch(/rico/i);
+    }
     expect(DEFAULT_PERSONA.name).not.toMatch(/rico/i);
   });
 });
@@ -623,7 +648,7 @@ describe('evidence and state labels', () => {
     const tower = seededTower();
     const missionId = await createMission(tower);
     const reported = await addPacket(tower, missionId, 'Reported task');
-    const verified = await addPacket(tower, missionId, 'Verified task');
+    await addPacket(tower, missionId, 'Verified task');
     const { root, dashboard } = mountFor(tower, {
       fetchImpl: overrideGet(tower, `/missions/${missionId}`, (body) => {
         const packets = body.mission.packets.map(
@@ -672,7 +697,6 @@ describe('evidence and state labels', () => {
     expect(root.querySelector('[data-evidence="verified"]')?.textContent).toBe(
       'Verified by Tower',
     );
-    expect(verified).not.toBe(reported);
     expect(text(root)).toContain('Looks done');
     expect(text(root)).toContain('succeeded (self-reported): Looks done');
   });
@@ -711,6 +735,9 @@ describe('evidence and state labels', () => {
 
     expect(root.querySelector('section.blocked')?.textContent).toContain(
       'No runner has claimed this mission',
+    );
+    expect(root.querySelector('section.blocked')?.textContent).not.toMatch(
+      /in progress|currently running|work is/i,
     );
     expect(
       root.querySelector('[data-state="waiting-runner"]')?.textContent,
@@ -2221,7 +2248,11 @@ describe('conflict notices, deterministically', () => {
     buttonNamed(root, 'Confirm answer').click();
     await dashboard.show('#/runners');
     await done;
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() =>
+      expect(root.querySelector('h1')?.textContent).toBe('Runner fleet'),
+    );
+    // The stale write's notice would land after the page settles, so allow a few turns to pass.
+    await new Promise((resolve) => setTimeout(resolve, 20));
 
     expect(root.querySelector('h1')?.textContent).toBe('Runner fleet');
     expect(root.querySelector('[role="alert"]')).toBeNull();
@@ -2517,5 +2548,283 @@ describe('authority holds on Mission Detail', () => {
       [...root.querySelectorAll('section.blocked li')] as El[]
     ).find((li) => li.textContent?.includes('does not name a current rule'));
     expect(line?.textContent).toContain(new Date(hold.at).toLocaleString());
+  });
+});
+
+// --- Self-review round: skip link, identifiers, writes, drafts, filters -------
+
+// biome-ignore lint/suspicious/noExplicitAny: API JSON is reshaped per test
+type Body = Record<string, any>;
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+describe('skip link, identifiers and stale renders', () => {
+  it('moves focus to main from the skip link and keeps the current route', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower);
+    await dashboard.show('#/missions');
+
+    (root.querySelector('.skip') as El).click();
+    await settle();
+
+    expect(document.activeElement?.id).toBe('main');
+    expect(window.location.hash).not.toBe('#main');
+    expect(text(root)).not.toContain('Page not found');
+    expect(root.querySelector('h1')?.textContent).toBe('Mission overview');
+  });
+
+  it('treats the identifiers . and .. as no mission', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower);
+
+    await dashboard.show('#/missions/%2e%2e');
+
+    expect(root.querySelector('h1')?.textContent).toBe('Page not found');
+  });
+
+  it('drops a slow render that finishes after the user has moved on', async () => {
+    const tower = seededTower();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) => {
+        if (path.startsWith('/missions') && init.method === 'GET') {
+          await gate;
+        }
+        return tower.fetchFor(null)(path, init);
+      },
+    });
+
+    const slow = dashboard.show('#/missions');
+    await dashboard.show('#/runners');
+    expect(root.querySelector('h1')?.textContent).toBe('Runner fleet');
+    release();
+    await slow;
+    await settle();
+
+    expect(root.querySelector('h1')?.textContent).toBe('Runner fleet');
+  });
+});
+
+describe('writes that fail or repeat', () => {
+  it('keeps Confirm off after a network failure, because the write may have applied', async () => {
+    const tower = seededTower();
+    await createRule(tower);
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) => {
+        if (init.method === 'POST') {
+          throw new TypeError('Failed to fetch');
+        }
+        return tower.fetchFor(null)(path, init);
+      },
+    });
+    await dashboard.show('#/policy');
+
+    buttonNamed(root, 'Revoke repo.write').click();
+    buttonNamed(root, 'Revoke rule').click();
+
+    await vi.waitFor(() =>
+      expect(text(root)).toContain('reload before retrying'),
+    );
+    expect((buttonNamed(root, 'Revoke rule') as El).disabled).toBe(true);
+    expect((buttonNamed(root, 'Cancel') as El).disabled).toBe(false);
+  });
+
+  it('sends the bearer token on every write, and Cancel posts nothing', async () => {
+    const tower = seededTower();
+    await createRule(tower);
+    const posts: { path: string; auth: string | undefined }[] = [];
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) => {
+        if (init.method === 'POST') {
+          const headers = init.headers as Record<string, string>;
+          posts.push({ path, auth: headers.authorization });
+        }
+        return tower.fetchFor(null)(path, init);
+      },
+    });
+    await dashboard.show('#/policy');
+
+    buttonNamed(root, 'Revoke repo.write').click();
+    buttonNamed(root, 'Cancel').click();
+    await settle();
+    expect(posts).toEqual([]);
+    expect(buttonNamed(root, 'Revoke repo.write')).toBeTruthy();
+
+    buttonNamed(root, 'Revoke repo.write').click();
+    buttonNamed(root, 'Revoke rule').click();
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]?.auth).toBe(`Bearer ${tower.token}`);
+  });
+});
+
+describe('malformed and partial data', () => {
+  it('still renders the Decision Inbox and a mission when a decision lacks alternatives or links', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) => {
+        const res = await tower.fetchFor(null)(path, init);
+        if (init.method !== 'GET' || path.split('?')[0] !== '/decisions') {
+          return res;
+        }
+        const body = (await res.json()) as Body;
+        return jsonResponse({
+          ...body,
+          decisions: [
+            {
+              id: 'dec_bare',
+              question: 'Bare decision?',
+              urgency: 'normal',
+              category: 'scope_expansion',
+              requiredAuthority: 'human',
+              createdBy: 'chief',
+              createdAt: '2026-10-31T00:00:00.000Z',
+              version: 1,
+            },
+            ...body.decisions,
+          ],
+        });
+      },
+    });
+
+    await dashboard.show('#/decisions');
+    expect(root.querySelector('h1')?.textContent).toBe('Decision inbox');
+    expect(text(root)).toContain('Bare decision?');
+    expect(root.querySelector('[role="alert"]')).toBeNull();
+
+    await dashboard.show(`#/missions/${missionId}`);
+    expect(root.querySelector('[role="alert"]')).toBeNull();
+    expect(root.querySelector('h1')?.textContent).not.toBe(
+      'Something went wrong',
+    );
+  });
+
+  it('keeps an unsaved note when the list re-renders', async () => {
+    const tower = seededTower();
+    await openQuestion(tower, 'Keep my note?');
+    const { root, dashboard } = mountFor(tower);
+    await dashboard.show('#/decisions');
+
+    const note = root.querySelector('textarea') as El;
+    note.value = 'half-written thought';
+    note.dispatchEvent(new window.Event('input'));
+    await dashboard.show('#/decisions');
+
+    expect((root.querySelector('textarea') as El).value).toBe(
+      'half-written thought',
+    );
+  });
+
+  it('lists only discrepancies that need attention as blockers', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: overrideGet(
+        tower,
+        `/missions/${missionId}/issue-links`,
+        (body) => ({
+          ...body,
+          discrepancies: [
+            {
+              kind: 'state-mismatch',
+              detail: 'Needs review here',
+              requiresAttention: true,
+            },
+            {
+              kind: 'state-mismatch',
+              detail: 'Only a note',
+              requiresAttention: false,
+            },
+          ],
+        }),
+      ),
+    });
+
+    await dashboard.show(`#/missions/${missionId}`);
+
+    const blocked = root.querySelector('section.blocked')?.textContent ?? '';
+    expect(blocked).toContain('Needs review here');
+    expect(blocked).not.toContain('Only a note');
+  });
+
+  it('names only open decisions that block this mission', async () => {
+    const tower = seededTower();
+    const missionId = await createMission(tower);
+    const decision = (question: string, links: unknown[]) => ({
+      id: `dec_${question.length}`,
+      question,
+      urgency: 'normal',
+      category: 'scope_expansion',
+      requiredAuthority: 'human',
+      createdBy: 'chief',
+      createdAt: '2026-10-31T00:00:00.000Z',
+      version: 1,
+      alternatives: [],
+      links,
+    });
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) => {
+        const res = await tower.fetchFor(null)(path, init);
+        if (init.method !== 'GET') {
+          return res;
+        }
+        const body = (await res.json()) as Body;
+        if (path === `/missions/${missionId}`) {
+          return jsonResponse({
+            ...body,
+            mission: { ...body.mission, state: 'waiting-decision' },
+          });
+        }
+        if (path.split('?')[0] === '/decisions') {
+          return jsonResponse({
+            ...body,
+            decisions: [
+              decision('Blocks here?', [{ missionId, status: 'blocked' }]),
+              decision('Elsewhere?', [
+                { missionId: 'msn_other', status: 'blocked' },
+              ]),
+              decision('Already answered?', [
+                { missionId, status: 'resolved' },
+              ]),
+            ],
+          });
+        }
+        return jsonResponse(body);
+      },
+    });
+
+    await dashboard.show(`#/missions/${missionId}`);
+
+    const blocked = root.querySelector('section.blocked')?.textContent ?? '';
+    expect(blocked).toContain('Waiting for decision: Blocks here?');
+    expect(blocked).not.toContain('Elsewhere?');
+    expect(blocked).not.toContain('Already answered?');
+  });
+});
+
+describe('labels and layout', () => {
+  it('labels a held lease as Running', () => {
+    expect(LEASE_STATES.held?.label).toBe('Running');
+  });
+
+  it('wraps every table in a named, keyboard-reachable scroll region', async () => {
+    const tower = seededTower();
+    await createMission(tower);
+    const { root, dashboard } = mountFor(tower);
+
+    await dashboard.show('#/missions');
+
+    const tables = [...root.querySelectorAll('table')] as El[];
+    expect(tables.length).toBeGreaterThan(0);
+    for (const table of tables) {
+      const wrap = table.parentElement as El;
+      expect(wrap.classList.contains('table-wrap')).toBe(true);
+      expect(wrap.getAttribute('role')).toBe('region');
+      expect(wrap.getAttribute('tabindex')).toBe('0');
+      expect(wrap.getAttribute('aria-label')).toBeTruthy();
+    }
   });
 });
