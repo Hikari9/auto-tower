@@ -124,7 +124,7 @@ export class FakeOfficeEngine implements OfficeEngine {
       integratedVerification: {
         result: 'passed',
         testsRun: steps,
-        commitSha: null,
+        commitSha: 'a'.repeat(40),
       },
       failure: failed
         ? { class: this.options.failWith ?? null, message: 'fake failure' }

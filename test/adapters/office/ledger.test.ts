@@ -38,7 +38,11 @@ function receipt(
     executor: { id: 'exec-1' },
     selfVerification: { result: 'passed', by: 'exec-1' },
     independentReview: { reviewer: 'reviewer-2', result: 'approved' },
-    integratedVerification: { result: 'passed', testsRun: 5, commitSha: null },
+    integratedVerification: {
+      result: 'passed',
+      testsRun: 5,
+      commitSha: 'a'.repeat(40),
+    },
     failure: null,
     residualRisks: [],
     ...overrides,
@@ -73,8 +77,20 @@ function mission(
     ReturnType<typeof createOfficeReviewGuard>['check']
   >[0]['mission'];
 } {
+  // One attempt per packet, named as the tests name them: pkt_1 ran att_1, pkt_2 ran att_2.
+  const attempts = packets.map((p, i) => ({
+    id: `att_${i + 1}`,
+    packetId: p.id,
+    number: 1,
+  }));
   return {
-    mission: { id: 'mis_1', workspaceId: TEST_WORKSPACE, risk, packets },
+    mission: {
+      id: 'mis_1',
+      workspaceId: TEST_WORKSPACE,
+      risk,
+      packets,
+      attempts,
+    },
   };
 }
 
@@ -219,7 +235,14 @@ describe('createOfficeReviewGuard: high-risk completion', () => {
     const handle = db();
     expect(failuresOf(handle, mission('high', []))).toHaveLength(1);
     ingest(handle, 'pkt_1', 'att_1', receipt('r1'));
-    expect(failuresOf(handle, mission('high', []))).toEqual([]);
+    // The packet's attempt must be the mission's, or its receipt does not count.
+    const withAttempt = mission('high', []);
+    withAttempt.mission.attempts = [
+      { id: 'att_1', packetId: 'pkt_1', number: 1 },
+    ];
+    expect(createOfficeReviewGuard(handle).check(withAttempt)).toEqual({
+      ok: true,
+    });
   });
 });
 
@@ -305,5 +328,25 @@ describe('ingestion refuses a receipt for another attempt', () => {
     expect(
       handle.get<{ n: number }>('SELECT COUNT(*) AS n FROM office_receipts')?.n,
     ).toBe(0);
+  });
+});
+
+describe('the gate counts only a packet’s latest attempt', () => {
+  it('does not let an earlier attempt’s ready receipt satisfy a later attempt that has none', () => {
+    const handle = db();
+    // Attempt 1 was ready, then the packet was rejected and requeued. Attempt 2 is the latest.
+    ingest(handle, 'pkt_1', 'att_1', receipt('r1'));
+    const context = mission('high', [{ id: 'pkt_1', required: true }]);
+    const withLatest = {
+      mission: {
+        ...context.mission,
+        attempts: [
+          { id: 'att_1', packetId: 'pkt_1', number: 1 },
+          { id: 'att_2', packetId: 'pkt_1', number: 2 },
+        ],
+      },
+    };
+    const failures = createOfficeReviewGuard(handle).check(withLatest);
+    expect(failures.ok).toBe(false);
   });
 });

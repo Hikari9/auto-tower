@@ -148,6 +148,9 @@ describe('claim-time authority re-check', () => {
     );
     expect(answer.status).toBe(200);
     expect(answer.body.assignment).toBeNull();
-    expect(String(answer.body.withheld)).toMatch(/^authority: /);
+    // Refused, not re-issued: the lease keeps its original fence and stays in recovery.
+    expect(answer.body.lease.fence).toBe(granted?.fence);
+    expect(answer.body.lease.status).toBe('recovering');
+    expect(answer.body.withheld).toMatch(/^authority: /);
   });
 });

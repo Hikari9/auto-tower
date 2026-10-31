@@ -82,10 +82,10 @@ describe('the high-risk gate in production wiring', () => {
     await runner.register(enrolled.body.enrollment.token);
 
     async function completeMission(
-      withReview: boolean,
+      reviewerName: string | undefined,
       // biome-ignore lint/suspicious/noExplicitAny: test responses are untyped JSON
     ): Promise<{ status: number; body: any }> {
-      reviewer = withReview ? 'reviewer-session' : undefined;
+      reviewer = reviewerName;
       const created = await call(owner.token, 'POST', '/missions', {
         title: 'Launch',
         intent: 'Launch the product',
@@ -165,14 +165,14 @@ describe('the high-risk gate in production wiring', () => {
       });
     }
 
-    const refused = await completeMission(false);
+    const refused = await completeMission(undefined);
     expect(refused.status).toBe(409);
     const guards = (
       refused.body.error.details.failures as Array<{ guard: string }>
     ).map((f) => f.guard);
     expect(guards).toContain('office-high-risk-review');
 
-    const done = await completeMission(true);
+    const done = await completeMission('reviewer-session');
     expect(done.status).toBe(200);
     expect(done.body.mission.state).toBe('completed');
 
@@ -184,5 +184,79 @@ describe('the high-risk gate in production wiring', () => {
       'missing',
       'satisfied',
     ]);
+  });
+
+  it('does not accept the runner itself as the reviewer', async () => {
+    const s = server();
+    const enrolled = await s.call(
+      s.owner.token,
+      'POST',
+      '/runners/enrollments',
+      {
+        name: 'runner',
+        version: VERSION,
+        buildDigest: DIGEST,
+        allowedScopes: ['*'],
+        maxConcurrent: 1,
+      },
+    );
+    let reviewer: string | undefined;
+    const world = new FakeWorld();
+    const engine = officeRunnerEngine({
+      run: (packet, hooks) =>
+        new FakeOfficeEngine(world, {
+          steps: 1,
+          ...(reviewer === undefined ? {} : { reviewer }),
+        }).run(packet, hooks),
+    });
+    const runner = new TowerRunner({
+      transport: async ({ method, path, body, token }) =>
+        s.call(token, method, path, body),
+      engine,
+      store: createMemoryStateStore(),
+      binding: { version: VERSION, buildDigest: DIGEST },
+    });
+    await runner.register(enrolled.body.enrollment.token);
+    // The runner names its own principal as the reviewer. That is not independent review.
+    reviewer = runner.runnerId;
+    const created = await s.call(s.owner.token, 'POST', '/missions', {
+      title: 'Self review',
+      intent: 'Check the gate',
+      outcome: 'Refused',
+      risk: 'high',
+    });
+    const id = created.body.mission.id as string;
+    await s.call(s.owner.token, 'POST', `/missions/${id}/transitions`, {
+      expectedVersion: 1,
+      to: 'ready',
+    });
+    const added = await s.call(
+      s.owner.token,
+      'POST',
+      `/missions/${id}/work-packets`,
+      {
+        expectedVersion: 2,
+        title: 'Build',
+        instructions: 'do it',
+        scope: ['repo:b'],
+      },
+    );
+    const packetId = added.body.mission.packets[0].id as string;
+    await s.call(
+      s.owner.token,
+      'POST',
+      `/missions/${id}/work-packets/${packetId}/authorize`,
+      {
+        expectedVersion: 3,
+        policyRefs: [],
+      },
+    );
+    await runner.pollOnce();
+    await runner.drain();
+    const rows = s.db.all<{ independent_review: string }>(
+      'SELECT independent_review FROM office_receipts WHERE workspace_id = ? ORDER BY rowid',
+      [TEST_WORKSPACE],
+    );
+    expect(rows.map((r) => r.independent_review)).toEqual(['self-reviewed']);
   });
 });

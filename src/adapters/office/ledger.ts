@@ -144,6 +144,8 @@ export interface ReviewGuardContext {
     workspaceId: string;
     risk: string;
     packets: ReadonlyArray<{ id: string; required: boolean }>;
+    /** Every attempt the mission has run. The latest attempt per packet is the one that counts. */
+    attempts: ReadonlyArray<{ id: string; packetId: string; number: number }>;
   };
 }
 
@@ -167,9 +169,25 @@ export function createOfficeReviewGuard(db: SqlDatabase): {
         `SELECT ${RECEIPT_COLUMNS} FROM office_receipts WHERE workspace_id = ? AND mission_id = ?`,
         [mission.workspaceId, mission.id],
       );
+      // A packet's receipt counts only for its latest attempt. An earlier attempt that was rejected and
+      // requeued does not satisfy the gate for the work that replaced it.
+      const latest = new Map<string, { id: string; number: number }>();
+      for (const attempt of mission.attempts) {
+        const current = latest.get(attempt.packetId);
+        if (current === undefined || attempt.number > current.number) {
+          latest.set(attempt.packetId, {
+            id: attempt.id,
+            number: attempt.number,
+          });
+        }
+      }
       const ready = new Set(
         rows
-          .filter((row) => isReady(factsOfRow(row), 'high'))
+          .filter(
+            (row) =>
+              isReady(factsOfRow(row), 'high') &&
+              latest.get(row.packet_id)?.id === row.attempt_id,
+          )
           .map((row) => row.packet_id),
       );
       const required = mission.packets

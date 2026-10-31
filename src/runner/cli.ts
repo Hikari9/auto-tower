@@ -1,4 +1,13 @@
-import { isAbsolute, relative, resolve } from 'node:path';
+import { realpathSync } from 'node:fs';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import { OfficeCliEngine } from '../adapters/office/cli-engine.js';
 import { officeRunnerEngine } from '../adapters/office/engine.js';
 import { TowerRunner } from './runner.js';
@@ -55,9 +64,30 @@ function checkUrl(raw: string): void {
   throw new UsageError('--url must use https, except for a loopback address');
 }
 
+/**
+ * A path with symlinks resolved. A file that does not exist yet is placed under its directory's real
+ * location, so a link to the repository cannot hide the state file inside it.
+ */
+function canonical(path: string): string {
+  const absolute = resolve(path);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    try {
+      return join(realpathSync(dirname(absolute)), basename(absolute));
+    } catch {
+      return absolute;
+    }
+  }
+}
+
+/** Whether `child` is `parent` or lies under it. A directory named `..cache` is not a parent step. */
 function isInside(child: string, parent: string): boolean {
-  const rel = relative(resolve(parent), resolve(child));
-  return !rel.startsWith('..') && !isAbsolute(rel);
+  const rel = relative(canonical(parent), canonical(child));
+  return (
+    rel === '' ||
+    (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+  );
 }
 
 /** Reads the arguments. Unknown flags and missing required values are refused, not ignored. */
@@ -91,9 +121,12 @@ export function parseCli(argv: readonly string[]): CliOptions {
   checkUrl(url);
   const statePath = required('--state');
   const repoPath = one('--repo');
-  if (repoPath !== undefined && isInside(statePath, repoPath)) {
-    // The engine runs in the repository with the same user, so the credential must live outside it.
-    throw new UsageError('--state must be outside --repo');
+  // The engine runs in the repository, or in the working directory when none is given.
+  if (isInside(statePath, repoPath ?? process.cwd())) {
+    // The engine runs with the same user, so the credential must live outside its repository.
+    throw new UsageError(
+      '--state must be outside the repository the engine runs in',
+    );
   }
   return {
     command,

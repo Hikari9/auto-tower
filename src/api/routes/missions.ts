@@ -1,5 +1,6 @@
 import type { Context } from 'hono';
 import { createOfficeReviewGuard } from '../../adapters/office/ledger.js';
+import { RiskLoweringRefusedError } from '../../core/commands.js';
 import {
   type CompletionGuardFailedError,
   CoreError,
@@ -19,6 +20,7 @@ import {
   parseUpdateMission,
 } from '../../core/inputs.js';
 import type { CommandContext, CommandResult } from '../../core/service.js';
+import { createPolicyService } from '../../policy/service.js';
 import type { AppDependencies, AppEnv, RouteSpec } from '../app.js';
 
 const MAX_BODY_BYTES = 256 * 1024;
@@ -136,6 +138,7 @@ export async function readJson(c: Context<AppEnv>): Promise<unknown> {
 }
 
 const STATUS_BY_CODE: Readonly<Record<string, 400 | 403 | 404 | 409 | 422>> = {
+  risk_lowering_refused: 403,
   validation_failed: 400,
   mission_not_found: 404,
   packet_not_found: 404,
@@ -255,21 +258,61 @@ const readMission: RouteSpec = {
   }),
 };
 
+/**
+ * Records a refused risk lowering as a deny receipt. The command rolled back, so the receipt is
+ * written here, on its own.
+ */
+function recordRiskRefusal(
+  c: Context<AppEnv>,
+  workspaceId: string,
+  actorId: string,
+  missionId: string,
+  error: RiskLoweringRefusedError,
+): void {
+  const { db, now } = c.get('deps');
+  const policyVersion = createPolicyService({ db }).policyVersion(workspaceId);
+  db.run(
+    `INSERT INTO policy_receipts (workspace_id, principal_id, action, resource, scope, risk, mission_id,
+       effect, code, reason, rule_id, rule_version, policy_version, evaluated_at)
+     VALUES (?, ?, 'mission.risk.lower', ?, 'risk', ?, ?, 'deny', ?, ?, NULL, NULL, ?, ?)`,
+    [
+      workspaceId,
+      actorId,
+      `mission:${missionId}`,
+      error.to,
+      missionId,
+      error.code,
+      error.message,
+      policyVersion,
+      (now ?? (() => new Date()))().toISOString(),
+    ],
+  );
+}
+
 const updateMission: RouteSpec = {
   method: 'patch',
   path: '/missions/:id',
   access: { scopes: ['mission:write'] },
   handler: guarded(async (c) => {
     const { expectedVersion, changes } = parseUpdateMission(await readJson(c));
-    return respond(
-      c,
-      coreOf(c).missions.updateMission(
-        commandContext(c),
-        c.req.param('id') ?? '',
-        expectedVersion,
-        changes,
-      ),
-    );
+    const ctx = commandContext(c);
+    const missionId = c.req.param('id') ?? '';
+    try {
+      return respond(
+        c,
+        coreOf(c).missions.updateMission(
+          ctx,
+          missionId,
+          expectedVersion,
+          changes,
+        ),
+      );
+    } catch (error) {
+      if (error instanceof RiskLoweringRefusedError) {
+        recordRiskRefusal(c, ctx.workspaceId, ctx.actor.id, missionId, error);
+      }
+      throw error;
+    }
   }),
 };
 

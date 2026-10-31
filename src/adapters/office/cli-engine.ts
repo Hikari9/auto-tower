@@ -86,6 +86,11 @@ export function buildOfficeArgv(
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 /** Time between SIGTERM to the group and SIGKILL to the group, for a child that ignores SIGTERM. */
 const KILL_GRACE_MS = 5_000;
+/**
+ * After the leader exits, how long to wait for its output pipes to close. A background child may
+ * hold a pipe open, so the run does not wait for it beyond this.
+ */
+const PIPE_GRACE_MS = 2_000;
 
 /**
  * Environment for the child. Tower's own variables are removed, so an engine cannot read the
@@ -104,8 +109,9 @@ export function childEnvironment(
 }
 
 /**
- * The real process runner. The child leads its own process group, and an abort or timeout signals
- * the whole group. So the engine's own children stop with it. It is started without a shell.
+ * The real process runner. The child leads its own process group. An abort or the timeout signals
+ * the whole group, and so does the end of the run, so no child the engine started outlives it.
+ * It is started without a shell.
  */
 export const execProcess: ProcessRunner = ({ argv, cwd, timeoutMs, signal }) =>
   new Promise((resolve, reject) => {
@@ -121,10 +127,15 @@ export const execProcess: ProcessRunner = ({ argv, cwd, timeoutMs, signal }) =>
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });
+    // setEncoding decodes across chunk boundaries, so a multi-byte character is not split.
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
     let stdout = '';
     let stderr = '';
     let stopped: string | undefined;
-    let killTimer: NodeJS.Timeout | undefined;
+    let exitCode: number | null = null;
+    let settled = false;
+    const timers: NodeJS.Timeout[] = [];
     const group = (sig: NodeJS.Signals) => {
       if (child.pid !== undefined) {
         try {
@@ -135,43 +146,34 @@ export const execProcess: ProcessRunner = ({ argv, cwd, timeoutMs, signal }) =>
       }
     };
     const stop = (reason: string) => {
-      if (stopped !== undefined) {
+      if (stopped !== undefined || settled) {
         return;
       }
       stopped = reason;
       group('SIGTERM');
-      killTimer = setTimeout(() => group('SIGKILL'), KILL_GRACE_MS);
+      timers.push(setTimeout(() => group('SIGKILL'), KILL_GRACE_MS));
     };
-    const timer = setTimeout(() => stop('timed out'), timeoutMs);
+    const timeout = setTimeout(() => stop('timed out'), timeoutMs);
+    timers.push(timeout);
     const onAbort = () => stop('aborted');
     if (signal.aborted) {
       onAbort();
     } else {
       signal.addEventListener('abort', onAbort, { once: true });
     }
-    const finish = () => {
-      clearTimeout(timer);
-      if (killTimer !== undefined) {
-        clearTimeout(killTimer);
+    const settle = (code: number | null) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      for (const timer of timers) {
+        clearTimeout(timer);
       }
       signal.removeEventListener('abort', onAbort);
-    };
-    child.stdout.on('data', (chunk: Buffer) => {
-      if (stdout.length < MAX_OUTPUT_BYTES) {
-        stdout += chunk.toString('utf8');
-      }
-    });
-    child.stderr.on('data', (chunk: Buffer) => {
-      if (stderr.length < MAX_OUTPUT_BYTES) {
-        stderr += chunk.toString('utf8');
-      }
-    });
-    child.on('error', (error) => {
-      finish();
-      reject(error);
-    });
-    child.on('close', (code) => {
-      finish();
+      // Whatever the run left behind goes too, so nothing keeps working in the repository.
+      group('SIGKILL');
+      child.stdout.destroy();
+      child.stderr.destroy();
       if (stopped !== undefined) {
         // Not a spawn error, so the caller classes it as a runner failure.
         reject(
@@ -179,8 +181,35 @@ export const execProcess: ProcessRunner = ({ argv, cwd, timeoutMs, signal }) =>
         );
         return;
       }
-      resolve({ exitCode: code ?? 1, stdout, stderr });
+      resolve({ exitCode: code ?? exitCode ?? 1, stdout, stderr });
+    };
+    child.stdout.on('data', (chunk: string) => {
+      if (stdout.length < MAX_OUTPUT_BYTES) {
+        stdout += chunk;
+      }
     });
+    child.stderr.on('data', (chunk: string) => {
+      if (stderr.length < MAX_OUTPUT_BYTES) {
+        stderr += chunk;
+      }
+    });
+    child.on('error', (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      for (const timer of timers) {
+        clearTimeout(timer);
+      }
+      signal.removeEventListener('abort', onAbort);
+      reject(error);
+    });
+    // The leader's exit can come before its pipes have drained, so wait briefly for them to close.
+    child.on('exit', (code) => {
+      exitCode = code;
+      timers.push(setTimeout(() => settle(code), PIPE_GRACE_MS));
+    });
+    child.on('close', (code) => settle(code));
   });
 
 export interface OfficeCliOptions {

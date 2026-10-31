@@ -3,6 +3,7 @@ import {
   AttemptNotFoundError,
   CommandNotAllowedError,
   CompletionGuardFailedError,
+  CoreError,
   DependencyCycleError,
   ForbiddenActorError,
   PacketNotFoundError,
@@ -21,12 +22,14 @@ import {
   assertMissionTransition,
   assertPacketTransition,
 } from './transitions.js';
-import type {
-  Actor,
-  ExecutionAttempt,
-  MissionState,
-  MissionStatus,
-  WorkPacket,
+import {
+  type Actor,
+  type ExecutionAttempt,
+  type MissionState,
+  type MissionStatus,
+  RISKS,
+  type Risk,
+  type WorkPacket,
 } from './types.js';
 import { LIMITS } from './validation.js';
 
@@ -146,6 +149,38 @@ function requireEvidence(refs: readonly string[]): void {
   }
 }
 
+/**
+ * A non-human writer tried to lower a mission's risk. Lowering risk removes the gate a high-risk
+ * mission depends on, so only a human may do it. The route records the refusal, since the command
+ * itself rolls back.
+ */
+export class RiskLoweringRefusedError extends CoreError {
+  override readonly name = 'RiskLoweringRefusedError';
+  readonly code = 'risk_lowering_refused';
+
+  constructor(
+    readonly from: Risk,
+    readonly to: Risk,
+  ) {
+    super(`Only a human may lower mission risk from ${from} to ${to}`);
+  }
+}
+
+/** Raising risk is open to any writer. Lowering it is for a human. */
+function requireHumanToLowerRisk(
+  state: MissionState,
+  changes: MissionChanges,
+  actor: Actor,
+): void {
+  const to = changes.risk;
+  if (to === undefined || to === state.risk || actor.kind === 'human') {
+    return;
+  }
+  if (RISKS.indexOf(to) < RISKS.indexOf(state.risk)) {
+    throw new RiskLoweringRefusedError(state.risk, to);
+  }
+}
+
 export function updateDecision(
   changes: MissionChanges,
 ): Decision<'mission.updated'> {
@@ -154,6 +189,7 @@ export function updateDecision(
     payload: { changes },
     check(state, env) {
       requireWriter(env.actor, 'update a mission');
+      requireHumanToLowerRisk(state, changes, env.actor);
       const unknown = Object.keys(changes).filter(
         (key) => !(MISSION_CHANGE_KEYS as readonly string[]).includes(key),
       );

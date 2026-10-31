@@ -111,6 +111,14 @@ function isFatal(error: unknown): boolean {
   return error instanceof TowerRefusal && FATAL.has(error.code);
 }
 
+/** A refusal Tower may give again later: overload, or a server fault. The work is not lost. */
+function isTransient(error: unknown): boolean {
+  return (
+    error instanceof TowerRefusal &&
+    (error.status === 429 || error.status >= 500)
+  );
+}
+
 /**
  * Polls Tower and runs the leases it grants. Tower decides which work is granted, and this class
  * keeps the runner's side of the protocol: the fence it holds, the steps Tower has confirmed, and
@@ -125,6 +133,8 @@ export class TowerRunner {
   private readonly log: (line: string) => void;
   /** Set by stop(). A stopping runner starts no new job. */
   private stopping = false;
+  /** A fatal refusal that a running job hit. run() throws it. */
+  private fatal: unknown;
   /** Leases whose receipt or reconcile Tower refused for good. They are not retried in this process. */
   private readonly parked = new Set<string>();
 
@@ -234,13 +244,13 @@ export class TowerRunner {
 
     for (const view of claim.leases) {
       if (view.directives.cancel) {
-        this.stopJob(view.leaseId, 'drop', report, 'cancelled by Tower');
+        await this.stopJob(view.leaseId, 'drop', report, 'cancelled by Tower');
       }
     }
     // A cancelled lease is closed by the sweep, so Tower answers its evidence here instead.
     for (const miss of claim.unmatched) {
       if (miss.cancel) {
-        this.stopJob(miss.leaseId, 'drop', report, 'cancelled by Tower');
+        await this.stopJob(miss.leaseId, 'drop', report, 'cancelled by Tower');
       }
     }
     for (const view of claim.reconcile) {
@@ -252,6 +262,11 @@ export class TowerRunner {
           this.reconcileLease(lease, report),
         );
       }
+    }
+    // A stopping runner starts nothing new. Anything it was granted waits for the next start.
+    if (this.stopping) {
+      this.persist();
+      return report;
     }
     for (const assignment of claim.assignments) {
       await this.accept(assignment, report);
@@ -275,6 +290,10 @@ export class TowerRunner {
           throw error;
         }
         this.log(`poll failed: ${describeError(error)}`);
+      }
+      // A fatal refusal from a running job reaches the caller here, not only from a poll.
+      if (this.fatal !== undefined) {
+        throw this.fatal;
       }
       await sleep(Math.min(wait, MAX_TIMER_MS), signal);
     }
@@ -306,7 +325,11 @@ export class TowerRunner {
     try {
       await work();
     } catch (error) {
-      if (isFatal(error) || error instanceof TransportError) {
+      if (
+        isFatal(error) ||
+        error instanceof TransportError ||
+        isTransient(error)
+      ) {
         throw error;
       }
       this.parked.add(leaseId);
@@ -416,6 +439,10 @@ export class TowerRunner {
       controller,
       done: this.execute(lease, resume, controller.signal)
         .catch((error: unknown) => {
+          if (isFatal(error)) {
+            this.fatal = error;
+            this.stop();
+          }
           // The lease keeps its receipt, so the next poll sends it again.
           this.log(
             `lease ${lease.leaseId} settle failed: ${describeError(error)}`,

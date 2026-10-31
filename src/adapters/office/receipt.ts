@@ -193,7 +193,8 @@ export interface ReceiptFacts {
   selfVerification: 'passed' | 'failed' | 'absent';
   independentReview: 'satisfied' | 'self-reviewed' | 'rejected' | 'missing';
   reviewerId: string | null;
-  integratedVerification: 'passed' | 'failed' | 'absent';
+  /** `unproven`: reported as passed, but with no tests run or no commit, so it proves nothing. */
+  integratedVerification: 'passed' | 'failed' | 'absent' | 'unproven';
   /** Set for a failed outcome only. */
   failureClass: FailureClass | null;
 }
@@ -228,7 +229,14 @@ export function factsOf(
   const producers = [...producerIds, receipt.executor.id];
   const review = receipt.independentReview;
   const selfVerification = receipt.selfVerification?.result ?? 'absent';
-  const integrated = receipt.integratedVerification?.result ?? 'absent';
+  const verified = receipt.integratedVerification;
+  const integrated: ReceiptFacts['integratedVerification'] =
+    verified === null
+      ? 'absent'
+      : verified.result === 'passed' &&
+          (verified.testsRun < 1 || verified.commitSha === null)
+        ? 'unproven'
+        : verified.result;
   let independentReview: ReceiptFacts['independentReview'] = 'missing';
   if (review !== null) {
     if (producers.some((p) => sameIdentity(p, review.reviewer))) {

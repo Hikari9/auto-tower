@@ -6,7 +6,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
-  writeSync,
+  writeFileSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
 import type { Assignment, ReceiptBody } from './protocol.js';
@@ -83,7 +83,8 @@ export function createFileStateStore(path: string): StateStore {
       rmSync(temp, { force: true });
       const fd = openSync(temp, 'wx', 0o600);
       try {
-        writeSync(fd, `${JSON.stringify(state, null, 2)}\n`);
+        // writeFileSync loops until every byte is written, so a short write cannot truncate the file.
+        writeFileSync(fd, `${JSON.stringify(state, null, 2)}\n`);
         fsyncSync(fd);
       } finally {
         closeSync(fd);

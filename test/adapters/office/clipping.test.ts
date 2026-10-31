@@ -14,7 +14,11 @@ const base = {
   executor: { id: 'exec-1' },
   selfVerification: { result: 'passed', by: 'exec-1' },
   independentReview: { reviewer: 'reviewer-2', result: 'approved' },
-  integratedVerification: { result: 'passed', testsRun: 3, commitSha: null },
+  integratedVerification: {
+    result: 'passed',
+    testsRun: 3,
+    commitSha: 'a'.repeat(40),
+  },
   failure: null,
 };
 
@@ -59,5 +63,32 @@ describe('identity folding', () => {
       ['prn_runner_1'],
     );
     expect(facts.independentReview).toBe('self-reviewed');
+  });
+});
+
+describe('identity folding composes compatibility characters', () => {
+  it('a full-width reviewer name is the producer under its ordinary spelling', () => {
+    const facts = factsOf(
+      parseOfficeReceipt({
+        ...base,
+        executor: { id: 'exec-1' },
+        independentReview: { reviewer: 'ＥＸＥＣ-1', result: 'approved' },
+      }),
+      ['prn_runner_1'],
+    );
+    expect(facts.independentReview).toBe('self-reviewed');
+  });
+
+  it('a Cyrillic look-alike is not folded, so it is a different identity', () => {
+    const facts = factsOf(
+      parseOfficeReceipt({
+        ...base,
+        executor: { id: 'exec-1' },
+        // The Cyrillic small letter ie stands in for the Latin e in "exec".
+        independentReview: { reviewer: 'еxec-1', result: 'approved' },
+      }),
+      ['prn_runner_1'],
+    );
+    expect(facts.independentReview).toBe('satisfied');
   });
 });

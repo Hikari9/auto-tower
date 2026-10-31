@@ -18,7 +18,7 @@ CREATE TABLE office_receipts (
   -- `self-reviewed`: the reviewer identity equalled a producer identity, so it does not count.
   independent_review TEXT NOT NULL CHECK (independent_review IN ('satisfied', 'self-reviewed', 'rejected', 'missing')),
   reviewer_id TEXT,
-  integrated_verification TEXT NOT NULL CHECK (integrated_verification IN ('passed', 'failed', 'absent')),
+  integrated_verification TEXT NOT NULL CHECK (integrated_verification IN ('passed', 'failed', 'absent', 'unproven')),
   failure_class TEXT CHECK (failure_class IS NULL OR failure_class IN (
     'environment', 'runner', 'adapter', 'quota', 'policy-denial', 'review-failure', 'implementation-defect'
   )),

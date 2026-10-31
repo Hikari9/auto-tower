@@ -65,9 +65,11 @@ export function createHttpTransport(
     }
     let response: Response;
     try {
+      // A stalled connection ends with a timeout, so a poll cannot hang on Tower forever.
       response = await fetchImpl(`${origin}${path}`, {
         method,
         headers,
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
     } catch (error) {
@@ -75,7 +77,18 @@ export function createHttpTransport(
         `request to ${path} failed: ${error instanceof Error ? error.message : 'unknown error'}`,
       );
     }
-    const text = await readCapped(response);
+    let text: string;
+    try {
+      text = await readCapped(response);
+    } catch (error) {
+      // A body cut off mid-read is a lost connection, and callers resend on it.
+      if (error instanceof TransportError) {
+        throw error;
+      }
+      throw new TransportError(
+        `request to ${path} failed while reading the body: ${error instanceof Error ? error.message : 'unknown error'}`,
+      );
+    }
     let parsed: unknown;
     try {
       parsed = text === '' ? undefined : JSON.parse(text);
@@ -85,6 +98,9 @@ export function createHttpTransport(
     return { status: response.status, body: parsed };
   };
 }
+
+/** How long one request may take, from sending to the end of the body. */
+const REQUEST_TIMEOUT_MS = 30_000;
 
 /** Largest response the runner will read. Tower's answers are small JSON documents. */
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;

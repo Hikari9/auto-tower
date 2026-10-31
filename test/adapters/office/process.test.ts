@@ -106,3 +106,20 @@ describe('a NUL byte in the packet', () => {
     expect((failure as ClassifiedFailure).failureClass).toBe('adapter');
   });
 });
+
+describe('a background child does not outlive a normal run', () => {
+  it('is stopped with the run, even when the leader exits 0', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'office-normal-'));
+    const pidFile = join(dir, 'pid');
+    const result = await execProcess({
+      argv: ['/bin/sh', '-c', `sleep 30 & echo $! > "${pidFile}"; exit 0`],
+      cwd: dir,
+      timeoutMs: 60_000,
+      signal: new AbortController().signal,
+    });
+    expect(result.exitCode).toBe(0);
+    const pid = Number(readFileSync(pidFile, 'utf8').trim());
+    await waitUntil(() => !alive(pid));
+    expect(alive(pid)).toBe(false);
+  });
+});

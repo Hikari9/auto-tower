@@ -21,7 +21,11 @@ function receipt(overrides: Partial<OfficeReceipt> = {}): OfficeReceipt {
     executor: { id: 'exec-1' },
     selfVerification: { result: 'passed', by: 'exec-1' },
     independentReview: { reviewer: 'reviewer-2', result: 'approved' },
-    integratedVerification: { result: 'passed', testsRun: 12, commitSha: null },
+    integratedVerification: {
+      result: 'passed',
+      testsRun: 12,
+      commitSha: 'a'.repeat(40),
+    },
     failure: null,
     residualRisks: [],
     ...overrides,
@@ -220,5 +224,47 @@ describe('isReady and failure classes, each condition on its own', () => {
     );
     expect(parsed.failure?.class).toBe('policy-denial');
     expect(factsOf(parsed, [PRODUCER]).failureClass).toBe('policy-denial');
+  });
+});
+
+describe('an integrated pass with nothing behind it is unproven', () => {
+  const sha = 'a'.repeat(40);
+  const withIntegration = (integratedVerification: unknown) =>
+    factsOf(
+      parseOfficeReceipt({
+        ...receipt(),
+        integratedVerification,
+      }),
+      [PRODUCER],
+    );
+
+  it('a pass that ran no tests is not proof on high risk', () => {
+    const facts = withIntegration({
+      result: 'passed',
+      testsRun: 0,
+      commitSha: sha,
+    });
+    expect(facts.integratedVerification).toBe('unproven');
+    expect(isReady(facts, 'high')).toBe(false);
+  });
+
+  it('a pass with no commit is not proof on high risk', () => {
+    const facts = withIntegration({
+      result: 'passed',
+      testsRun: 4,
+      commitSha: null,
+    });
+    expect(facts.integratedVerification).toBe('unproven');
+    expect(isReady(facts, 'high')).toBe(false);
+  });
+
+  it('a pass with tests and a commit is proof', () => {
+    const facts = withIntegration({
+      result: 'passed',
+      testsRun: 4,
+      commitSha: sha,
+    });
+    expect(facts.integratedVerification).toBe('passed');
+    expect(isReady(facts, 'high')).toBe(true);
   });
 });
