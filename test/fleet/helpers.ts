@@ -215,7 +215,7 @@ export function createFleetHarness(
           main.core.missions.addPacket(harness.ctx(), state.id, state.version, {
             title: spec.title ?? 'packet',
             instructions: spec.instructions ?? 'do the thing',
-            scope: spec.scope ?? [],
+            scope: spec.scope ?? ['repo:app'],
             required: true,
             dependsOn: [],
           }),

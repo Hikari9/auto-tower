@@ -655,7 +655,18 @@ describe('work packets', () => {
       const granted = rule({ scope: '*' });
       expect(() =>
         m.authorize(id, h.cos, [`policy:v1:rule:${granted.id}@1`]),
-      ).toThrow(/declares no scope/);
+      ).toThrow(/declares no execution scope/);
+      unauthorized();
+    });
+
+    it('is refused for a person too: no packet is authorized without an execution scope', () => {
+      const { h, m, id, unauthorized } = setup([]);
+      expect(() => m.authorize(id, h.owner, [])).toThrow(
+        CommandNotAllowedError,
+      );
+      expect(() => m.authorize(id, h.owner, [])).toThrow(
+        /declares no execution scope/,
+      );
       unauthorized();
     });
 

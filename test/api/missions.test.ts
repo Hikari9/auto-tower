@@ -707,7 +707,7 @@ describe('work packets, completion and the scheduler over HTTP', () => {
       api.owner.token,
       'POST',
       `/missions/${id}/work-packets`,
-      { expectedVersion: 2, title: 'Build' },
+      { expectedVersion: 2, title: 'Build', scope: ['repo:app'] },
     );
     expect(added.status).toBe(201);
     const packetId = added.body.mission.packets[0].id;
@@ -789,6 +789,7 @@ describe('work packets, completion and the scheduler over HTTP', () => {
       await api.call(api.owner.token, 'POST', `/missions/${id}/work-packets`, {
         expectedVersion: 2,
         title: 'Build',
+        scope: ['repo:app'],
       })
     ).body.mission.packets[0].id;
     await api.call(api.owner.token, 'POST', `/missions/${id}/transitions`, {
@@ -1031,7 +1032,7 @@ describe('write routes need the write scope', () => {
       api.owner.token,
       'POST',
       `/missions/${mine.id}/work-packets`,
-      { expectedVersion: 2, title: 'a' },
+      { expectedVersion: 2, title: 'a', scope: ['repo:app'] },
     );
     await api.call(
       api.owner.token,
@@ -1063,7 +1064,7 @@ describe('packet verification over HTTP', () => {
       api.owner.token,
       'POST',
       `/missions/${m.id}/work-packets`,
-      { expectedVersion: 2, title: 'a' },
+      { expectedVersion: 2, title: 'a', scope: ['repo:app'] },
     );
     const packetId = added.body.mission.packets[0].id as string;
     await api.call(
@@ -1288,7 +1289,7 @@ describe('cancel reaches nothing outside Tower', () => {
         api.owner.token,
         'POST',
         `/missions/${m.id}/work-packets`,
-        { expectedVersion: 2, title: 'a' },
+        { expectedVersion: 2, title: 'a', scope: ['repo:app'] },
       );
       await api.call(
         api.owner.token,
