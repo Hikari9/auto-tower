@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { StorageQuotaError } from '../ops/quota.js';
 import { newId } from '../shared/ids.js';
 import type { SqlDatabase } from '../storage/database.js';
 import { McpToolError } from './errors.js';
@@ -121,10 +122,18 @@ export function findSession(
     ]);
     return undefined;
   }
-  db.run('UPDATE mcp_sessions SET last_seen_at = ? WHERE id = ?', [
-    now.toISOString(),
-    id,
-  ]);
+  // Touching the session is a write. A store that cannot take writes must still answer reads, so
+  // a refused touch is skipped: the tool the caller runs next fails closed on its own writes.
+  try {
+    db.run('UPDATE mcp_sessions SET last_seen_at = ? WHERE id = ?', [
+      now.toISOString(),
+      id,
+    ]);
+  } catch (error) {
+    if (!(error instanceof StorageQuotaError)) {
+      throw error;
+    }
+  }
   return {
     id: row.id,
     workspaceId: row.workspace_id,

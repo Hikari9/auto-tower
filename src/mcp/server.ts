@@ -1,5 +1,6 @@
 import type { Scope } from '../auth/principals.js';
 import type { AuthenticatedToken } from '../auth/tokens.js';
+import { StorageQuotaError } from '../ops/quota.js';
 import { McpToolError, type ToolFailure, toFailure } from './errors.js';
 import {
   classify,
@@ -46,7 +47,7 @@ export interface McpRequest {
 }
 
 export interface McpResponse {
-  status: 200 | 202 | 400 | 403 | 404;
+  status: 200 | 202 | 400 | 403 | 404 | 503;
   body?: JsonRpcResult | JsonRpcError;
   headers?: Record<string, string>;
   /** Set on a 403 so the transport can write the `insufficient_scope` challenge. */
@@ -330,12 +331,25 @@ export function createMcpServer(services: Services): McpServer {
             typeof params.clientInfo?.name === 'string'
               ? params.clientInfo.name.slice(0, 128)
               : null;
-          const opened = openSession(db, {
-            ...owner,
-            protocolVersion,
-            clientName,
-            now: now(),
-          });
+          let opened: ReturnType<typeof openSession>;
+          try {
+            opened = openSession(db, {
+              ...owner,
+              protocolVersion,
+              clientName,
+              now: now(),
+            });
+          } catch (error) {
+            if (error instanceof StorageQuotaError) {
+              return {
+                status: 503,
+                body: rpcError(message.id, RPC_ERRORS.internal, error.message, {
+                  code: error.code,
+                }),
+              };
+            }
+            throw error;
+          }
           return {
             status: 200,
             headers: { 'Mcp-Session-Id': opened.id },
