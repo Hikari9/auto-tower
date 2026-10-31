@@ -59,12 +59,12 @@ pnpm smoke        # the whole control plane end to end, in one process (below)
 
 ## Configuration
 
-| Variable                   | Default                  | Meaning                                       |
-| -------------------------- | ------------------------ | --------------------------------------------- |
-| `PORT`                     | `8787`                   | Loopback port.                                |
-| `TOWER_DB_PATH`            | `.tower/tower.sqlite`    | SQLite file.                                  |
-| `TOWER_WORKSPACE`          | `default`                | Workspace for `pnpm tower` and `pnpm ops`.    |
-| `TOWER_SWEEP_INTERVAL_MS`  | `15000`                  | Sweep interval. `0` disables it.              |
+| Variable                  | Default               | Meaning                                    |
+| ------------------------- | --------------------- | ------------------------------------------ |
+| `PORT`                    | `8787`                | Loopback port.                             |
+| `TOWER_DB_PATH`           | `.tower/tower.sqlite` | SQLite file.                               |
+| `TOWER_WORKSPACE`         | `default`             | Workspace for `pnpm tower` and `pnpm ops`. |
+| `TOWER_SWEEP_INTERVAL_MS` | `15000`               | Sweep interval. `0` disables it.           |
 
 Secrets never go in the database or in these variables' defaults. A webhook secret, a GitHub credential and an identity-provider key live in host configuration, as `DEFERRED.md` describes.
 

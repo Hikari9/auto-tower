@@ -42,11 +42,7 @@ function setup() {
   return { db, first: first.principalId, second: second.principalId };
 }
 
-function input(
-  db: ReturnType<typeof openTestDatabase>,
-  callerId: string,
-  evidence: unknown,
-) {
+function input(callerId: string, evidence: unknown) {
   return {
     workspaceId: TEST_WORKSPACE,
     missionId: 'mis_1',
@@ -116,7 +112,7 @@ describe('ingestOfficeEvidence', () => {
   it('accepts a reviewer who held nothing', () => {
     const { db, first, second } = setup();
     reassigned(db, first, second);
-    ingestOfficeEvidence(db, input(db, second, receipt()));
+    ingestOfficeEvidence(db, input(second, receipt()));
     expect(
       db.get<{ independent_review: string }>(
         'SELECT independent_review FROM office_receipts',
@@ -128,7 +124,7 @@ describe('ingestOfficeEvidence', () => {
     const { db, second } = setup();
     const outcome = ingestOfficeEvidence(
       db,
-      input(db, second, { contract: 'tower.office.v1', kind: 'receipt' }),
+      input(second, { contract: 'tower.office.v1', kind: 'receipt' }),
     );
     expect(outcome).toMatchObject({
       status: 'not_ingested',
@@ -140,25 +136,22 @@ describe('ingestOfficeEvidence', () => {
   it('names an unsupported major as such, and treats a non-Office body as not Office', () => {
     const { db, second } = setup();
     expect(
-      ingestOfficeEvidence(
-        db,
-        input(db, second, { contract: 'tower.office.v9' }),
-      ),
+      ingestOfficeEvidence(db, input(second, { contract: 'tower.office.v9' })),
     ).toMatchObject({ status: 'not_ingested', reason: 'unsupported_contract' });
     expect(
-      ingestOfficeEvidence(db, input(db, second, { contract: 'other.v1' })),
+      ingestOfficeEvidence(db, input(second, { contract: 'other.v1' })),
     ).toEqual({ status: 'not_office' });
-    expect(ingestOfficeEvidence(db, input(db, second, null))).toEqual({
+    expect(ingestOfficeEvidence(db, input(second, null))).toEqual({
       status: 'not_office',
     });
   });
 
   it('reports a conflicting receipt for the same attempt, and never repeats body content', () => {
     const { db, second } = setup();
-    ingestOfficeEvidence(db, input(db, second, receipt()));
+    ingestOfficeEvidence(db, input(second, receipt()));
     const outcome = ingestOfficeEvidence(
       db,
-      input(db, second, receipt({ receiptId: 'r2', summary: 'SECRET-BODY' })),
+      input(second, receipt({ receiptId: 'r2', summary: 'SECRET-BODY' })),
     );
     expect(outcome).toMatchObject({
       status: 'not_ingested',
@@ -169,8 +162,8 @@ describe('ingestOfficeEvidence', () => {
 
   it('reports a replay as ingested and replayed', () => {
     const { db, second } = setup();
-    ingestOfficeEvidence(db, input(db, second, receipt()));
-    expect(ingestOfficeEvidence(db, input(db, second, receipt()))).toEqual({
+    ingestOfficeEvidence(db, input(second, receipt()));
+    expect(ingestOfficeEvidence(db, input(second, receipt()))).toEqual({
       status: 'ingested',
       replayed: true,
     });

@@ -74,16 +74,16 @@ Dispatch runs again under the policy as it stands now. Revoked rules, disabled p
 
 ## Which lever for which problem
 
-| Problem                                     | Lever                                              |
-| ------------------------------------------- | -------------------------------------------------- |
-| Anything unclear or fast-moving             | Halt first                                         |
-| A rule was too broad                        | Revoke it, grant a narrower one                    |
-| An action must never happen                 | Deny rule                                          |
-| A chief of staff token leaked               | Disable the principal, revoke rules it relied on   |
-| A runner host is compromised                | Quarantine, disable its principal, release leases  |
-| A person's token leaked                     | Disable the principal (needs a second person)      |
-| A feature flag should be off                | `set_feature_flag` with `enabled: false`, or revoke its named rule. It reads off at once. |
-| A provider credential leaked                | Revoke it at the provider. Tower stores none.      |
+| Problem                         | Lever                                                                                     |
+| ------------------------------- | ----------------------------------------------------------------------------------------- |
+| Anything unclear or fast-moving | Halt first                                                                                |
+| A rule was too broad            | Revoke it, grant a narrower one                                                           |
+| An action must never happen     | Deny rule                                                                                 |
+| A chief of staff token leaked   | Disable the principal, revoke rules it relied on                                          |
+| A runner host is compromised    | Quarantine, disable its principal, release leases                                         |
+| A person's token leaked         | Disable the principal (needs a second person)                                             |
+| A feature flag should be off    | `set_feature_flag` with `enabled: false`, or revoke its named rule. It reads off at once. |
+| A provider credential leaked    | Revoke it at the provider. Tower stores none.                                             |
 
 ## Limits to know
 

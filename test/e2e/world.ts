@@ -59,6 +59,7 @@ export interface World {
     method: string,
     path: string,
     body?: unknown,
+    // biome-ignore lint/suspicious/noExplicitAny: test responses are untyped JSON
   ): Promise<{ status: number; body: any }>;
   ownerCtx(): CommandContext;
   /** Closes the connection. The files stay for a restart. */

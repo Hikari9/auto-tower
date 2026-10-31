@@ -10,7 +10,6 @@ import {
 import { TowerRunner } from '../../src/runner/runner.js';
 import { createMemoryStateStore } from '../../src/runner/state.js';
 import type { Transport } from '../../src/runner/transport.js';
-import { applyMigrations } from '../../src/storage/migrate.js';
 import {
   defaultMigrationsDir,
   readMigrationFiles,

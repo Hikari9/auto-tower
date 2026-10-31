@@ -16,10 +16,10 @@ Every table that carries state a person or an auditor would want back:
 
 ## What is left out, and why
 
-| Left out                                          | Why                                                                                  |
-| ------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| MCP sessions, replay results, claim backoff       | Short-lived by design. Clients open new sessions, and a retry runs again safely.     |
-| `schema_migrations`                               | Recorded in the file's header, with each migration's checksum.                       |
+| Left out                                            | Why                                                                                             |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| MCP sessions, replay results, claim backoff         | Short-lived by design. Clients open new sessions, and a retry runs again safely.                |
+| `schema_migrations`                                 | Recorded in the file's header, with each migration's checksum.                                  |
 | API token digests, unless `--include-token-digests` | A backup that holds digests is as sensitive as the database. The default cannot sign anyone in. |
 
 After a restore without token digests, issue new tokens (`pnpm tower token create --db <restored>`) and enroll runners again. Runners re-register with a fresh enrollment, and their old leases recover or are released as `docs/runner-protocol.md` describes.
