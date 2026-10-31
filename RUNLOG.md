@@ -20,12 +20,13 @@ Token totals include the orchestrator, every Office executor, reviewer and plann
 
 ## Landed phases
 
-| Phase | Landed (UTC)      | office/v1 merge | Office revisions                       | Gate                                                                                                         |
-| ----- | ----------------- | --------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| 0+1   | 2026-10-31T05:32Z | `91c73ba`       | T1 R1, T2 R2, T3 R4 (`0260a5f`)        | RECHECK (CoS policy-ref bypass) then APPROVED; 846 tests green                                               |
-| 3     | 2026-10-31T05:41Z | `04839b8`       | T6 R7 (`da0d13a`)                      | RECHECK (required-link downgrade bypass, mission-link SSRF, poll starvation) then APPROVED; 1007 tests green |
-| 2     | 2026-10-31T08:04Z | `7be3f38`       | T4 R11, T5 R14 (`e94f1d2`)             | T4 APPROVED; T5 RECHECK (claim refusal not durable) then APPROVED; 1380 tests green                          |
-| 4     | 2026-10-31T08:46Z | `bd9521c`       | T7 R15 (`a3e29a9`), T8 R18 (`f1554db`) | T7 APPROVED; T8 RECHECK (dashboard did not show authority holds) then APPROVED; 1639 tests green             |
+| Phase | Landed (UTC)      | office/v1 merge | Office revisions                       | Gate                                                                                                                             |
+| ----- | ----------------- | --------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| 0+1   | 2026-10-31T05:32Z | `91c73ba`       | T1 R1, T2 R2, T3 R4 (`0260a5f`)        | RECHECK (CoS policy-ref bypass) then APPROVED; 846 tests green                                                                   |
+| 3     | 2026-10-31T05:41Z | `04839b8`       | T6 R7 (`da0d13a`)                      | RECHECK (required-link downgrade bypass, mission-link SSRF, poll starvation) then APPROVED; 1007 tests green                     |
+| 2     | 2026-10-31T08:04Z | `7be3f38`       | T4 R11, T5 R14 (`e94f1d2`)             | T4 APPROVED; T5 RECHECK (claim refusal not durable) then APPROVED; 1380 tests green                                              |
+| 4     | 2026-10-31T08:46Z | `bd9521c`       | T7 R15 (`a3e29a9`), T8 R18 (`f1554db`) | T7 APPROVED; T8 RECHECK (dashboard did not show authority holds) then APPROVED; 1639 tests green                                 |
+| 5     | 2026-10-31T09:26Z | `2100245`       | T9 R21 (`c8545f7`)                     | RECHECK (runner tokens could read policy rule ids via mission reads) twice, then APPROVED; 1837 tests green, `pnpm smoke` passes |
 
 ## Notes
 
@@ -39,3 +40,4 @@ Token totals include the orchestrator, every Office executor, reviewer and plann
 - Office runtime upgraded itself from 3.13 to 3.14 mid-run (at T3 dispatch). The pinned run contract is unchanged.
 - Phase 2 merge churn: T5 and T6 conflicted on shared `src/api/app.ts` and `DEFERRED.md`. Office cannot compose conflicting `shared:` files, so T4 was re-stacked on T6 and T5 re-merged twice. Several `next:` lines named reruns that the runtime then refused (`worker-live`, `dependency-conflict`). Reported on Hikari9/auto-office#620 and #913.
 - Phase 4 nonblocking review items not routed to T9, to avoid widening a 460k-context worker into `public/` and `test/dashboard/`: a drift test between `WORKER_DASHBOARD_FILES` and `DASHBOARD_ASSETS`, scoping the mission page's open-decisions fetch to the mission (currently capped at 200), and a 375px layout check (happy-dom has no layout).
+- Office end-of-run convergence review is blocked by a known Office defect, Hikari9/auto-office#773. Office's shared-file check requires edits to a `shared:` file to be pure appends at end of file, even for stacked tasks with no concurrent writer. Seven tasks insert route registrations mid-file in `src/api/app.ts`, so lane `L-phase-0-1` reports `conflict` at T3 and no Office command clears it. All five phases passed their own independent review gates before landing.
