@@ -76,7 +76,7 @@ describe('growth limits', () => {
     const rest = Array.from({ length: MAX_OPEN_SESSIONS }, (_, i) =>
       open(a.principalId, i + 1),
     );
-    const at = new Date(base + 10_000_000);
+    const at = new Date(base + 100_000);
     expect(findSession(db, first.id, own, at)).toBeUndefined();
     expect(findSession(db, rest[0]?.id ?? '', own, at)).toBeDefined();
     expect(

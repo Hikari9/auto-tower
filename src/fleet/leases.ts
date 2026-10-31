@@ -7,6 +7,8 @@ import type {
   MissionState,
   WorkPacket,
 } from '../core/types.js';
+import { isHalted } from '../ops/halt.js';
+import { CLAIM_REFUSAL_WRITE_FAILED, signalsFor } from '../ops/signals.js';
 import type { SqlDatabase } from '../storage/database.js';
 import { backoffMs } from './backoff.js';
 import {
@@ -16,9 +18,10 @@ import {
   pickRunner,
   policyVersionOf,
   recordClaimRefusals,
+  withoutRuleIds,
 } from './broker.js';
 import { type FleetContext, savepoint } from './context.js';
-import { FleetError } from './errors.js';
+import { FleetError, isUniqueViolation } from './errors.js';
 import type {
   Binding,
   CheckpointInput,
@@ -654,6 +657,11 @@ export function heartbeat(
 // --------------------------------------------------------------------- claim
 
 function scheduleWorkspace(ctx: FleetContext, workspaceId: string): void {
+  // A halted workspace is not scheduled at all, so a poll cannot move a packet from pending to ready
+  // or a mission to another state. The halt keeps every row as it was.
+  if (isHalted(ctx.db, workspaceId)) {
+    return;
+  }
   try {
     const actor = systemActor(ctx.db, workspaceId, ctx.now().toISOString());
     ctx.core.scheduler.tick(workspaceId, actor, ctx.ids('cor'));
@@ -690,18 +698,30 @@ export function claim(
   // Refusals are collected in the claim and written after it settles, so a claim that rolls back
   // still leaves its refusals on record. The refusals change no grant, so they are not part of it.
   const refusals: ClaimRefusal[] = [];
-  // Best effort: a failed write is logged by name and changes neither the claim nor its error.
+  // Best effort: a failed write changes neither the claim nor its error. It is logged by name and
+  // raised as a health signal, so an operator sees that refusals are going unrecorded.
   const settle = (): void => {
     if (refusals.length === 0) {
       return;
     }
+    const signals = signalsFor(ctx.db);
     try {
       ctx.transact(workspaceId, (tx) =>
         recordClaimRefusals(tx, ctx.now, workspaceId, refusals),
       );
+      signals.clear(CLAIM_REFUSAL_WRITE_FAILED);
     } catch (error) {
-      console.error(
-        `claim refusals not recorded: ${error instanceof Error ? error.name : 'error'}`,
+      const name = error instanceof Error ? error.name : 'error';
+      console.error(`claim refusals not recorded: ${name}`);
+      signals.raise(
+        CLAIM_REFUSAL_WRITE_FAILED,
+        {
+          severity: 'warning',
+          message: `Claim refusals could not be written to the audit (${name}). Runners are still refused, but the refusals are not on record and holds may not show.`,
+          action:
+            'Check database health and free space. Refusals are written again on the next claim.',
+        },
+        ctx.now(),
       );
     }
   };
@@ -789,6 +809,10 @@ function withholdReason(
   packet: WorkPacket,
   claim?: ClaimOffer,
 ): string | undefined {
+  // A halt hands out nothing, on a reconcile as on a claim: no new fence, no renewed lease.
+  if (isHalted(tx, runner.workspaceId)) {
+    return 'emergency halt: dispatch is stopped';
+  }
   if (runner.status !== 'active') {
     return `runner is ${runner.status}`;
   }
@@ -864,6 +888,21 @@ function grant(
   const withheld: ClaimResult['withheld'] = [];
   let retryAfterMs = ctx.config.pollIntervalMs;
 
+  // An emergency halt hands out nothing: not a new offer, and not a lease the runner never confirmed.
+  // Both stay exactly as they are, so lifting the halt resumes them.
+  if (isHalted(tx, workspaceId)) {
+    const reason = 'emergency halt: dispatch is stopped';
+    for (const lease of liveLeasesOf(tx, workspaceId, runner.id)) {
+      if (lease.status === 'held' && lease.confirmedAt === null) {
+        withheld.push({ attemptId: lease.attemptId, reason });
+      }
+    }
+    for (const offer of offersOf(tx, runner)) {
+      withheld.push({ attemptId: offer.id, reason });
+    }
+    return { assignments, withheld, retryAfterMs };
+  }
+
   // A lease the runner has not yet shown evidence for is sent again, so a response lost on the
   // way (or a runner that restarted) does not strand it. Reassigned work arrives the same way.
   for (const lease of liveLeasesOf(tx, workspaceId, runner.id)) {
@@ -881,7 +920,10 @@ function grant(
       refusals,
     });
     if (reason !== undefined) {
-      withheld.push({ attemptId: lease.attemptId, reason });
+      withheld.push({
+        attemptId: lease.attemptId,
+        reason: withoutRuleIds(reason),
+      });
       continue;
     }
     assignments.push(
@@ -905,7 +947,7 @@ function grant(
       continue;
     }
     const hold = (reason: string) =>
-      withheld.push({ attemptId: offer.id, reason });
+      withheld.push({ attemptId: offer.id, reason: withoutRuleIds(reason) });
 
     if (PAUSING_MISSION_STATES.includes(mission.state)) {
       hold(`mission is ${mission.state}`);
@@ -998,6 +1040,14 @@ function grant(
       if (error instanceof CoreError) {
         hold(`the mission core refused: ${error.code}`);
         continue;
+      }
+      // Another claim took the scope or the attempt between the check and the insert. The index
+      // held, so nothing is wrong: the runner is told to poll again, as a 409 and not a 500.
+      if (isUniqueViolation(error)) {
+        throw new FleetError(
+          'claim_conflict',
+          'Another claim took this work first. Poll again.',
+        );
       }
       throw error;
     }
@@ -1483,7 +1533,7 @@ export function reconcile(
         mission === undefined || found === undefined || withheld !== undefined
           ? null
           : assignmentOf(ctx, tx, runner, current, mission, found.packet),
-      withheld: withheld ?? null,
+      withheld: withheld === undefined ? null : withoutRuleIds(withheld),
       resume,
     });
     // A runner that may not have the work gets no fence either: the fence is the credential. The
@@ -1786,4 +1836,14 @@ export function releaseOffer(
 
 export function sweepWorkspace(ctx: FleetContext, workspaceId: string): void {
   ctx.transact(workspaceId, (tx) => sweep(ctx, tx, workspaceId));
+}
+
+/**
+ * The scheduled sweep: expires and recovers leases, then runs the scheduler so ready work is
+ * dispatched. A runner's poll does both as well, but nothing should wait on a poll to move a
+ * mission, so a host calls this on a timer. A halted workspace is swept and not scheduled.
+ */
+export function tickWorkspace(ctx: FleetContext, workspaceId: string): void {
+  sweepWorkspace(ctx, workspaceId);
+  scheduleWorkspace(ctx, workspaceId);
 }

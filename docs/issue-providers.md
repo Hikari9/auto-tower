@@ -90,7 +90,7 @@ A required link can be exempted so a mission finishes while the issue stays open
 
 1. An unknown workspace, an unknown provider and a bad signature all answer the same `401`. The signature is the HMAC-SHA256 of the raw body (`X-Hub-Signature-256`), compared in constant time.
 2. Only after the signature checks out is the delivery id (`X-GitHub-Delivery`) used. A repeated id answers `duplicate` and changes nothing. The id is stored in the same transaction as the processing, so a failed delivery can be retried. A forged request cannot use up an id.
-3. GitHub sends no timestamp, so the replay control is the delivery id plus the signature, not a time window.
+3. GitHub sends no timestamp, so the replay control is the delivery id, a hash of the raw signed body and the signature, not a time window. The signature covers the body and not the delivery id, so a captured signed body replayed under a new id would otherwise pass. The SHA-256 of the raw body is stored with the delivery, a repeat of it answers `duplicate` whatever its id, and the database refuses a second row with one hash (a unique index). Deliveries from before the hash existed have none.
 4. The body is capped at 1 MB.
 5. The event is decoded, matched to tracked links by repository and issue number, and folded in with source `webhook`. A webhook can mark an issue open, closed, transferred or deleted. It never verifies a close.
 
@@ -105,7 +105,7 @@ The provider's title is cleaned (control and bidirectional characters become spa
 `createGitHubProvider({ token, fetch?, apiBase?, timeoutMs? })` implements `tower.issues.v1`.
 
 - `token` is a function called per request. Tower stores no credential and never logs one.
-- Reads use `GET /repos/{owner}/{repo}/issues/{n}`, and `.../dependencies/blocked_by` for blockers. A `404` or `403` on the blockers path means the blockers are unknown (`openBlockers: null`), which is not the same as none: an authorized close stops with a `blocked` discrepancy until the blockers can be read. Any other failure there fails the read.
+- Reads use `GET /repos/{owner}/{repo}/issues/{n}`, and `.../dependencies/blocked_by` for blockers. A `404` or `403` on the blockers path means the blockers are unknown (`openBlockers: null`), which is not the same as none: an authorized close stops with a `blocked` discrepancy until the blockers can be read. A person can close anyway with `overrideUnknownBlockers: true` on `POST /missions/:id/issue-links/close` (or `closeRequired(..., { overrideUnknownBlockers: true })`). Only a human may, every other check still applies (a known blocker, authority, write scope), and each link closed this way gets a `blockers_unknown_override` history entry naming the person. Any other failure there fails the read.
 - Close uses `PATCH` with `state: closed` and reason `completed`, then a best-effort comment carrying the origin marker.
 - It checks the response is the issue asked for (same number, repository and a stable `node_id`) and is not a pull request.
 - Redirects are never followed. `401` is `permission`. `403` with `retry-after`, an exhausted limit or the secondary-limit message, and `429`, are `rate_limited` with the wait capped at 24 hours. Other `403` is `permission`. `5xx`, network failure and timeout are `unavailable`.

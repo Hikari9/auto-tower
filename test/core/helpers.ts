@@ -134,7 +134,7 @@ export function packet(
   return {
     title,
     instructions: '',
-    scope: [],
+    scope: ['repo:app'],
     required: overrides.required ?? true,
     dependsOn: overrides.dependsOn ?? [],
   };

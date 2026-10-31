@@ -60,7 +60,14 @@ interface EventRow {
 const EVENT_COLUMNS =
   'seq, workspace_id, stream_id, version, type, payload_json, actor_id, correlation_id, policy_refs_json, evidence_refs_json, recorded_at';
 
-export function createEventLog(db: SqlDatabase): EventLog {
+/**
+ * The log over a database. `clock` stamps `recorded_at`, so a host or test that injects one gets
+ * the same time in the event log as in every other record it writes.
+ */
+export function createEventLog(
+  db: SqlDatabase,
+  clock: () => Date = () => new Date(),
+): EventLog {
   return {
     append(input) {
       if (
@@ -124,7 +131,7 @@ export function createEventLog(db: SqlDatabase): EventLog {
             input.correlationId,
             JSON.stringify(input.policyRefs ?? []),
             JSON.stringify(input.evidenceRefs ?? []),
-            new Date().toISOString(),
+            clock().toISOString(),
           ],
         );
         const seq = Number(lastInsertRowid);
@@ -138,7 +145,7 @@ export function createEventLog(db: SqlDatabase): EventLog {
               input.idempotencyKey,
               requestHash,
               seq,
-              new Date().toISOString(),
+              clock().toISOString(),
             ],
           );
         }

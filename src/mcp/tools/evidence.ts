@@ -99,6 +99,9 @@ export const evidenceTools: readonly ToolDefinition[] = [
       'Reads every linked issue that holds the mission open back from its provider and records what it finds. It writes nothing to a provider. A reopened or unreadable issue appears as a discrepancy and never as completion.',
     readOnly: false,
     scopes: ['mission:write'],
+    material: true,
+    effect:
+      'Reads each linked required issue back from its provider and records the findings, which can put the mission in needs-attention. It writes nothing to a provider.',
     properties: { missionId },
     required: ['missionId'],
     async run(ctx, args, key) {

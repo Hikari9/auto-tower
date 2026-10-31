@@ -13,3 +13,9 @@ compatibility_flags = ["nodejs_compat"]
 directory = "public"
 binding = "ASSETS"
 run_worker_first = true
+
+# The scheduled sweep: expires and recovers leases and dispatches ready work with no runner poll
+# (src/hosting/worker.ts `scheduled`, src/ops/sweep.ts). Cron's finest grain is one minute. It does
+# nothing until the D1 adapter supplies a store (DEFERRED.md).
+[triggers]
+crons = ["* * * * *"]

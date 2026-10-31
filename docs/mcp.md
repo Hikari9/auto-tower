@@ -50,7 +50,7 @@ Each tool declares, in `tools/list`, `annotations.readOnlyHint`, `destructiveHin
 | `search_missions`        | read     | `mission:read`   | Search by text, state, parent, priority, risk.                                                                                |
 | `read_mission`           | read     | `mission:read`   | One mission with packets, attempts, links, verification, and any claim-time authority holds (as the HTTP route reports them). |
 | `recent_activity`        | read     | `mission:read`   | Latest events, or one mission's history. No payloads in the cross-mission view.                                               |
-| `list_runs`              | read     | `mission:read`   | Execution attempts. A claim is labelled self-reported.                                                                        |
+| `list_runs`              | read     | `mission:read`   | Execution attempts. A claim is labelled self-reported. A runner principal sees only its own attempts.                         |
 | `inspect_evidence`       | read     | `mission:read`   | Verification, runner claims, Auto-Office receipt facts, issue links.                                                          |
 | `preview_dispatch`       | read     | `mission:read`   | What `request_dispatch` would do, and whether cited policy would be accepted.                                                 |
 | `list_runners`           | read     | `runner:read`    | Enrolled runners. A runner principal sees only itself.                                                                        |
@@ -59,7 +59,7 @@ Each tool declares, in `tools/list`, `annotations.readOnlyHint`, `destructiveHin
 | `read_feature_flags`     | read     | `policy:read`    | The two flags and why a requested one is not in effect.                                                                       |
 | `create_mission`         | mutating | `mission:write`  | Creates a draft mission.                                                                                                      |
 | `update_mission`         | mutating | `mission:write`  | Changes descriptive fields. Risk lowering by a Chief of Staff is refused and receipted.                                       |
-| `request_reconciliation` | mutating | `mission:write`  | Reads linked issues back from the provider. Writes nothing to a provider.                                                     |
+| `request_reconciliation` | material | `mission:write`  | Reads linked issues back from the provider. Writes nothing to a provider, and can put the mission in needs-attention.         |
 | `answer_decision`        | material | `decision:write` | Answers a decision. Only the authority it requires may.                                                                       |
 | `request_expansion`      | material | `decision:write` | Settles work beyond a mission's authorization at the right tier. Asking approves nothing.                                     |
 | `propose_policy_change`  | mutating | `decision:write` | Raises a decision for a person. Changes no policy.                                                                            |
@@ -67,7 +67,12 @@ Each tool declares, in `tools/list`, `annotations.readOnlyHint`, `destructiveHin
 | `request_dispatch`       | material | `mission:write`  | Authorizes one packet and runs one scheduler pass.                                                                            |
 | `grant_policy`           | material | `policy:write`   | Creates an allow rule. Humans only.                                                                                           |
 | `revoke_policy`          | material | `policy:write`   | Revokes a rule. Blocks the next guarded effect at once. Humans only.                                                          |
-| `set_feature_flag`       | material | `policy:write`   | Turns a flag on or off. Humans only.                                                                                          |
+| `set_feature_flag`       | material | `policy:write`   | Turns a flag on or off. Humans only. The flag counts only the rule it names. Every change is kept in the flag history.        |
+| `read_audit`             | read     | `policy:read`    | Append-only history: `feature_flags` (who, old and new setting, rule, time) or `tool_calls` (no arguments or results).        |
+| `read_health`            | read     | `policy:read`    | Status (`ok`, `degraded`, `critical`, `halted`), active signals with what to do, and recent halts. See `docs/operations.md`.  |
+| `halt_workspace`         | material | `policy:write`   | Emergency halt: stops new dispatch and guarded effects, keeps all state. Humans only.                                         |
+| `resume_workspace`       | material | `policy:write`   | Lifts the halt. Humans only.                                                                                                  |
+| `reset_storage_guard`    | material | `policy:write`   | Clears the storage guard after space was freed. Humans only. Trips again if the store is still full.                          |
 
 **Mutating** tools require an `idempotencyKey` (1 to 100 printable characters). The first result is stored in `mcp_idempotency`, scoped to the caller. A retry with the same key and arguments returns it with `_meta["tower/replayed"] = true` and acts once. The same key with another tool or other arguments is `idempotency_key_reused`. A failed call stores nothing, so its key can be reused. The key is also passed to the core as its idempotency and correlation key, so a retry after a crash between the effect and the stored result is still deduplicated by the event log.
 
@@ -84,6 +89,8 @@ Unknown arguments are rejected, not ignored, so a typo cannot silently drop a co
 - A Chief of Staff holds no `policy:write`, so it cannot grant, revoke or change a flag. It can `propose_policy_change`, which raises a decision a human answers and grants nothing.
 - `request_expansion` follows the three tiers. Inside approved scope it proceeds. A Chief of Staff is approved only under a current grant that covers the request and the packet's declared scope, and the packet is authorized citing that rule. Otherwise a decision is raised for the person (or for a Chief of Staff when a delegated rule would let one answer). Deny, expiry and revocation take effect on the next call.
 - A Chief of Staff cannot satisfy independent review. The Auto-Office review guard judges receipts, not callers, and a landing grant never counts as a review. `close_mission` by a Chief of Staff on a high-risk mission without a satisfied independent review fails `completion_guard_failed`.
+- `read_mission` replaces every policy ref (the mission's and each `packets[].authorization.policyRefs` entry) with `[redacted]` for a runner or provider principal, so no rule id reaches it. A person and a Chief of Staff see the refs.
+- `recent_activity` with a `missionId` omits `policyRefs` from each item and its payload for a runner or provider principal and cleans rule ids written in payload strings. `preview_dispatch` does the same for the `citedPolicy` reason.
 - A runner principal can read and see itself. It holds no `mission:write` or `decision:write`, so every mutating tool refuses it.
 - `grant_policy` only ever creates `allow` rules. `effect` is overwritten. A deny rule is a different act and stays on the HTTP route.
 
@@ -136,3 +143,7 @@ linkIdentity(db, {
 - Stored results answer a retry for 7 days, then are pruned. A retry that arrives while the first call is still running joins it instead of running the tool twice.
 - A tool must settle. A retry joins a call still running and waits as long as it does, so a hung provider call holds its key until it returns.
 - A result that cannot be stored does not fail a call that already took effect. The core's own idempotency key still deduplicates a retry for the tools that pass it.
+
+## Sessions and storage limits
+
+A session ends after an hour idle (`SESSION_IDLE_TTL_MS`) and its row is purged a day after it closes. An ended session answers `-32002`, and the client initializes a new one. While the store refuses writes (`docs/operations.md`), reads and `read_health` still work, mutating tools fail with `storage_quota_exhausted`, and `initialize` answers 503 with the same code.

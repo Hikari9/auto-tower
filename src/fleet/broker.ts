@@ -1,5 +1,8 @@
+import type { PrincipalKind } from '../auth/principals.js';
 import type { RunnerPool } from '../core/scheduler.js';
+import type { ActivityPage } from '../core/service.js';
 import type { MissionState, WorkPacket } from '../core/types.js';
+import { isHalted } from '../ops/halt.js';
 import { refusalForPolicyRefs } from '../policy/packet-refs.js';
 import { hasTraversal, matchesPattern } from '../policy/patterns.js';
 import { createPolicyService } from '../policy/service.js';
@@ -75,6 +78,11 @@ export function authorityReason(
   if (auth === null) {
     return undefined;
   }
+  // Defense in depth for a packet stored before authorization required a scope: with none, no deny
+  // rule or runner scope could be checked against it.
+  if (packet.scope.length === 0) {
+    return `authority: packet ${packet.id} declares no execution scope. Cancel it and add the packet again with a scope`;
+  }
   const actor = db.get<{ kind: string; disabled_at: string | null }>(
     'SELECT kind, disabled_at FROM principals WHERE id = ? AND workspace_id = ?',
     [auth.by, workspaceId],
@@ -119,8 +127,7 @@ export function authorityReason(
  * covers the claim when it names the grantee, the claim action, the mission, and one of the packet's
  * scopes. Its resource is not compared, since a packet names no resource to compare it with. This
  * mirrors the policy service's deny coverage on that basis. A missing allow rule is not a refusal,
- * since a human's authorization needs none. A packet with no scope is checked under its own name, so
- * a deny rule with a wildcard scope still covers it. A scope the rules cannot check refuses, as an
+ * since a human's authorization needs none. A scope the rules cannot check refuses, as an
  * unchecked scope would otherwise slip past every deny rule.
  */
 function deniedClaim(
@@ -137,12 +144,10 @@ function deniedClaim(
   if (packet.scope.some((scope) => !checkableScope(scope))) {
     return `packet ${packet.id} declares a scope a deny rule cannot be checked against`;
   }
-  const scopes =
-    packet.scope.length === 0 ? [`packet:${packet.id}`] : packet.scope;
   const denies = createPolicyService({ db, clock })
     .listRules(workspaceId, { status: 'active' })
     .filter((rule) => denyApplies(rule, id, mission.id));
-  for (const scope of scopes) {
+  for (const scope of packet.scope) {
     const rule = denies.find((candidate) =>
       coversScope(candidate.scope, scope),
     );
@@ -243,13 +248,11 @@ function recordClaimRefusal(
 ): void {
   const at = clock().toISOString();
   const { policyVersion } = refusal;
-  const seenAudit = db.get<{ n: number }>(
-    `SELECT COUNT(*) AS n FROM fleet_audit
-      WHERE workspace_id = ? AND kind = 'claim.authority_denied'
-        AND json_extract(detail_json, '$.attemptId') = ?
-        AND json_extract(detail_json, '$.policyVersion') = ?`,
-    [workspaceId, refusal.attemptId, policyVersion],
-  );
+  const seenAudit = db.get<{ n: number }>(CLAIM_REFUSAL_SEEN_SQL, [
+    workspaceId,
+    refusal.attemptId,
+    policyVersion,
+  ]);
   if ((seenAudit?.n ?? 0) === 0) {
     recordAudit(db, workspaceId, at, {
       kind: 'claim.authority_denied',
@@ -297,6 +300,107 @@ function recordClaimRefusal(
   );
 }
 
+/** Rule ids and policy refs name standing rules. Only a person or chief of staff is shown them. */
+export function withoutRuleIds(text: string): string {
+  return text
+    .replace(/policy:v\d+:rule:[^\s@]+@\d+/g, 'a policy rule')
+    .replace(/\brul_[A-Za-z0-9_-]+/g, 'a rule');
+}
+
+/** What replaces a policy ref in a mission shown to a runner or a provider. */
+export const REDACTED_POLICY_REF = '[redacted]';
+
+/**
+ * A mission as one viewer may read it. A person or a chief of staff sees it whole. For a runner or
+ * a provider, every policy ref (the mission's and each packet authorization's) is replaced by a
+ * marker, since a ref names a standing rule by id. Nothing else changes.
+ */
+export function missionForViewer(
+  mission: MissionState,
+  viewer: PrincipalKind,
+): MissionState {
+  if (viewer === 'human' || viewer === 'chief_of_staff') {
+    return mission;
+  }
+  const hide = (refs: readonly string[]): string[] =>
+    refs.map(() => REDACTED_POLICY_REF);
+  return {
+    ...mission,
+    policyRefs: hide(mission.policyRefs),
+    packets: mission.packets.map((packet) =>
+      packet.authorization === null
+        ? packet
+        : {
+            ...packet,
+            authorization: {
+              ...packet.authorization,
+              policyRefs: hide(packet.authorization.policyRefs),
+            },
+          },
+    ),
+  };
+}
+
+/** Rule-id-free copy of any JSON value: `policyRefs` keys are dropped and every string is cleaned. */
+function withoutRuleIdsDeep(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return withoutRuleIds(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(withoutRuleIdsDeep);
+  }
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([key]) => key !== 'policyRefs')
+        .map(([key, item]) => [key, withoutRuleIdsDeep(item)]),
+    );
+  }
+  return value;
+}
+
+/**
+ * A mission's activity as one viewer may read it. A person or a chief of staff sees it whole. For
+ * a runner or a provider, each item loses its `policyRefs`, any `policyRefs` inside its payload
+ * (`mission.created` carries them), and every rule id or policy ref written in a string.
+ */
+export function activityForViewer(
+  page: ActivityPage,
+  viewer: PrincipalKind,
+): ActivityPage {
+  if (viewer === 'human' || viewer === 'chief_of_staff') {
+    return page;
+  }
+  return withoutRuleIdsDeep(page) as ActivityPage;
+}
+
+/**
+ * The two audit lookups a claim poll makes. Their WHERE clauses repeat the expression and the
+ * `kind` literal of the partial indexes `fleet_audit_claim_attempt_idx` and
+ * `fleet_audit_claim_mission_idx` (migration 0009), so they search those indexes and never scan the
+ * workspace's audit. A change here must change the index, and the plan test fails if it does not.
+ */
+export const CLAIM_REFUSAL_SEEN_SQL = `SELECT COUNT(*) AS n FROM fleet_audit
+      WHERE workspace_id = ? AND kind = 'claim.authority_denied'
+        AND json_extract(detail_json, '$.attemptId') = ?
+        AND json_extract(detail_json, '$.policyVersion') = ?`;
+
+export const AUTHORITY_HOLDS_SQL = `SELECT json_extract(f.detail_json, '$.attemptId') AS attempt_id,
+            json_extract(f.detail_json, '$.packetId') AS packet_id,
+            f.at AS at
+       FROM fleet_audit f
+       JOIN execution_attempts a
+         ON a.workspace_id = f.workspace_id
+        AND a.id = json_extract(f.detail_json, '$.attemptId')
+      WHERE f.workspace_id = ? AND f.kind = 'claim.authority_denied'
+        AND json_extract(f.detail_json, '$.missionId') = ?
+        AND a.status IN ('leased', 'running')
+        AND NOT EXISTS (
+          SELECT 1 FROM runner_leases l
+           WHERE l.workspace_id = a.workspace_id AND l.attempt_id = a.id
+             AND l.confirmed_at IS NOT NULL)
+      ORDER BY f.seq`;
+
 /** A refusal still standing on an offer a runner has not yet been granted, for the API. */
 export interface AuthorityHold {
   attemptId: string;
@@ -318,29 +422,18 @@ export function authorityHoldsFor(
   clock: () => Date,
   workspaceId: string,
   mission: MissionState,
+  /**
+   * Who is reading. Rule ids are shown to a person or a chief of staff only: for a runner or a
+   * provider they are removed.
+   */
+  viewer: PrincipalKind,
 ): AuthorityHold[] {
+  const seesRules = viewer === 'human' || viewer === 'chief_of_staff';
   const refused = db.all<{
     attempt_id: string;
     packet_id: string;
     at: string;
-  }>(
-    `SELECT json_extract(f.detail_json, '$.attemptId') AS attempt_id,
-            json_extract(f.detail_json, '$.packetId') AS packet_id,
-            f.at AS at
-       FROM fleet_audit f
-       JOIN execution_attempts a
-         ON a.workspace_id = f.workspace_id
-        AND a.id = json_extract(f.detail_json, '$.attemptId')
-      WHERE f.workspace_id = ? AND f.kind = 'claim.authority_denied'
-        AND json_extract(f.detail_json, '$.missionId') = ?
-        AND a.status IN ('leased', 'running')
-        AND NOT EXISTS (
-          SELECT 1 FROM runner_leases l
-           WHERE l.workspace_id = a.workspace_id AND l.attempt_id = a.id
-             AND l.confirmed_at IS NOT NULL)
-      ORDER BY f.seq`,
-    [workspaceId, mission.id],
-  );
+  }>(AUTHORITY_HOLDS_SQL, [workspaceId, mission.id]);
   const latest = new Map<string, { packet_id: string; at: string }>();
   for (const row of refused) {
     latest.set(row.attempt_id, { packet_id: row.packet_id, at: row.at });
@@ -359,7 +452,7 @@ export function authorityHoldsFor(
       holds.push({
         attemptId,
         packetId: packet_id,
-        reason,
+        reason: seesRules ? reason : withoutRuleIds(reason),
         policyVersion,
         at,
       });
@@ -489,6 +582,10 @@ export function createFleetPool(deps: {
 }): RunnerPool {
   return {
     findEligible({ workspaceId, mission, packet }) {
+      // An emergency halt dispatches nothing new. Work waits as it is, and resumes with the halt lifted.
+      if (isHalted(deps.db, workspaceId)) {
+        return undefined;
+      }
       const runner = pickRunner(deps.db, deps.config, {
         workspaceId,
         missionId: mission.id,

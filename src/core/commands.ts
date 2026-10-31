@@ -345,6 +345,15 @@ export function authorizePacketDecision(
           `packet ${packetId} is ${packet.status}${packet.authorization === null ? '' : ' and already authorized'}`,
         );
       }
+      // A runner can claim only a packet that says what it will touch, so scope-specific deny rules
+      // and a runner's allowed scopes always have something to match. A packet with no scope
+      // would slip past both.
+      if (packet.scope.length === 0) {
+        throw new CommandNotAllowedError(
+          'authorize a work packet',
+          `packet ${packetId} declares no execution scope, so no runner could be checked against it. Cancel it and add the packet again with a scope`,
+        );
+      }
       // A cited ref is a claim. A chief of staff acts only under a rule that is current now, so
       // each ref is resolved and evaluated here, where the authorization takes effect.
       if (env.actor.kind === 'chief_of_staff') {

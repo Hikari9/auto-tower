@@ -516,3 +516,61 @@ describe('default wiring', () => {
     ).toThrow();
   });
 });
+
+describe('closing when the provider cannot say whether issues block it', () => {
+  const HUMAN_CLOSE_RULE = { ...CLOSE_RULE, grantee: { kind: 'human' } };
+
+  async function unknownBlockers() {
+    const api = createIssueApi();
+    const driver = await setupClosable(api);
+    await api.call(api.owner, 'POST', '/policy/rules', HUMAN_CLOSE_RULE);
+    api.h.github.issue(ISSUE_URL).blockers = null;
+    driver.verifyOutcome();
+    return { api, driver, path: `/missions/${driver.id}/issue-links/close` };
+  }
+
+  it('blocks without the override, as before', async () => {
+    const { api, path } = await unknownBlockers();
+    const res = await api.call(api.owner, 'POST', path, {});
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toMatchObject({ status: 'blocked' });
+    expect(api.h.github.closeCalls).toBe(0);
+  });
+
+  it('lets a person proceed with overrideUnknownBlockers, and records them', async () => {
+    const { api, driver, path } = await unknownBlockers();
+    const res = await api.call(api.owner, 'POST', path, {
+      overrideUnknownBlockers: true,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.results[0].status).toBe('closed');
+    expect(api.h.github.closeCalls).toBe(1);
+    const entry = api.h.issues
+      .history('ws_test', driver.id, { afterSeq: 0, limit: 50 })
+      .find((e) => e.type === 'blockers_unknown_override');
+    expect(entry?.actorId).toBe(api.h.owner.id);
+  });
+
+  it('refuses a chief of staff the override, and closes nothing', async () => {
+    const { api, path } = await unknownBlockers();
+    const res = await api.call(api.cos, 'POST', path, {
+      overrideUnknownBlockers: true,
+    });
+    expect(res.status).toBe(403);
+    expect(api.h.github.closeCalls).toBe(0);
+  });
+
+  it('rejects a flag that is not a boolean, and any other field', async () => {
+    const { api, path } = await unknownBlockers();
+    expect(
+      (
+        await api.call(api.owner, 'POST', path, {
+          overrideUnknownBlockers: 'yes',
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (await api.call(api.owner, 'POST', path, { override: true })).status,
+    ).toBe(400);
+  });
+});

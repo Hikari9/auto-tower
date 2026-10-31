@@ -38,5 +38,19 @@ export type FleetErrorCode =
   | 'lease_expired'
   | 'lease_closed'
   | 'attempt_cancelled'
+  | 'claim_conflict'
   | 'receipt_conflict'
   | 'progress_conflict';
+
+/** SQLite's unique and primary-key violations: the error a lost race on an index raises. */
+export function isUniqueViolation(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const errcode = (error as { errcode?: unknown }).errcode;
+  return (
+    errcode === 2067 ||
+    errcode === 1555 ||
+    /UNIQUE constraint failed/i.test(error.message)
+  );
+}

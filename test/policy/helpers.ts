@@ -116,7 +116,7 @@ export function missionWith(
       {
         title: spec.title,
         instructions: '',
-        scope: spec.scope ?? [],
+        scope: spec.scope ?? ['repo:app'],
         required: true,
         dependsOn: [],
       },

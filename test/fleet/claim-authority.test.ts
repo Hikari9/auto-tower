@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { authorityReason } from '../../src/fleet/broker.js';
 import { createPolicyService } from '../../src/policy/service.js';
 import { mission } from '../core/helpers.js';
 import { TEST_WORKSPACE } from '../helpers/tower.js';
@@ -49,7 +50,7 @@ function setup(lifetimeMs?: number) {
   ).mission;
   h.core.missions.authorizePacket(h.ctx(), state.id, state.version, human, []);
 
-  return { h, policy, rule, cited, human };
+  return { h, policy, rule, cited, human, missionId: state.id };
 }
 
 type Claim = {
@@ -475,11 +476,10 @@ describe('claim-time refusals: coverage of each record and hold', () => {
     expect(holds[0].reason).toBe(rows[1]?.detail.reason);
   });
 
-  it('refuses a human packet whose scope the policy cannot check, and checks an empty scope under the packet name', async () => {
+  it('refuses a human packet whose scope the policy cannot check', async () => {
     const { h, policy } = setup();
     const wildcard = h.mission([{ title: 'wild', scope: ['env:*'] }]);
     const traversal = h.mission([{ title: 'trav', scope: ['../x'] }]);
-    const empty = h.mission([{ title: 'empty', scope: [] }]);
     policy.createRule(
       h.ctx(),
       ruleInput({
@@ -500,11 +500,36 @@ describe('claim-time refusals: coverage of each record and hold', () => {
     expect(reasonFor(traversal.packetIds[0] ?? '')).toMatch(
       /^authority: packet .* declares a scope/,
     );
-    // An empty scope is checked under `packet:<id>`, which the wildcard deny covers.
-    expect(reasonFor(empty.packetIds[0] ?? '')).toMatch(
-      /^authority: .*denied by rule/,
-    );
     expect(packetsGranted(claim)).toEqual([]);
+  });
+
+  it('does not let a packet with no execution scope be authorized, so no runner can claim one', () => {
+    const { h } = setup();
+    expect(() => h.mission([{ title: 'empty', scope: [] }])).toThrow(
+      /declares no execution scope/,
+    );
+  });
+
+  it('refuses at claim a stored packet with an empty scope, whoever authorized it', () => {
+    const { h, cited, human, missionId } = setup();
+    const state = h.core.missions.getMission(TEST_WORKSPACE, missionId);
+    if (state === undefined) {
+      throw new Error('mission missing');
+    }
+    // Authorization now requires a scope, so a scopeless one is a packet stored before that rule.
+    for (const id of [cited, human]) {
+      const packet = state.packets.find((p) => p.id === id);
+      if (packet === undefined) {
+        throw new Error('packet missing');
+      }
+      expect(packet.authorization).not.toBeNull();
+      expect(
+        authorityReason(h.db, h.clock.now, TEST_WORKSPACE, state, {
+          ...packet,
+          scope: [],
+        }),
+      ).toMatch(/^authority: packet .* declares no execution scope/);
+    }
   });
 
   it('refuses with an audit row and no receipt when the authorizing principal row is gone', async () => {

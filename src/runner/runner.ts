@@ -73,6 +73,8 @@ export interface PollReport {
   started: string[];
   reconciled: string[];
   receiptsSent: string[];
+  /** Receipts Tower stored but did not read an Office verdict from. The work is not reviewed. */
+  officeNotIngested: Array<{ leaseId: string; reason: string }>;
   /** Leases this runner let go of, and why: cancelled, or fenced by a newer holder. */
   dropped: Array<{ leaseId: string; reason: string }>;
   withheld: Array<{ attemptId: string; reason: string }>;
@@ -89,6 +91,7 @@ function blankReport(): PollReport {
     started: [],
     reconciled: [],
     receiptsSent: [],
+    officeNotIngested: [],
     dropped: [],
     withheld: [],
     retryAfterMs: 0,
@@ -606,7 +609,14 @@ export class TowerRunner {
       body,
     );
     if (isOk(res)) {
-      parseReceiptResponse(res.body);
+      const accepted = parseReceiptResponse(res.body);
+      if (accepted.office?.ingested === false) {
+        const reason = accepted.office.reason ?? 'not_ingested';
+        report?.officeNotIngested.push({ leaseId: lease.leaseId, reason });
+        this.log(
+          `receipt for lease ${lease.leaseId} was stored but Tower did not read an Office verdict from it (${reason})`,
+        );
+      }
       delete this.requireState().leases[lease.leaseId];
       this.persist();
       report?.receiptsSent.push(lease.leaseId);

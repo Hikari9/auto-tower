@@ -32,6 +32,12 @@ export const WORKER_DASHBOARD_CSP = [
 
 export interface WorkerEnv {
   ASSETS?: { fetch(request: Request): Response | Promise<Response> };
+  /**
+   * The sweep the cron trigger runs: `runSweep` (src/ops/sweep.ts) over the D1-backed database.
+   * Supplied by the host once the D1 adapter exists (DEFERRED.md). Without it there is no store
+   * and nothing to sweep.
+   */
+  SWEEP?: () => void | Promise<void>;
 }
 
 const DASHBOARD_PATHS = new Map<string, string>([
@@ -117,6 +123,14 @@ function route(
 }
 
 export default {
+  /**
+   * The cron trigger (`[triggers]` in wrangler.toml). Ticks the scheduler and lease recovery with
+   * no runner poll. With no store bound it does nothing, and says so by returning.
+   */
+  async scheduled(_controller?: unknown, env: WorkerEnv = {}): Promise<void> {
+    await env.SWEEP?.();
+  },
+
   async fetch(request?: Request, env: WorkerEnv = {}): Promise<Response> {
     const res = await route(request, env);
     // HEAD answers with the status and headers of the route and no body, on every path.

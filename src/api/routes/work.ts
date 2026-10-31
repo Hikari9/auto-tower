@@ -7,6 +7,7 @@ import {
   parseReject,
   parseVersionOnly,
 } from '../../core/inputs.js';
+import { missionForViewer } from '../../fleet/broker.js';
 import type { RouteSpec } from '../app.js';
 import {
   callerOf,
@@ -42,10 +43,11 @@ const listPackets: RouteSpec = {
   access: { scopes: ['mission:read'] },
   handler: guarded((c) => {
     const id = c.req.param('id') ?? '';
-    const mission = coreOf(c).missions.getMission(callerOf(c).workspaceId, id);
-    if (mission === undefined) {
+    const found = coreOf(c).missions.getMission(callerOf(c).workspaceId, id);
+    if (found === undefined) {
       throw new MissionNotFoundError(id);
     }
+    const mission = missionForViewer(found, callerOf(c).actor.kind);
     return c.json({ packets: mission.packets, attempts: mission.attempts });
   }),
 };

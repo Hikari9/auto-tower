@@ -18,7 +18,9 @@ export type EvaluationCode =
   | 'grant_revoked'
   | 'producer_cannot_review'
   | 'unknown_principal'
-  | 'principal_disabled';
+  | 'principal_disabled'
+  /** An emergency halt stopped the effect. No rule decided it. */
+  | 'workspace_halted';
 
 export interface Grantee {
   kind: PrincipalKind | null;

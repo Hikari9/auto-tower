@@ -2,6 +2,7 @@ import { PacketNotFoundError } from '../../core/errors.js';
 import { parseAuthorize } from '../../core/inputs.js';
 import type { WorkPacket } from '../../core/types.js';
 import { InputReader } from '../../core/validation.js';
+import { withoutRuleIds } from '../../fleet/broker.js';
 import { refusalForPolicyRefs } from '../../policy/packet-refs.js';
 import { takeId } from '../args.js';
 import type { ToolDefinition } from '../tool.js';
@@ -173,5 +174,12 @@ function citedPolicy(
   );
   return refusal === undefined
     ? { accepted: true }
-    : { accepted: false, reason: refusal };
+    : {
+        accepted: false,
+        // A chief of staff cites rules, so it may see them. A runner or provider may not.
+        reason:
+          ctx.caller.actor.kind === 'chief_of_staff'
+            ? refusal
+            : withoutRuleIds(refusal),
+      };
 }

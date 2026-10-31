@@ -41,7 +41,7 @@ export const fleetTools: readonly ToolDefinition[] = [
     name: 'list_runs',
     title: 'List runs',
     description:
-      'Lists execution attempts, newest first. An attempt records what a runner claimed. A claim is not verification: only packet and mission verification count.',
+      'Lists execution attempts, newest first. An attempt records what a runner claimed. A claim is not verification: only packet and mission verification count. A runner principal sees only its own attempts.',
     readOnly: true,
     scopes: ['mission:read'],
     properties: {
@@ -55,15 +55,21 @@ export const fleetTools: readonly ToolDefinition[] = [
       const status = r.optEnum('status', ATTEMPT_STATUSES);
       const limit = r.optInteger('limit', { min: 1, max: 200 }) ?? 50;
       r.finish();
+      // A runner reads its own attempts only: the others show other runners' work and claims.
+      const ownRunner =
+        ctx.caller.actor.kind === 'runner' ? ctx.caller.actor.id : null;
       const rows = ctx.services.db.all<AttemptRow>(
         `SELECT id, mission_id, packet_id, number, runner_id, status, dispatched_at, started_at, reported_at, reported_by
          FROM execution_attempts
          WHERE workspace_id = ?
+           AND (? IS NULL OR runner_id = ?)
            AND (? IS NULL OR mission_id = ?)
            AND (? IS NULL OR status = ?)
          ORDER BY dispatched_at DESC, id DESC LIMIT ?`,
         [
           ctx.caller.workspaceId,
+          ownRunner,
+          ownRunner,
           missionId ?? null,
           missionId ?? null,
           status ?? null,

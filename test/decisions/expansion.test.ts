@@ -344,6 +344,31 @@ describe('tier 2: a Chief of Staff under a delegated rule', () => {
     ]);
   });
 
+  it('raises a decision, not an error, when the rule covers the request but not every scope the packet declares', () => {
+    const { h, route } = setup();
+    const m = withFollowUp(h, 'medium', ['infra/*', 'ops/*']);
+    grant(h, COVERS_INFRA);
+    const version = m.driver.refresh().version;
+    const outcome = expectDecision(
+      route(
+        expansion(h, {
+          requester: h.cos,
+          missionId: m.driver.id,
+          packetId: m.followUp,
+          scope: 'infra/terraform',
+        }),
+      ),
+    );
+    expect(outcome).toMatchObject({ tier: 3, created: true });
+    expect(outcome.decision.requiredAuthority).toBe('human');
+    expect(packetStatus(m.driver, m.followUp).authorized).toBe(false);
+    // The refused authorization left nothing in the mission's log.
+    expect(m.driver.refresh().version).toBe(version);
+    expect(
+      h.authority.decisions.list('ws_test', { status: 'open' }),
+    ).toHaveLength(1);
+  });
+
   it('does not approve a packet that is no longer waiting, and writes nothing', () => {
     const { h, route } = setup();
     const m = withFollowUp(h);

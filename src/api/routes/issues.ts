@@ -129,9 +129,13 @@ const close: RouteSpec = {
   path: '/missions/:id/issue-links/close',
   access: { scopes: ['mission:write'] },
   handler: issueGuarded(async (c) => {
-    const { urls } = parseCloseLinks(await readJson(c));
+    const { urls, overrideUnknownBlockers } = parseCloseLinks(
+      await readJson(c),
+    );
     return c.json(
-      await issuesOf(c).closeRequired(commandContext(c), param(c, 'id'), urls),
+      await issuesOf(c).closeRequired(commandContext(c), param(c, 'id'), urls, {
+        overrideUnknownBlockers,
+      }),
     );
   }),
 };

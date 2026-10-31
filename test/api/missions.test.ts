@@ -14,6 +14,7 @@ import {
 
 interface Api {
   db: SqlDatabase;
+  clock: FakeClock;
   core: ReturnType<typeof createCore>;
   pool: FakePool;
   owner: { token: string; principalId: string };
@@ -47,6 +48,7 @@ function setup(
   const runner = seedPrincipal(db, { kind: 'runner', workspaceId });
   return {
     db,
+    clock,
     core,
     pool,
     owner,
@@ -705,7 +707,7 @@ describe('work packets, completion and the scheduler over HTTP', () => {
       api.owner.token,
       'POST',
       `/missions/${id}/work-packets`,
-      { expectedVersion: 2, title: 'Build' },
+      { expectedVersion: 2, title: 'Build', scope: ['repo:app'] },
     );
     expect(added.status).toBe(201);
     const packetId = added.body.mission.packets[0].id;
@@ -787,6 +789,7 @@ describe('work packets, completion and the scheduler over HTTP', () => {
       await api.call(api.owner.token, 'POST', `/missions/${id}/work-packets`, {
         expectedVersion: 2,
         title: 'Build',
+        scope: ['repo:app'],
       })
     ).body.mission.packets[0].id;
     await api.call(api.owner.token, 'POST', `/missions/${id}/transitions`, {
@@ -1029,7 +1032,7 @@ describe('write routes need the write scope', () => {
       api.owner.token,
       'POST',
       `/missions/${mine.id}/work-packets`,
-      { expectedVersion: 2, title: 'a' },
+      { expectedVersion: 2, title: 'a', scope: ['repo:app'] },
     );
     await api.call(
       api.owner.token,
@@ -1061,7 +1064,7 @@ describe('packet verification over HTTP', () => {
       api.owner.token,
       'POST',
       `/missions/${m.id}/work-packets`,
-      { expectedVersion: 2, title: 'a' },
+      { expectedVersion: 2, title: 'a', scope: ['repo:app'] },
     );
     const packetId = added.body.mission.packets[0].id as string;
     await api.call(
@@ -1227,9 +1230,7 @@ describe('search filters', () => {
   });
 
   it('filters by risk, parent and intent text, and orders by recent update', async () => {
-    // Updates are ordered by recording time, so the wall clock is pinned and moved by hand.
-    vi.useFakeTimers({ toFake: ['Date'] });
-    vi.setSystemTime(new Date('2026-03-01T00:00:00.000Z'));
+    // Updates are ordered by recording time, which comes from the injected clock.
     const api = setup();
     const parent = await createMission(api, {
       ...NEW_MISSION,
@@ -1256,12 +1257,11 @@ describe('search filters', () => {
       'Parent',
     ]);
 
-    vi.setSystemTime(new Date('2026-03-01T00:00:05.000Z'));
+    api.clock.advance(5000);
     await api.call(api.owner.token, 'PATCH', `/missions/${parent.id}`, {
       expectedVersion: 1,
       title: 'Parent touched',
     });
-    vi.useRealTimers();
     expect(await titles('?risk=medium')).toEqual(['Parent touched', 'Plain']);
     expect(kid.id).not.toBe(plain.id);
   });
@@ -1289,7 +1289,7 @@ describe('cancel reaches nothing outside Tower', () => {
         api.owner.token,
         'POST',
         `/missions/${m.id}/work-packets`,
-        { expectedVersion: 2, title: 'a' },
+        { expectedVersion: 2, title: 'a', scope: ['repo:app'] },
       );
       await api.call(
         api.owner.token,

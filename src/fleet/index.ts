@@ -32,6 +32,7 @@ import {
   releaseLease,
   releaseOffer,
   sweepWorkspace,
+  tickWorkspace,
   unquarantine,
   updateRunner,
 } from './leases.js';
@@ -175,6 +176,8 @@ export interface Fleet {
   ): AuditRecord[];
   /** Brings lease state up to date with the clock. Every operation does this itself. */
   sweep(workspaceId: string): void;
+  /** Sweeps, then schedules, with no runner poll involved. Hosts call it on a timer. */
+  tick(workspaceId: string): void;
 }
 
 export function createFleet(deps: FleetDependencies): Fleet {
@@ -290,6 +293,7 @@ export function createFleet(deps: FleetDependencies): Fleet {
     },
     audit: (workspaceId, query) => readAudit(deps.db, workspaceId, query),
     sweep: (workspaceId) => sweepWorkspace(ctx, workspaceId),
+    tick: (workspaceId) => tickWorkspace(ctx, workspaceId),
   };
 }
 

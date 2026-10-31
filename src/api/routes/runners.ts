@@ -1,6 +1,8 @@
 import type { Context } from 'hono';
-import { ingestOfficeReceipt } from '../../adapters/office/ledger.js';
-import { parseOfficeReceipt } from '../../adapters/office/receipt.js';
+import {
+  ingestOfficeEvidence,
+  type OfficeIngest,
+} from '../../adapters/office/ingest.js';
 import type { Fleet, FleetErrorCode, RunnerCaller } from '../../fleet/index.js';
 import { FleetError } from '../../fleet/index.js';
 import {
@@ -35,6 +37,7 @@ const STATUS_BY_CODE: Readonly<Record<FleetErrorCode, 401 | 403 | 404 | 409>> =
     lease_expired: 409,
     lease_closed: 409,
     attempt_cancelled: 409,
+    claim_conflict: 409,
     receipt_conflict: 409,
     progress_conflict: 409,
   };
@@ -324,53 +327,64 @@ const checkpoint: RouteSpec = {
 
 /**
  * Records the Office verdict for a receipt Tower has already accepted and stored. The runner's
- * receipt is never rejected because of it: a body that is not an Office receipt is skipped, and a
- * bad or conflicting one is logged with no content from the body.
+ * receipt is never rejected because of it. The outcome is returned, so a runner whose Office
+ * contract did not parse is told nothing was ingested instead of getting a plain success.
  */
 function ingestOfficeVerdict(
   c: Context<AppEnv>,
   caller: RunnerCaller,
   leaseId: string,
   receiptId: string,
-): void {
+): OfficeIngest {
   const { db, core, now } = c.get('deps');
   if (core === undefined) {
-    return;
+    return { status: 'not_office' };
   }
   const detail = fleetOf(c).leaseDetail(caller.workspaceId, leaseId, {
     principalId: caller.principalId,
     kind: 'runner',
   });
   const stored = detail.receipts.find((r) => r.receiptId === receiptId);
-  const evidence = stored?.evidence as { contract?: unknown } | undefined;
-  if (
-    typeof evidence?.contract !== 'string' ||
-    !evidence.contract.startsWith('tower.office.')
-  ) {
-    return;
-  }
   const mission = core.missions.getMission(
     caller.workspaceId,
     detail.lease.missionId,
   );
   if (mission === undefined) {
-    return;
+    return { status: 'not_office' };
   }
-  try {
-    ingestOfficeReceipt(db, {
-      workspaceId: caller.workspaceId,
-      missionId: detail.lease.missionId,
-      packetId: detail.lease.packetId,
-      attemptId: detail.lease.attemptId,
-      producerIds: [caller.principalId],
-      risk: mission.risk,
-      receipt: parseOfficeReceipt(evidence),
-      recordedAt: (now ?? (() => new Date()))().toISOString(),
-    });
-  } catch (error) {
+  const outcome = ingestOfficeEvidence(db, {
+    workspaceId: caller.workspaceId,
+    missionId: detail.lease.missionId,
+    packetId: detail.lease.packetId,
+    attemptId: detail.lease.attemptId,
+    risk: mission.risk,
+    callerId: caller.principalId,
+    evidence: stored?.evidence,
+    recordedAt: (now ?? (() => new Date()))().toISOString(),
+  });
+  if (outcome.status === 'not_ingested') {
     console.error(
-      `office receipt not recorded for lease ${leaseId}: ${error instanceof Error ? error.name : 'error'}`,
+      `office receipt not recorded for lease ${leaseId}: ${outcome.reason}`,
     );
+  }
+  return outcome;
+}
+
+/** The part of the receipt response that tells the runner what became of its Office verdict. */
+function officeField(outcome: OfficeIngest) {
+  switch (outcome.status) {
+    case 'not_office':
+      return {};
+    case 'ingested':
+      return { office: { ingested: true } };
+    case 'not_ingested':
+      return {
+        office: {
+          ingested: false,
+          reason: outcome.reason,
+          message: outcome.message,
+        },
+      };
   }
 }
 
@@ -386,8 +400,11 @@ const receipt: RouteSpec = {
       leaseId,
       parseReceipt(await readJson(c)),
     );
-    ingestOfficeVerdict(c, caller, leaseId, result.receiptId);
-    return c.json(result, result.replayed ? 200 : 201);
+    const office = ingestOfficeVerdict(c, caller, leaseId, result.receiptId);
+    return c.json(
+      { ...result, ...officeField(office) },
+      result.replayed ? 200 : 201,
+    );
   }),
 };
 

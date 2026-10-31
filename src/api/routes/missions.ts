@@ -20,7 +20,12 @@ import {
   parseUpdateMission,
 } from '../../core/inputs.js';
 import type { CommandContext, CommandResult } from '../../core/service.js';
-import { authorityHoldsFor } from '../../fleet/broker.js';
+import {
+  activityForViewer,
+  authorityHoldsFor,
+  missionForViewer,
+} from '../../fleet/broker.js';
+import { StorageQuotaError } from '../../ops/quota.js';
 import { createPolicyService } from '../../policy/service.js';
 import type { AppDependencies, AppEnv, RouteSpec } from '../app.js';
 
@@ -192,6 +197,14 @@ export function guarded(handler: RouteHandler): RouteHandler {
           error.status,
         );
       }
+      // The store refused a write for space. A runner or client retries a 503, and the message
+      // says what an operator must do, where a bare 500 would look like a bug.
+      if (error instanceof StorageQuotaError) {
+        return c.json(
+          { error: { code: error.code, message: error.message } },
+          503,
+        );
+      }
       throw error;
     }
   };
@@ -258,13 +271,15 @@ const readMission: RouteSpec = {
     }
     // Claim-time authority refusals still holding a branch of this mission, with the reason.
     const { db, now } = c.get('deps');
+    const viewer = callerOf(c).actor.kind;
     return c.json({
-      mission,
+      mission: missionForViewer(mission, viewer),
       holds: authorityHoldsFor(
         db,
         now ?? (() => new Date()),
         workspaceId,
         mission,
+        viewer,
       ),
     });
   }),
@@ -402,10 +417,13 @@ const readActivity: RouteSpec = {
   handler: guarded((c) => {
     const page = parseActivity(c.req.query());
     return c.json(
-      coreOf(c).missions.activity(
-        callerOf(c).workspaceId,
-        c.req.param('id') ?? '',
-        page,
+      activityForViewer(
+        coreOf(c).missions.activity(
+          callerOf(c).workspaceId,
+          c.req.param('id') ?? '',
+          page,
+        ),
+        callerOf(c).actor.kind,
       ),
     );
   }),

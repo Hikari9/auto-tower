@@ -28,15 +28,20 @@ export function parseAddLink(body: unknown): {
   return parsed;
 }
 
-export function parseCloseLinks(body: unknown): { urls: string[] | undefined } {
+export function parseCloseLinks(body: unknown): {
+  urls: string[] | undefined;
+  /** A person's choice to close although the provider could not say whether open issues block it. */
+  overrideUnknownBlockers: boolean;
+} {
   const r = new InputReader(body);
   const urls = r.optStrings('urls', {
     maxItems: LIMITS.links,
     maxLength: 2_000,
     minLength: 1,
   });
+  const overrideUnknownBlockers = r.optBoolean('overrideUnknownBlockers');
   r.finish();
-  return { urls };
+  return { urls, overrideUnknownBlockers: overrideUnknownBlockers === true };
 }
 
 export function parseReason(body: unknown): { reason: string } {

@@ -1,6 +1,7 @@
 import { ValidationError } from '../../core/errors.js';
 import type { MissionState, MissionStatus } from '../../core/types.js';
 import { InputReader } from '../../core/validation.js';
+import { activityForViewer } from '../../fleet/broker.js';
 import type { ToolContext, ToolDefinition } from '../tool.js';
 import { requireMission } from './missions.js';
 
@@ -131,10 +132,13 @@ export const briefingTools: readonly ToolDefinition[] = [
         requireMission(ctx, missionId);
         return {
           data: {
-            ...ctx.services.core.missions.activity(workspaceId, missionId, {
-              afterVersion: after ?? 0,
-              limit,
-            }),
+            ...activityForViewer(
+              ctx.services.core.missions.activity(workspaceId, missionId, {
+                afterVersion: after ?? 0,
+                limit,
+              }),
+              ctx.caller.actor.kind,
+            ),
           },
         };
       }
