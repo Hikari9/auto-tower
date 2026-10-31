@@ -737,6 +737,35 @@ function assignmentOf(
   };
 }
 
+/**
+ * Why a runner may not be sent a lease's work right now, or undefined. Used wherever work it
+ * already holds would be handed back, so a paused runner, a narrowed scope or a paused mission
+ * is honoured the same way on a claim and on a reconcile.
+ */
+function withholdReason(
+  ctx: FleetContext,
+  tx: SqlDatabase,
+  runner: Runner,
+  mission: MissionState,
+  packet: WorkPacket,
+): string | undefined {
+  if (runner.status !== 'active') {
+    return `runner is ${runner.status}`;
+  }
+  if (PAUSING_MISSION_STATES.includes(mission.state)) {
+    return `mission is ${mission.state}`;
+  }
+  return ineligibleReason(
+    tx,
+    ctx.config,
+    runner,
+    mission.id,
+    packet,
+    ctx.now(),
+    { requireLive: false, load: 'none' },
+  );
+}
+
 function grant(
   ctx: FleetContext,
   tx: SqlDatabase,
@@ -762,20 +791,7 @@ function grant(
     if (mission === undefined || found === undefined) {
       continue;
     }
-    const reason =
-      runner.status !== 'active'
-        ? `runner is ${runner.status}`
-        : PAUSING_MISSION_STATES.includes(mission.state)
-          ? `mission is ${mission.state}`
-          : ineligibleReason(
-              tx,
-              ctx.config,
-              runner,
-              mission.id,
-              found.packet,
-              now,
-              { requireLive: false, load: 'none' },
-            );
+    const reason = withholdReason(ctx, tx, runner, mission, found.packet);
     if (reason !== undefined) {
       withheld.push({ attemptId: lease.attemptId, reason });
       continue;
@@ -1279,6 +1295,8 @@ export interface ReconcileResult {
   lease: LeaseView;
   /** The work itself, for a runner that lost it along with its state. */
   assignment: Assignment | null;
+  /** Why `assignment` is null, when the runner may not be sent the work. */
+  withheld: string | null;
   /** Where Tower's record of the attempt ends. The runner resends anything past it. */
   resume: {
     progressSeq: number;
@@ -1358,12 +1376,18 @@ export function reconcile(
       );
       const found =
         mission === undefined ? undefined : findPacket(mission, current);
+      // The work goes back only to a runner that could be sent it on a claim.
+      const withheld =
+        mission === undefined || found === undefined
+          ? 'the attempt is no longer part of its mission'
+          : withholdReason(ctx, tx, runner, mission, found.packet);
       return {
         lease: viewOf(tx, current, runner),
         assignment:
-          mission === undefined || found === undefined
+          mission === undefined || found === undefined || withheld !== undefined
             ? null
             : assignmentOf(ctx, tx, runner, current, mission, found.packet),
+        withheld: withheld ?? null,
         resume,
       };
     };
@@ -1383,7 +1407,7 @@ export function reconcile(
     const expiresAt = iso(now.getTime() + ctx.config.leaseTtlMs);
     tx.run(
       `UPDATE runner_leases SET status = 'held', fence = ?, reconciled_from = ?, expires_at = ?, last_proof_at = ?,
-         recovering_since = NULL, reassign_failures = 0, reassign_not_before = NULL
+         confirmed_at = NULL, recovering_since = NULL, reassign_failures = 0, reassign_not_before = NULL
        WHERE workspace_id = ? AND id = ?`,
       [
         fence,
@@ -1431,12 +1455,17 @@ export function updateRunner(
     if (runner === undefined) {
       throw new FleetError('runner_not_found', 'No such runner');
     }
-    const status =
-      runner.status === 'quarantined' || input.paused === undefined
-        ? runner.status
+    // A quarantine is lifted only by `unquarantine`. A pause toggled meanwhile is remembered, so the
+    // runner comes back in the state the human last chose.
+    const quarantined = runner.status === 'quarantined';
+    const wanted =
+      input.paused === undefined
+        ? undefined
         : input.paused
           ? 'paused'
           : 'active';
+    const status = quarantined ? 'quarantined' : (wanted ?? runner.status);
+    const priorStatus = quarantined ? (wanted ?? runner.priorStatus) : null;
     const next = {
       status,
       allowedScopes: input.allowedScopes ?? runner.allowedScopes,
@@ -1444,9 +1473,10 @@ export function updateRunner(
     };
     const at = ctx.now().toISOString();
     tx.run(
-      'UPDATE runners SET status = ?, allowed_scopes_json = ?, max_concurrent = ?, updated_at = ? WHERE workspace_id = ? AND id = ?',
+      'UPDATE runners SET status = ?, prior_status = ?, allowed_scopes_json = ?, max_concurrent = ?, updated_at = ? WHERE workspace_id = ? AND id = ?',
       [
         next.status,
+        priorStatus,
         JSON.stringify(next.allowedScopes),
         next.maxConcurrent,
         at,
@@ -1464,7 +1494,7 @@ export function updateRunner(
           allowedScopes: runner.allowedScopes,
           maxConcurrent: runner.maxConcurrent,
         },
-        to: next,
+        to: { ...next, ...(quarantined ? { restoreTo: priorStatus } : {}) },
       },
     });
     return { ...runner, ...next, updatedAt: at };

@@ -34,7 +34,9 @@ async function hold(
 ): Promise<Held> {
   const { id } = h.mission([{ scope }]);
   const res = await runner.claim();
-  const [a] = res.body.assignments;
+  const a = res.body.assignments.find(
+    (x: { missionId: string }) => x.missionId === id,
+  );
   if (a === undefined) {
     throw new Error(`nothing claimed: ${JSON.stringify(res.body)}`);
   }
@@ -421,7 +423,12 @@ describe('missed heartbeats', () => {
     expect(poll.body.assignments).toEqual([]);
     expect(poll.body.reconcile).toHaveLength(1);
     await runner.reconcile(held.leaseId, 1);
-    expect((await runner.claim()).body.assignments).toHaveLength(1);
+    // It now holds the lease on fence 2 and shows it, so the only new thing to send is the second packet.
+    const next = await runner.claim({
+      active: [evidence({ ...held, fence: 2, progressSeq: 1 })],
+    });
+    expect(next.body.assignments).toHaveLength(1);
+    expect(next.body.assignments[0].scopeKey).toBe('repo:two#worktree:default');
   });
 
   it('keeps a lease alive only on matching attempt evidence', async () => {

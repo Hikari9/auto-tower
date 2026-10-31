@@ -6,6 +6,20 @@ const MAX_SCANNED = 100_000;
 const SECRET_WORDS =
   'secret|token|passw(?:or)?d|passwd|pwd|passphrase|api[_-]?key|private[_-]?key|credential';
 
+// An optional closing quote of the name (JSON text may escape it), then the separator.
+const KEY_SEPARATOR = '(?:\\\\?["\'])?\\s{0,20}[:=]\\s{0,20}';
+
+/**
+ * A quoted value, whole, with escaped quotes inside it. A quote that never closes takes the rest
+ * of the text: over-redacting is the safe direction, and it keeps the scan from restarting at
+ * every later occurrence. The alternatives start on different characters, so none backtracks.
+ */
+const QUOTED =
+  '\\\\?"(?:[^"\\\\]|\\\\.)*"|\\\\?\'(?:[^\'\\\\]|\\\\.)*\'|\\\\?"[\\s\\S]*|\\\\?\'[\\s\\S]*';
+
+/** An unquoted value. It has no length cap, since a cap would leave the tail of a long secret stored. */
+const BARE = '[^\\s"\',;\\\\]+';
+
 /**
  * Secret shapes scanned in every string Tower stores from a runner. Best effort: it catches
  * well-known token formats and key/value assignments, not a secret split across fields or
@@ -29,7 +43,7 @@ const PATTERNS: readonly RegExp[] = [
   // Provider API keys such as sk-... and sk-ant-...
   /\bsk-[A-Za-z0-9_-]{20,}/g,
   // JSON web tokens.
-  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{3,}/g,
   // Webhook URLs, where the path is the credential.
   /hooks\.slack\.com\/services\/[A-Za-z0-9/_-]{8,}/gi,
   /discord(?:app)?\.com\/api\/webhooks\/\d+\/[A-Za-z0-9_-]+/gi,
@@ -37,17 +51,21 @@ const PATTERNS: readonly RegExp[] = [
   /[?&](?:sig|signature|x-amz-signature|x-amz-security-token|x-amz-credential|access_token|api_key|apikey|token)=[^&\s"']+/gi,
   // Credentials inside a URL.
   /\b[a-z][a-z0-9+.-]{0,31}:\/\/[^\s/:@]{1,200}:[^\s/@]{1,200}@/gi,
-  // Bearer values.
-  /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/g,
+  // Bearer and Basic credentials. A Basic value must look like base64, so prose is left alone.
+  /\bBearer[\s:]+[A-Za-z0-9._~+/=-]{12,}/gi,
+  /\bBasic\s+(?=[A-Za-z0-9+/]{0,200}[0-9+/=])[A-Za-z0-9+/]{8,}={0,2}/gi,
   // An Authorization header: the whole value, scheme included, to the end of the line.
-  /authorization["']?\s{0,5}[:=]\s{0,5}(?:"[^"\n]{0,2000}"|'[^'\n]{0,2000}'|[^\n"']{1,2000})/gi,
-  // name = value or name: value, where the name says it is a secret. A quoted value is taken whole.
+  new RegExp(`authorization${KEY_SEPARATOR}(?:${QUOTED}|[^\\n"']+)`, 'gi'),
+  // name = value or name: value, where the name says it is a secret.
   new RegExp(
-    `(?:${SECRET_WORDS})[\\w.-]{0,40}["']?\\s{0,5}[:=]\\s{0,5}(?:"[^"\\n]{0,2000}"|'[^'\\n]{0,2000}'|[^\\s"',;]{1,2000})`,
+    `(?:${SECRET_WORDS})[\\w.-]{0,40}${KEY_SEPARATOR}(?:${QUOTED}|${BARE})`,
     'gi',
   ),
   // `pass` alone is too common a word, so it counts only directly before a separator.
-  /\bpass(?=["']?\s{0,5}[:=])["']?\s{0,5}[:=]\s{0,5}(?:"[^"\n]{0,2000}"|'[^'\n]{0,2000}'|[^\s"',;]{1,2000})/gi,
+  new RegExp(
+    `\\bpass(?=${KEY_SEPARATOR})${KEY_SEPARATOR}(?:${QUOTED}|${BARE})`,
+    'gi',
+  ),
 ];
 
 /** Object keys whose value is never stored, whatever it looks like. */

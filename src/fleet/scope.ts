@@ -19,15 +19,34 @@ export interface PacketRequirements {
   invalid: string | undefined;
 }
 
-const NAME = /^[a-z0-9][a-z0-9._/-]{0,127}$/;
+const SEGMENT = /^[a-z0-9][a-z0-9._-]*$/;
 
-/** `Repo`, `repo/` and `repo.git` are one repository. */
-function normalise(name: string): string {
-  return name
-    .trim()
-    .toLowerCase()
-    .replace(/\/+$/, '')
-    .replace(/\.git$/, '');
+/**
+ * `Repo`, `repo/` and `repo.git` are one repository. Returns undefined for a name that is not a
+ * plain path of segments: an empty, `.` or `..` segment, or a character outside the plain set.
+ * Applying it to its own output changes nothing, so a key never depends on how often it ran.
+ */
+function normalise(name: string): string | undefined {
+  const segments = name.trim().toLowerCase().split('/');
+  while (segments.length > 1 && segments[segments.length - 1] === '') {
+    segments.pop();
+  }
+  const last = segments.length - 1;
+  segments[last] = (segments[last] ?? '').replace(/\.git$/, '');
+  if (
+    segments.length > 16 ||
+    segments.some((segment) => segment === '..' || !SEGMENT.test(segment))
+  ) {
+    return undefined;
+  }
+  return segments.join('/');
+}
+
+/** The part of an entry after `prefix`, matching the prefix whatever its case. */
+function after(entry: string, prefix: string): string | undefined {
+  return entry.slice(0, prefix.length).toLowerCase() === prefix
+    ? entry.slice(prefix.length)
+    : undefined;
 }
 
 export function requirementsOf(
@@ -36,37 +55,44 @@ export function requirementsOf(
 ): PacketRequirements {
   const capabilities: string[] = [];
   const scopes: string[] = [];
-  const repos: string[] = [];
-  const worktrees: string[] = [];
+  const repos = new Set<string>();
+  const worktrees = new Set<string>();
+  let invalid: string | undefined;
   for (const entry of packet.scope) {
-    if (entry.startsWith('cap:')) {
-      capabilities.push(entry.slice(4));
+    const capability = after(entry, 'cap:');
+    if (capability !== undefined) {
+      capabilities.push(capability);
       continue;
     }
     scopes.push(entry);
-    if (entry.startsWith('repo:')) {
-      repos.push(normalise(entry.slice(5)));
-    } else if (entry.startsWith('worktree:')) {
-      worktrees.push(normalise(entry.slice(9)));
+    const repo = after(entry, 'repo:');
+    const worktree = after(entry, 'worktree:');
+    const name = repo ?? worktree;
+    if (name === undefined) {
+      continue;
+    }
+    const plain = normalise(name);
+    if (plain === undefined) {
+      invalid = 'a repo or worktree name is not a plain name';
+    } else {
+      (repo === undefined ? worktrees : repos).add(plain);
     }
   }
-  const alone = `packet:${missionId}/${packet.id}`;
-  let invalid: string | undefined;
-  if (repos.length > 1) {
-    invalid = 'it names more than one repo';
-  } else if (worktrees.length > 1) {
-    invalid = 'it names more than one worktree';
-  } else if (worktrees.length === 1 && repos.length === 0) {
-    invalid = 'it names a worktree but no repo';
-  } else if ([...repos, ...worktrees].some((name) => !NAME.test(name))) {
-    invalid = 'a repo or worktree name is not a plain name';
+  if (invalid === undefined) {
+    if (repos.size > 1) {
+      invalid = 'it names more than one repo';
+    } else if (worktrees.size > 1) {
+      invalid = 'it names more than one worktree';
+    } else if (worktrees.size === 1 && repos.size === 0) {
+      invalid = 'it names a worktree but no repo';
+    }
   }
-  const repo = repos[0];
+  const repo = [...repos][0];
   // Without a declared repo nothing is shared, so the packet only excludes itself.
   const scopeKey =
     repo === undefined || invalid !== undefined
-      ? alone
-      : `repo:${repo}#worktree:${worktrees[0] ?? 'default'}`;
+      ? `packet:${missionId}/${packet.id}`
+      : `repo:${repo}#worktree:${[...worktrees][0] ?? 'default'}`;
   return { capabilities, scopes, scopeKey, invalid };
 }
 

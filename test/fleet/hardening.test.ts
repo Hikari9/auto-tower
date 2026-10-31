@@ -33,7 +33,9 @@ async function hold(
   scope: string[] = ['repo:app'],
 ): Promise<Held> {
   const { id } = h.mission([{ scope }]);
-  const a = (await runner.claim()).body.assignments[0];
+  const a = (await runner.claim()).body.assignments.find(
+    (x: { missionId: string }) => x.missionId === id,
+  );
   if (a === undefined) {
     throw new Error('nothing claimed');
   }
