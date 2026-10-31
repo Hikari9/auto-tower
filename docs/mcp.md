@@ -89,6 +89,7 @@ Unknown arguments are rejected, not ignored, so a typo cannot silently drop a co
 - A Chief of Staff holds no `policy:write`, so it cannot grant, revoke or change a flag. It can `propose_policy_change`, which raises a decision a human answers and grants nothing.
 - `request_expansion` follows the three tiers. Inside approved scope it proceeds. A Chief of Staff is approved only under a current grant that covers the request and the packet's declared scope, and the packet is authorized citing that rule. Otherwise a decision is raised for the person (or for a Chief of Staff when a delegated rule would let one answer). Deny, expiry and revocation take effect on the next call.
 - A Chief of Staff cannot satisfy independent review. The Auto-Office review guard judges receipts, not callers, and a landing grant never counts as a review. `close_mission` by a Chief of Staff on a high-risk mission without a satisfied independent review fails `completion_guard_failed`.
+- `read_mission` replaces every policy ref (the mission's and each `packets[].authorization.policyRefs` entry) with `[redacted]` for a runner or provider principal, so no rule id reaches it. A person and a Chief of Staff see the refs.
 - A runner principal can read and see itself. It holds no `mission:write` or `decision:write`, so every mutating tool refuses it.
 - `grant_policy` only ever creates `allow` rules. `effect` is overwritten. A deny rule is a different act and stays on the HTTP route.
 
