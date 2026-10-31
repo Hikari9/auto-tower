@@ -234,3 +234,54 @@ describe('Workers shell paths and config, round 3', () => {
     expect(toml).toMatch(/run_worker_first = true/);
   });
 });
+
+describe('Workers HEAD, malformed paths and the asset ignore list', () => {
+  it('answers HEAD on an unknown dashboard path with no body', async () => {
+    const res = await worker.fetch(
+      new Request(`${origin}/dashboard/nope`, { method: 'HEAD' }),
+      { ASSETS: assetsBinding() },
+    );
+
+    expect(res.status).toBe(404);
+    expect(await res.text()).toBe('');
+  });
+
+  it('answers HEAD on a storage path with no body', async () => {
+    const res = await worker.fetch(
+      new Request(`${origin}/missions`, { method: 'HEAD' }),
+      { ASSETS: assetsBinding() },
+    );
+
+    expect(res.status).toBe(503);
+    expect(await res.text()).toBe('');
+  });
+
+  it('answers a malformed percent sequence with 404 instead of throwing', async () => {
+    const res = await worker.fetch(
+      new Request(`${origin}/dashboard/%E0%A4%A`),
+      { ASSETS: assetsBinding() },
+    );
+
+    expect(res.status).toBe(404);
+  });
+
+  it('keeps %2F encoded, as the Node router does', async () => {
+    const path = '/dashboard/js%2Fapp.js';
+    const app = createApp({ db: openTestDatabase() }, [
+      ...ROUTES,
+      ...dashboardRoutes,
+    ]);
+
+    expect((await app.request(path)).status).toBe(404);
+    const res = await worker.fetch(new Request(`${origin}${path}`), {
+      ASSETS: assetsBinding(),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('excludes the type declarations from the uploaded assets', () => {
+    const ignore = readFileSync(join(PUBLIC_DIR, '.assetsignore'), 'utf8');
+
+    expect(ignore.split('\n').map((line) => line.trim())).toContain('*.d.ts');
+  });
+});

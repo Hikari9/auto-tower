@@ -6,7 +6,12 @@ import {
   TOKEN_KEY,
 } from '../../public/js/app.js';
 import { loadPersona } from '../../public/js/boot.js';
-import { LEASE_STATES } from '../../public/js/status.js';
+import {
+  describe as describeState,
+  LEASE_STATES,
+  MISSION_STATES,
+  RUNNER_STATES,
+} from '../../public/js/status.js';
 import {
   addPacket,
   createMission,
@@ -529,8 +534,10 @@ describe('Integrations, Activity and Health', () => {
       ...root.querySelectorAll('[aria-label="Policy history"] tbody tr'),
     ] as El[];
     expect(history.length).toBeGreaterThan(0);
-    expect(history[0].querySelectorAll('td')[0].textContent).toMatch(/^\d+$/);
-    expect(history[0].querySelectorAll('td')[3].textContent).not.toBe('');
+    const apiHistory = await json(await tower.call('GET', '/policy/history'));
+    const first = history[0].querySelectorAll('td');
+    expect(first[1].textContent).toBe(apiHistory.items[0].type);
+    expect(first[2].textContent).toBe(apiHistory.items[0].actorId ?? '—');
 
     expect(
       root.querySelector(
@@ -1909,6 +1916,9 @@ describe('failure wording and the Cancel button after an error', () => {
         root.querySelector('[role="group"] [role="alert"]')?.textContent,
       ).toContain('reload before retrying'),
     );
+    expect(buttonNamed(root, 'Confirm answer').disabled).toBe(true);
+    expect(buttonNamed(root, 'Answer…').disabled).toBe(true);
+    expect(buttonNamed(root, 'Cancel').disabled).toBe(false);
   });
 
   it('does not talk about writes when a read fails', async () => {
@@ -1948,11 +1958,11 @@ describe('failure wording and the Cancel button after an error', () => {
           return jsonResponse(
             {
               error: {
-                code: 'internal_error',
-                message: 'Internal server error',
+                code: 'invalid_answer',
+                message: 'Pick a valid answer',
               },
             },
-            500,
+            400,
           );
         }
         return tower.fetchFor(null)(path, init);
@@ -1966,7 +1976,7 @@ describe('failure wording and the Cancel button after an error', () => {
     await vi.waitFor(() =>
       expect(
         root.querySelector('[role="group"] [role="alert"]')?.textContent,
-      ).toContain('Internal server error'),
+      ).toContain('Pick a valid answer'),
     );
     expect(buttonNamed(root, 'Cancel').disabled).toBe(false);
     expect(buttonNamed(root, 'Confirm answer').disabled).toBe(false);
@@ -2251,8 +2261,8 @@ describe('conflict notices, deterministically', () => {
     await vi.waitFor(() =>
       expect(root.querySelector('h1')?.textContent).toBe('Runner fleet'),
     );
-    // The stale write's notice would land after the page settles, so allow a few turns to pass.
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The notice runs in microtasks after the response is read. One macrotask flushes them all.
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(root.querySelector('h1')?.textContent).toBe('Runner fleet');
     expect(root.querySelector('[role="alert"]')).toBeNull();
@@ -2810,21 +2820,267 @@ describe('labels and layout', () => {
     expect(LEASE_STATES.held?.label).toBe('Running');
   });
 
-  it('wraps every table in a named, keyboard-reachable scroll region', async () => {
+  it('shows an inherited-property key as its raw text', () => {
+    expect(describeState(MISSION_STATES, 'constructor')).toEqual({
+      label: 'constructor',
+      tone: 'neutral',
+    });
+    expect(describeState(RUNNER_STATES, 'toString')).toEqual({
+      label: 'toString',
+      tone: 'neutral',
+    });
+  });
+
+  it('wraps every table in a named, keyboard-reachable scroll region on every view', async () => {
     const tower = seededTower();
     await createMission(tower);
+    await enrollRunner(tower, 'region-runner');
     const { root, dashboard } = mountFor(tower);
+    let checked = 0;
+    for (const hash of [
+      '#/missions',
+      '#/runners',
+      '#/decisions',
+      '#/policy',
+      '#/integrations',
+      '#/activity',
+      '#/health',
+    ]) {
+      await dashboard.show(hash);
+      for (const table of [...root.querySelectorAll('table')] as El[]) {
+        checked += 1;
+        const wrap = table.parentElement as El;
+        expect(wrap.classList.contains('table-wrap'), hash).toBe(true);
+        expect(wrap.getAttribute('role'), hash).toBe('region');
+        expect(wrap.getAttribute('tabindex'), hash).toBe('0');
+        expect(wrap.getAttribute('aria-label'), hash).toBeTruthy();
+      }
+    }
+    expect(checked).toBeGreaterThan(0);
+  });
+});
+
+describe('second round: uncertain writes, drafts and parse errors', () => {
+  it('reports a non-JSON 200 as an unexpected response, not as empty data', async () => {
+    const tower = seededTower();
+    await createMission(tower);
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) => {
+        if (init.method === 'GET' && path.startsWith('/missions')) {
+          return new Response('<html>proxy page</html>', {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          });
+        }
+        return tower.fetchFor(null)(path, init);
+      },
+    });
 
     await dashboard.show('#/missions');
 
-    const tables = [...root.querySelectorAll('table')] as El[];
-    expect(tables.length).toBeGreaterThan(0);
-    for (const table of tables) {
-      const wrap = table.parentElement as El;
-      expect(wrap.classList.contains('table-wrap')).toBe(true);
-      expect(wrap.getAttribute('role')).toBe('region');
-      expect(wrap.getAttribute('tabindex')).toBe('0');
-      expect(wrap.getAttribute('aria-label')).toBeTruthy();
-    }
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+      'The server returned an unexpected response.',
+    );
+  });
+
+  it('keeps a policy write locked after a server error, including through Cancel', async () => {
+    const tower = seededTower();
+    await createRule(tower);
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) => {
+        if (init.method === 'POST') {
+          return jsonResponse(
+            { error: { code: 'internal_error', message: 'Server broke' } },
+            500,
+          );
+        }
+        return tower.fetchFor(null)(path, init);
+      },
+    });
+    await dashboard.show('#/policy');
+
+    buttonNamed(root, 'Revoke repo.write').click();
+    buttonNamed(root, 'Revoke rule').click();
+    await vi.waitFor(() => expect(text(root)).toContain('Server broke'));
+    expect((buttonNamed(root, 'Revoke rule') as El).disabled).toBe(true);
+
+    buttonNamed(root, 'Cancel').click();
+    expect((buttonNamed(root, 'Revoke repo.write') as El).disabled).toBe(true);
+  });
+
+  it('re-enables a policy write after a client error that wrote nothing', async () => {
+    const tower = seededTower();
+    await createRule(tower);
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) => {
+        if (init.method === 'POST') {
+          return jsonResponse(
+            {
+              error: { code: 'invalid_amount', message: 'Amount is too high' },
+            },
+            400,
+          );
+        }
+        return tower.fetchFor(null)(path, init);
+      },
+    });
+    await dashboard.show('#/policy');
+
+    buttonNamed(root, 'Revoke repo.write').click();
+    buttonNamed(root, 'Revoke rule').click();
+    await vi.waitFor(() => expect(text(root)).toContain('Amount is too high'));
+    expect((buttonNamed(root, 'Revoke rule') as El).disabled).toBe(false);
+    expect((buttonNamed(root, 'Cancel') as El).disabled).toBe(false);
+  });
+
+  it('keeps Answer and Confirm off after a server error on a decision', async () => {
+    const tower = seededTower();
+    await openQuestion(tower, 'Server error?');
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) => {
+        if (init.method === 'POST') {
+          return jsonResponse(
+            { error: { code: 'internal_error', message: 'Server broke' } },
+            500,
+          );
+        }
+        return tower.fetchFor(null)(path, init);
+      },
+    });
+    await dashboard.show('#/decisions');
+
+    buttonNamed(root, 'Answer…').click();
+    buttonNamed(root, 'Confirm answer').click();
+    await vi.waitFor(() => expect(text(root)).toContain('Server broke'));
+    expect((buttonNamed(root, 'Confirm answer') as El).disabled).toBe(true);
+    expect((buttonNamed(root, 'Answer…') as El).disabled).toBe(true);
+  });
+
+  it('sends one revoke when Confirm is clicked twice', async () => {
+    const tower = seededTower();
+    await createRule(tower);
+    const posts: string[] = [];
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) => {
+        if (init.method === 'POST') {
+          posts.push(path);
+        }
+        return tower.fetchFor(null)(path, init);
+      },
+    });
+    await dashboard.show('#/policy');
+
+    buttonNamed(root, 'Revoke repo.write').click();
+    const confirm = buttonNamed(root, 'Revoke rule') as El;
+    confirm.click();
+    confirm.click();
+
+    await vi.waitFor(() =>
+      expect(text(root)).toContain('No active rules yet.'),
+    );
+    expect(posts).toHaveLength(1);
+  });
+
+  it('clears a draft once its answer is accepted', async () => {
+    const tower = seededTower();
+    await openQuestion(tower, 'Clear my note?');
+    const snapshot = await json(
+      await tower.call('GET', '/decisions?status=open&limit=200'),
+    );
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: async (path, init) => {
+        if (init.method === 'GET' && path.split('?')[0] === '/decisions') {
+          return jsonResponse(snapshot);
+        }
+        return tower.fetchFor(null)(path, init);
+      },
+    });
+    await dashboard.show('#/decisions');
+
+    const note = root.querySelector('textarea') as El;
+    note.value = 'sent note';
+    note.dispatchEvent(new window.Event('input'));
+    buttonNamed(root, 'Answer…').click();
+    buttonNamed(root, 'Confirm answer').click();
+
+    await vi.waitFor(async () => {
+      const open = await json(
+        await tower.call('GET', '/decisions?status=open&limit=200'),
+      );
+      expect(open.decisions).toHaveLength(0);
+    });
+    await settle();
+    expect((root.querySelector('textarea') as El).value).toBe('');
+  });
+
+  it('keeps the chosen answer across a re-render', async () => {
+    const tower = seededTower();
+    await openQuestion(tower, 'Keep my choice?');
+    const { root, dashboard } = mountFor(tower);
+    await dashboard.show('#/decisions');
+
+    const radios = [...root.querySelectorAll('input[type="radio"]')] as El[];
+    expect(radios.length).toBeGreaterThan(1);
+    radios[1].checked = true;
+    radios[1].dispatchEvent(new window.Event('change'));
+
+    await dashboard.show('#/decisions');
+    const again = [...root.querySelectorAll('input[type="radio"]')] as El[];
+    expect(again[1].checked).toBe(true);
+    expect(again[0].checked).toBe(false);
+  });
+
+  it('opens the overview when a tab is opened on the skip link target', async () => {
+    const tower = seededTower();
+    const { root, dashboard } = mountFor(tower);
+
+    await dashboard.show('#main');
+
+    expect(root.querySelector('h1')?.textContent).toBe('Mission overview');
+  });
+
+  it('drops unsaved drafts on sign-out', async () => {
+    const tower = seededTower();
+    await openQuestion(tower, 'Signed out?');
+    const { root, dashboard, storage } = mountFor(tower);
+    await dashboard.show('#/decisions');
+    const note = root.querySelector('textarea') as El;
+    note.value = 'typed before sign out';
+    note.dispatchEvent(new window.Event('input'));
+
+    buttonNamed(root, 'Sign out').click();
+    await settle();
+    storage.setItem(TOKEN_KEY, tower.token);
+    await dashboard.show('#/decisions');
+
+    expect((root.querySelector('textarea') as El).value).toBe('');
+  });
+
+  it('shows a rule without a grantee as any, without failing the page', async () => {
+    const tower = seededTower();
+    await createRule(tower);
+    const { root, dashboard } = mountFor(tower, {
+      fetchImpl: overrideGet(tower, '/policy', (body) => ({
+        ...body,
+        rules: body.rules.map((r: Record<string, unknown>) => ({
+          ...r,
+          grantee: undefined,
+        })),
+      })),
+    });
+
+    await dashboard.show('#/policy');
+
+    expect(root.querySelector('h1')?.textContent).toBe(
+      'Permissions & preferences',
+    );
+    const table = root.querySelector('table') as El;
+    const headers = [...table.querySelectorAll('th')].map(
+      (th) => th.textContent,
+    );
+    const cell = table.querySelector('tbody tr').querySelectorAll('td')[
+      headers.indexOf('Grantee')
+    ];
+    expect(cell.textContent).toBe('any');
   });
 });

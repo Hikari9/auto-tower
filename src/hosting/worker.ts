@@ -78,8 +78,12 @@ async function serveDashboard(
       { status: 404 },
     );
   }
-  // HEAD gets the same headers as GET and no body, as the Node router answers it.
-  return new Response(request.method === 'HEAD' ? null : upstream.body, {
+  // HEAD gets the same headers as GET and no body. The unread asset stream is cancelled.
+  const head = request.method === 'HEAD';
+  if (head) {
+    await upstream.body?.cancel();
+  }
+  return new Response(head ? null : upstream.body, {
     headers: {
       'content-type':
         upstream.headers.get('content-type') ?? 'application/octet-stream',
@@ -91,22 +95,33 @@ async function serveDashboard(
   });
 }
 
+function route(
+  request: Request | undefined,
+  env: WorkerEnv,
+): Response | Promise<Response> {
+  const pathname =
+    request === undefined ? '' : decodePath(new URL(request.url).pathname);
+  if (
+    (request?.method === 'GET' || request?.method === 'HEAD') &&
+    (pathname === '/dashboard' || pathname.startsWith('/dashboard/'))
+  ) {
+    const file = DASHBOARD_PATHS.get(pathname);
+    return file === undefined
+      ? Response.json(
+          { error: { code: 'not_found', message: 'Route not found' } },
+          { status: 404 },
+        )
+      : serveDashboard(request, env, file);
+  }
+  return notConfigured('Storage binding is not configured');
+}
+
 export default {
-  fetch(request?: Request, env: WorkerEnv = {}): Response | Promise<Response> {
-    const pathname =
-      request === undefined ? '' : decodePath(new URL(request.url).pathname);
-    if (
-      (request?.method === 'GET' || request?.method === 'HEAD') &&
-      (pathname === '/dashboard' || pathname.startsWith('/dashboard/'))
-    ) {
-      const file = DASHBOARD_PATHS.get(pathname);
-      return file === undefined
-        ? Response.json(
-            { error: { code: 'not_found', message: 'Route not found' } },
-            { status: 404 },
-          )
-        : serveDashboard(request, env, file);
-    }
-    return notConfigured('Storage binding is not configured');
+  async fetch(request?: Request, env: WorkerEnv = {}): Promise<Response> {
+    const res = await route(request, env);
+    // HEAD answers with the status and headers of the route and no body, on every path.
+    return request?.method === 'HEAD'
+      ? new Response(null, { status: res.status, headers: res.headers })
+      : res;
   },
 };

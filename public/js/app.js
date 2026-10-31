@@ -1,6 +1,6 @@
 import { ApiError, createApiClient } from './api.js';
 import { h, replaceChildren } from './dom.js';
-import { describeError, VIEWS } from './views.js';
+import { clearDecisionDrafts, describeError, VIEWS } from './views.js';
 
 export const TOKEN_KEY = 'tower.dashboard.token';
 
@@ -125,7 +125,10 @@ export function mountDashboard({
   const api = createApiClient({
     ...(fetchImpl ? { fetchImpl } : {}),
     getToken: () => storage.getItem(TOKEN_KEY),
-    onUnauthorized: () => storage.removeItem(TOKEN_KEY),
+    onUnauthorized: () => {
+      storage.removeItem(TOKEN_KEY);
+      clearDecisionDrafts();
+    },
   });
   const brand = {
     name: persona.name || DEFAULT_PERSONA.name,
@@ -188,7 +191,12 @@ export function mountDashboard({
 
   /** @param {string} hash */
   async function show(hash) {
-    current = hash || current;
+    // `#main` is the skip link's target, not a route. Keep the current route and clear the hash.
+    if (hash === '#main') {
+      win?.history.replaceState(null, '', current);
+    } else {
+      current = hash || current;
+    }
     // The view this render belongs to. A write it started reports back to this view only.
     const viewHash = current;
     const gen = ++generation;
@@ -314,6 +322,7 @@ export function mountDashboard({
 
   function signedOut() {
     storage.removeItem(TOKEN_KEY);
+    clearDecisionDrafts();
     win?.history.replaceState(null, '', '#/missions');
     show('#/missions');
   }

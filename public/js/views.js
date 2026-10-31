@@ -32,6 +32,32 @@ function rememberDraft(id, patch) {
   decisionDrafts.set(id, { ...decisionDrafts.get(id), ...patch });
 }
 
+/** Drops every draft. Called on sign-out and on a rejected token, since drafts belong to the person who typed them. */
+export function clearDecisionDrafts() {
+  decisionDrafts.clear();
+}
+
+/** Keeps drafts only for decisions still open, so the map does not grow with every decision seen. */
+function pruneDecisionDrafts(openIds) {
+  for (const id of decisionDrafts.keys()) {
+    if (!openIds.has(id)) {
+      decisionDrafts.delete(id);
+    }
+  }
+}
+
+/**
+ * True when the write may have applied: no server answer, a 5xx, or a 2xx body that did not parse.
+ * Only a 4xx answer (other than 401 and 409, which reload) shows that nothing was written.
+ */
+function mayHaveApplied(error) {
+  return (
+    !(error instanceof ApiError) ||
+    error.status >= 500 ||
+    error.code === 'invalid_response'
+  );
+}
+
 /** @param {string} iso */
 function when(iso) {
   if (!iso) {
@@ -185,8 +211,10 @@ function confirmAction({
                   await ctx.refresh();
                   return;
                 }
-                // Only a server answer proves the write did not happen. After a network failure, Confirm stays off until reload.
-                confirm.disabled = !(caught instanceof ApiError);
+                // Cancel rebuilds the slot from `open`, so the trigger is locked too: no second write until reload.
+                const uncertain = mayHaveApplied(caught);
+                confirm.disabled = uncertain;
+                open.disabled = uncertain;
                 cancel.disabled = false;
                 error.textContent = describeWriteError(caught);
               }
@@ -669,8 +697,9 @@ export function renderDecisions(ctx) {
   return page(
     'Decision inbox',
     () => ctx.api.get('/decisions?status=open&limit=200'),
-    ({ decisions }) =>
-      h(
+    ({ decisions }) => {
+      pruneDecisionDrafts(new Set(decisions.map((d) => d.id)));
+      return h(
         'div',
         null,
         heading('Decision inbox', 'page-title'),
@@ -681,7 +710,8 @@ export function renderDecisions(ctx) {
               { class: 'cards', 'aria-label': 'Open decisions' },
               decisions.map((d) => h('li', null, decisionCard(ctx, d))),
             ),
-      ),
+      );
+    },
   );
 }
 
@@ -691,6 +721,9 @@ function decisionCard(ctx, decision) {
   const alternatives = decision.alternatives ?? [];
   const links = decision.links ?? [];
   const draft = decisionDrafts.get(decision.id) ?? {};
+  const preset = alternatives.some((a) => a.id === draft.choice)
+    ? draft.choice
+    : alternatives[0]?.id;
   const choice = h('fieldset', null, h('legend', null, 'Choose an answer'));
   for (const alt of alternatives) {
     const radioId = `${titleId}-${alt.id}`;
@@ -703,7 +736,7 @@ function decisionCard(ctx, decision) {
           name: `${titleId}-choice`,
           id: radioId,
           value: alt.id,
-          checked: alt.id === (draft.choice ?? alternatives[0]?.id),
+          checked: alt.id === preset,
           onchange: () => rememberDraft(decision.id, { choice: alt.id }),
         }),
         h(
@@ -732,7 +765,10 @@ function decisionCard(ctx, decision) {
         const selected = choice.querySelector('input:checked');
         const alt = alternatives.find((a) => a.id === selected?.value);
         if (!alt) {
-          status.textContent = 'Choose an answer first.';
+          status.textContent =
+            alternatives.length === 0
+              ? 'No answer options were returned for this decision.'
+              : 'Choose an answer first.';
           return;
         }
         const resumes = alt.resumes
@@ -752,7 +788,7 @@ function decisionCard(ctx, decision) {
           h(
             'div',
             { class: 'actions' },
-            confirmButton(ctx, decision, alt, note, error, cancel),
+            confirmButton(ctx, decision, alt, note, error, cancel, submit),
             cancel,
           ),
           error,
@@ -823,7 +859,7 @@ function decisionCard(ctx, decision) {
 }
 
 /** @param {Context} ctx @param {any} decision @param {any} alt @param {HTMLTextAreaElement} note @param {HTMLElement} error @param {HTMLButtonElement} cancel */
-function confirmButton(ctx, decision, alt, note, error, cancel) {
+function confirmButton(ctx, decision, alt, note, error, cancel, submit) {
   return h(
     'button',
     {
@@ -847,12 +883,15 @@ function confirmButton(ctx, decision, alt, note, error, cancel) {
           await ctx.refresh();
         } catch (caught) {
           if (needsReload(caught)) {
+            decisionDrafts.delete(decision.id);
             ctx.flash(describeError(caught));
             await ctx.refresh();
             return;
           }
-          // A network failure may have applied the answer. Keep Confirm off until reload.
-          button.disabled = !(caught instanceof ApiError);
+          // The answer may have applied, so Confirm and Answer… stay off until reload.
+          const uncertain = mayHaveApplied(caught);
+          button.disabled = uncertain;
+          submit.disabled = uncertain;
           cancel.disabled = false;
           error.textContent = describeWriteError(caught);
         }

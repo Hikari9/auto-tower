@@ -126,7 +126,7 @@ describe('client code never parses markup', () => {
   it('builds the DOM with createElement and textContent only, with no HTML sinks', () => {
     const dir = join(import.meta.dirname, '../../public/js');
     const sinks =
-      /innerHTML|outerHTML|insertAdjacentHTML|document\.write|srcdoc|createContextualFragment|DOMParser/;
+      /innerHTML|outerHTML|insertAdjacentHTML|document\.write|srcdoc|createContextualFragment|DOMParser|\[[^\]]*(HTML|srcdoc)[^\]]*\]/;
     const files = readdirSync(dir).filter((name) => name.endsWith('.js'));
 
     expect(files.length).toBeGreaterThan(0);

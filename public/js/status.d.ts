@@ -10,3 +10,23 @@ export const MISSION_STATES: Record<string, StateLabel>;
 export const PACKET_STATES: Record<string, StateLabel>;
 export const LEASE_STATES: Record<string, StateLabel>;
 export const RUNNER_STATES: Record<string, StateLabel>;
+
+export function describe(
+  table: Record<string, StateLabel>,
+  key: string,
+): StateLabel;
+
+export interface Evidence {
+  kind: 'verified' | 'self-reported' | 'none';
+  label: string;
+}
+
+export function evidenceOf(
+  packet: { verification?: unknown; status?: string },
+  attempt: { report?: unknown } | null | undefined,
+): Evidence;
+
+export function unmetDependencies(
+  packet: { dependsOn?: string[]; status?: string },
+  byId: Map<string, { title: string; verification?: unknown }>,
+): string[];
