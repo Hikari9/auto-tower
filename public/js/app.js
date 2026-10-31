@@ -58,7 +58,7 @@ const ROUTES = [
   },
 ];
 
-/** Reads the route from a hash such as `#/missions/msn_1`. Unknown or empty hashes go to the overview. */
+/** Reads the route from a hash such as `#/missions/msn_1`. An empty hash goes to the overview. An unknown path returns null. */
 export function resolveRoute(hash) {
   const path =
     String(hash ?? '')

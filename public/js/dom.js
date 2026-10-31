@@ -1,3 +1,15 @@
+/** Empty slots render nothing. Strings and numbers become text nodes, never HTML. */
+function isEmptySlot(node) {
+  return node === undefined || node === null || node === false;
+}
+
+/** @param {unknown} node */
+function toNode(node) {
+  return typeof node === 'object'
+    ? node
+    : document.createTextNode(String(node));
+}
+
 /**
  * Builds DOM nodes. Strings become text nodes. Nothing is parsed as HTML, so
  * untrusted text (issue titles, provider notes, runner summaries) stays inert.
@@ -25,16 +37,12 @@ export function h(tag, props = null, ...children) {
       el.setAttribute(key, value === true ? '' : String(value));
     }
   }
-  for (const child of children.flat(Infinity)) {
-    if (child === undefined || child === null || child === false) {
-      continue;
-    }
-    el.append(
-      typeof child === 'object'
-        ? child
-        : document.createTextNode(String(child)),
-    );
-  }
+  el.append(
+    ...children
+      .flat(Infinity)
+      .filter((c) => !isEmptySlot(c))
+      .map(toNode),
+  );
   return el;
 }
 
@@ -48,9 +56,7 @@ export function replaceChildren(root, ...nodes) {
   root.replaceChildren(
     ...nodes
       .flat(Infinity)
-      .filter((node) => node !== null && node !== undefined && node !== false)
-      .map((node) =>
-        typeof node === 'object' ? node : document.createTextNode(String(node)),
-      ),
+      .filter((n) => !isEmptySlot(n))
+      .map(toNode),
   );
 }
