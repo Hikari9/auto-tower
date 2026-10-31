@@ -69,6 +69,20 @@ export function createEventLog(db: SqlDatabase): EventLog {
       ) {
         throw new RangeError('expectedVersion must be a non-negative integer');
       }
+      for (const field of [
+        'workspaceId',
+        'streamId',
+        'type',
+        'actorId',
+        'correlationId',
+      ] as const) {
+        if (input[field].trim() === '') {
+          throw new RangeError(`${field} must not be empty`);
+        }
+      }
+      if (input.idempotencyKey?.trim() === '') {
+        throw new RangeError('idempotencyKey must not be empty');
+      }
       return db.transaction((tx) => {
         const requestHash = hashRequest(input);
         if (input.idempotencyKey !== undefined) {

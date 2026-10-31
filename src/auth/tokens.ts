@@ -4,6 +4,7 @@ import type { SqlDatabase } from '../storage/database.js';
 import {
   assertScopesAllowed,
   getPrincipal,
+  isScope,
   type Principal,
   type PrincipalRow,
   SCOPES_BY_KIND,
@@ -50,15 +51,25 @@ export function issueToken(
   if (principal === undefined) {
     throw new Error(`Unknown principal ${input.principalId}`);
   }
+  if (principal.disabledAt !== null) {
+    throw new Error(`Principal ${principal.id} is disabled`);
+  }
   const scopes = [...new Set(input.scopes ?? SCOPES_BY_KIND[principal.kind])];
   if (scopes.length === 0) {
     throw new Error('A token needs at least one scope');
   }
   assertScopesAllowed(principal.kind, scopes);
 
+  const now = input.now ?? new Date();
+  if (
+    input.expiresAt !== undefined &&
+    !(input.expiresAt.getTime() > now.getTime())
+  ) {
+    throw new Error('A token expiry must be a valid date after issue time');
+  }
   const id = newId('tok');
   const token = generateToken();
-  const createdAt = (input.now ?? new Date()).toISOString();
+  const createdAt = now.toISOString();
   const expiresAt = input.expiresAt?.toISOString() ?? null;
   db.run(
     `INSERT INTO api_tokens (id, workspace_id, principal_id, token_hash, scopes_json, created_at, expires_at)
@@ -127,12 +138,20 @@ export function authenticateToken(
   ) {
     return undefined;
   }
-  if (row.expires_at !== null && Date.parse(row.expires_at) <= now.getTime()) {
-    return undefined;
+  // An unparseable expiry is treated as expired: NaN comparisons would otherwise fail open.
+  if (row.expires_at !== null) {
+    const expiresAtMs = Date.parse(row.expires_at);
+    if (Number.isNaN(expiresAtMs) || expiresAtMs <= now.getTime()) {
+      return undefined;
+    }
   }
-  return {
-    tokenId: row.token_id,
-    principal: toPrincipal(row),
-    scopes: JSON.parse(row.scopes_json) as Scope[],
-  };
+  const principal = toPrincipal(row);
+  // Re-apply the kind ceiling at use time, so a stored scope that was never
+  // issued (direct SQL, a future import, or a tightened ceiling) grants nothing.
+  const ceiling = SCOPES_BY_KIND[principal.kind];
+  const scopes = (JSON.parse(row.scopes_json) as unknown[]).filter(
+    (scope): scope is Scope =>
+      typeof scope === 'string' && isScope(scope) && ceiling.includes(scope),
+  );
+  return { tokenId: row.token_id, principal, scopes };
 }

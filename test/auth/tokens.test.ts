@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { runCli } from '../../src/auth/cli.js';
 import {
@@ -196,6 +197,19 @@ describe('owner bootstrap CLI', () => {
     });
     expect(auth?.scopes).toEqual(SCOPES);
     db.close();
+  });
+
+  it('creates the database directory on a fresh checkout', () => {
+    const path = join(
+      tempDbPath().replace(/tower\.sqlite$/, ''),
+      'fresh',
+      'tower.sqlite',
+    );
+    const out = capture();
+
+    expect(
+      runCli(['token', 'create', '--kind', 'human', '--db', path], out.io, {}),
+    ).toBe(0);
   });
 
   it('keeps the raw token out of the database file', () => {

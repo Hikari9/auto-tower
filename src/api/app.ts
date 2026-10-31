@@ -41,7 +41,7 @@ export function createApp(
 
   for (const route of routes) {
     const method = route.method.toUpperCase();
-    if ('public' in route.access) {
+    if ('public' in route.access && route.access.public === true) {
       app.on(method, route.path, route.handler);
     } else {
       const scopes = assertScopes(route);

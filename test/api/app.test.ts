@@ -112,8 +112,11 @@ describe('error handling', () => {
     });
 
     expect(res.status).toBe(409);
-    expect(await res.json()).toMatchObject({
-      error: { code: 'version_conflict' },
+    expect(await res.json()).toEqual({
+      error: {
+        code: 'version_conflict',
+        message: 'Stream mission:m1 is at version 1, expected 0',
+      },
     });
   });
 });

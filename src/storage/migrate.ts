@@ -19,33 +19,34 @@ export function applyMigrations(
   db.exec(
     'CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)',
   );
-  const applied = new Map(
-    db
-      .all<{ id: string; checksum: string }>(
-        'SELECT id, checksum FROM schema_migrations',
-      )
-      .map((row) => [row.id, row.checksum]),
-  );
   const ran: string[] = [];
   for (const migration of migrations) {
     const checksum = createHash('sha256').update(migration.sql).digest('hex');
-    const previous = applied.get(migration.id);
-    if (previous !== undefined) {
-      if (previous !== checksum) {
-        throw new Error(
-          `Migration ${migration.id} changed after it was applied`,
-        );
+    // The check runs inside the write transaction. A snapshot read taken before
+    // another process committed would otherwise re-run its migration.
+    const appliedNow = db.transaction((tx) => {
+      const previous = tx.get<{ checksum: string }>(
+        'SELECT checksum FROM schema_migrations WHERE id = ?',
+        [migration.id],
+      );
+      if (previous !== undefined) {
+        if (previous.checksum !== checksum) {
+          throw new Error(
+            `Migration ${migration.id} changed after it was applied`,
+          );
+        }
+        return false;
       }
-      continue;
-    }
-    db.transaction((tx) => {
       tx.exec(migration.sql);
       tx.run(
         'INSERT INTO schema_migrations (id, checksum, applied_at) VALUES (?, ?, ?)',
         [migration.id, checksum, new Date().toISOString()],
       );
+      return true;
     });
-    ran.push(migration.id);
+    if (appliedNow) {
+      ran.push(migration.id);
+    }
   }
   return ran;
 }

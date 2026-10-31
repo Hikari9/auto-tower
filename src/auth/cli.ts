@@ -90,27 +90,37 @@ export function runCli(
     return 2;
   }
 
+  // `||` rather than `??`: an empty value means unset, not an empty path or id.
   const workspaceId =
-    values.workspace ?? env.TOWER_WORKSPACE ?? DEFAULT_WORKSPACE;
+    values.workspace || env.TOWER_WORKSPACE || DEFAULT_WORKSPACE;
   const db = openSqliteDatabase(
-    values.db ?? env.TOWER_DB_PATH ?? DEFAULT_DB_PATH,
+    values.db || env.TOWER_DB_PATH || DEFAULT_DB_PATH,
   );
   try {
     applyMigrations(db, readMigrationFiles(defaultMigrationsDir()));
-    const issued = db.transaction((tx) => {
-      ensureWorkspace(tx, workspaceId, workspaceId);
-      const principal = createPrincipal(tx, {
-        workspaceId,
-        kind,
-        name: values.name ?? kind,
+    let issued: ReturnType<typeof issueToken>;
+    try {
+      issued = db.transaction((tx) => {
+        ensureWorkspace(tx, workspaceId, workspaceId);
+        const principal = createPrincipal(tx, {
+          workspaceId,
+          kind,
+          name: values.name || kind,
+        });
+        return issueToken(tx, {
+          principalId: principal.id,
+          scopes,
+          expiresAt,
+          now,
+        });
       });
-      return issueToken(tx, {
-        principalId: principal.id,
-        scopes,
-        expiresAt,
-        now,
-      });
-    });
+    } catch (error) {
+      // The transaction rolled back, so no principal or token row was written.
+      io.stderr(
+        `Token not issued: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return 2;
+    }
     io.stdout(`token: ${issued.token}`);
     io.stdout(`id: ${issued.id}`);
     io.stdout(
@@ -135,7 +145,7 @@ function parseScopes(raw: string | undefined): Scope[] | undefined | 'invalid' {
     .split(',')
     .map((scope) => scope.trim())
     .filter((scope) => scope.length > 0);
-  return scopes.every(isScope) ? scopes : 'invalid';
+  return scopes.length > 0 && scopes.every(isScope) ? scopes : 'invalid';
 }
 
 function parseExpiry(
@@ -149,7 +159,9 @@ function parseExpiry(
   if (!Number.isFinite(days) || days <= 0) {
     return 'invalid';
   }
-  return new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+  // Huge day counts overflow Date; treat them as invalid rather than throwing later.
+  const expiresAt = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+  return Number.isNaN(expiresAt.getTime()) ? 'invalid' : expiresAt;
 }
 
 // Runs only when this file is the entry point, not when tests import it.

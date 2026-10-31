@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { ensureWorkspace } from '../../src/auth/principals.js';
 import {
   IdempotencyKeyReuseError,
   VersionConflictError,
@@ -157,11 +156,16 @@ describe('event log', () => {
   it('keeps version numbering separate per workspace', () => {
     const db = openTestDatabase();
     const { principalId } = seedPrincipal(db, { kind: 'human' });
-    ensureWorkspace(db, 'ws_other', 'other');
+    const otherActor = seedPrincipal(db, {
+      kind: 'human',
+      workspaceId: 'ws_other',
+    });
     const log = createEventLog(db);
     log.append(input(principalId));
 
-    const other = log.append(input(principalId, { workspaceId: 'ws_other' }));
+    const other = log.append(
+      input(otherActor.principalId, { workspaceId: 'ws_other' }),
+    );
 
     expect(other.event.version).toBe(1);
   });
