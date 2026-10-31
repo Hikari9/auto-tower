@@ -69,6 +69,33 @@ describe('a mission read hides policy refs from non-human viewers', () => {
     }
   });
 
+  it('hides the refs on the packet list too, and shows them to a person', async () => {
+    const api = createIssueApi();
+    const m = citedMission(api);
+    for (const token of [api.runner, api.provider]) {
+      const res = await api.call(
+        token,
+        'GET',
+        `/missions/${m.id}/work-packets`,
+      );
+      expect(res.status).toBe(200);
+      const text = JSON.stringify(res.body);
+      expect(text).not.toContain('rul_');
+      expect(text).not.toContain('policy:v');
+      expect(res.body.packets[0].authorization.policyRefs).toEqual([
+        '[redacted]',
+      ]);
+    }
+    for (const token of [api.owner, api.cos]) {
+      const res = await api.call(
+        token,
+        'GET',
+        `/missions/${m.id}/work-packets`,
+      );
+      expect(res.body.packets[0].authorization.policyRefs).toEqual([m.ref]);
+    }
+  });
+
   it('shows a runner and a provider no rule id or policy ref over MCP, and a person the refs', async () => {
     const api = createIssueApi();
     const m = citedMission(api);
