@@ -15,6 +15,11 @@ function mode(path: string): number {
   return statSync(path).mode & 0o777;
 }
 
+/** The main database file and both sidecars SQLite uses in WAL mode. */
+function databaseFiles(path: string): string[] {
+  return [path, `${path}-wal`, `${path}-shm`];
+}
+
 describe('database file permissions', () => {
   it('creates the directory and the database, WAL and shared-memory files owner-only', () => {
     const path = join(dirname(tempDbPath()), 'private', 'tower.sqlite');
@@ -23,36 +28,59 @@ describe('database file permissions', () => {
     db.run('INSERT INTO probe (x) VALUES (1)');
 
     expect(mode(dirname(path))).toBe(0o700);
-    expect(mode(path)).toBe(0o600);
-    for (const sibling of [`${path}-wal`, `${path}-shm`]) {
-      expect(existsSync(sibling), sibling).toBe(true);
-      expect(mode(sibling), sibling).toBe(0o600);
+    for (const file of databaseFiles(path)) {
+      expect(existsSync(file), file).toBe(true);
+      expect(mode(file), file).toBe(0o600);
     }
     db.close();
   });
 
-  it('tightens a pre-existing world-readable database file to owner-only', () => {
+  it.each([0, 1, 2])(
+    'tightens a pre-existing world-readable database file %i to owner-only',
+    (index) => {
+      const path = tempDbPath();
+      const file = databaseFiles(path)[index] ?? path;
+      writeFileSync(file, '');
+      chmodSync(file, 0o644);
+      expect(mode(file)).toBe(0o644);
+
+      openSqliteDatabase(path).close();
+
+      expect(mode(file)).toBe(0o600);
+    },
+  );
+
+  it('leaves a pre-existing directory at its own mode', () => {
     const path = tempDbPath();
-    writeFileSync(path, '');
-    chmodSync(path, 0o644);
-    expect(mode(path)).toBe(0o644);
+    chmodSync(dirname(path), 0o755);
 
     openSqliteDatabase(path).close();
 
-    expect(mode(path)).toBe(0o600);
+    expect(mode(dirname(path))).toBe(0o755);
   });
 
-  it('refuses a sidecar that is a symbolic link instead of following it', () => {
+  it('refuses a database directory that other users can write to', () => {
     const path = tempDbPath();
-    const target = join(dirname(path), 'elsewhere');
-    writeFileSync(target, '');
-    chmodSync(target, 0o644);
-    symlinkSync(target, `${path}-wal`);
+    chmodSync(dirname(path), 0o777);
 
-    expect(() => openSqliteDatabase(path)).toThrow(/symbolic link/);
-    expect(lstatSync(`${path}-wal`).isSymbolicLink()).toBe(true);
-    expect(mode(target)).toBe(0o644);
+    expect(() => openSqliteDatabase(path)).toThrow(/writable by other users/);
   });
+
+  it.each([0, 1, 2])(
+    'refuses a symbolic link at database file %i instead of following it',
+    (index) => {
+      const path = tempDbPath();
+      const target = join(dirname(path), 'elsewhere');
+      writeFileSync(target, '');
+      chmodSync(target, 0o644);
+      const link = databaseFiles(path)[index] ?? path;
+      symlinkSync(target, link);
+
+      expect(() => openSqliteDatabase(path)).toThrow(/symbolic link/);
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(mode(target)).toBe(0o644);
+    },
+  );
 });
 
 describe('transaction error handling', () => {

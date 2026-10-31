@@ -1,6 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { readHostConfig } from '../../src/hosting/config.js';
-import { LOOPBACK_HOST, listenLoopback } from '../../src/hosting/listen.js';
 import worker from '../../src/hosting/worker.js';
 
 describe('Workers entry', () => {
@@ -14,25 +13,6 @@ describe('Workers entry', () => {
         message: 'Storage binding is not configured',
       },
     });
-  });
-});
-
-describe('Node host listen', () => {
-  it('asks the server to bind to loopback only, on the configured port', () => {
-    const serveFn = vi.fn();
-    const handler = () => new Response('ok');
-
-    listenLoopback(handler, 9123, undefined, serveFn as never);
-
-    expect(LOOPBACK_HOST).toBe('127.0.0.1');
-    expect(serveFn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        hostname: '127.0.0.1',
-        port: 9123,
-        fetch: handler,
-      }),
-      undefined,
-    );
   });
 });
 

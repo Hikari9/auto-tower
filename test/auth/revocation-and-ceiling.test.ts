@@ -210,12 +210,18 @@ describe('stored token fields', () => {
 });
 
 describe('fail-closed token resolution', () => {
-  it('rejects every token when the clock is invalid', () => {
+  it.each([
+    ['a non-expiring token', undefined],
+    ['a token with a future expiry', new Date('2099-01-01T00:00:00Z')],
+  ])('rejects %s when the clock is invalid', (_label, expiresAt) => {
     const db = openTestDatabase();
-    const human = seedPrincipal(db, { kind: 'human' });
+    const seeded = seedPrincipal(db, {
+      kind: 'human',
+      ...(expiresAt ? { expiresAt } : {}),
+    });
 
     expect(
-      authenticateToken(db, human.token, new Date('invalid')),
+      authenticateToken(db, seeded.token, new Date('invalid')),
     ).toBeUndefined();
   });
 

@@ -1,4 +1,12 @@
-import { chmodSync, closeSync, lstatSync, mkdirSync, openSync } from 'node:fs';
+import {
+  closeSync,
+  constants,
+  fchmodSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+} from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { SqlDatabase, SqlValue } from './database.js';
@@ -18,20 +26,63 @@ export function openSqliteDatabase(path: string): SqlDatabase {
 
 /**
  * Keeps the database owner-only: token digests and event payloads must not be
- * readable by other local users. Directories and files this code creates get
- * 0700/0600. Files that already exist are tightened to 0600. Pre-existing
- * directories are left alone, because the path may be a shared directory such
- * as /tmp. Symbolic links are refused, since chmod would change their target.
+ * readable by other local users, and another user must not be able to swap a
+ * file or link underneath it. The directory must not be writable by others,
+ * which is why a pre-existing shared directory such as /tmp is refused.
  */
 function prepareDatabaseFiles(path: string): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const dirStat = lstatSync(dir);
+  if (!dirStat.isDirectory()) {
+    throw new Error(`Refusing database directory ${dir}: not a directory`);
+  }
+  if ((dirStat.mode & 0o022) !== 0) {
+    throw new Error(
+      `Refusing database directory ${dir}: writable by other users`,
+    );
+  }
   for (const file of [path, `${path}-wal`, `${path}-shm`]) {
-    if (lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    openOwnerOnly(file);
+  }
+}
+
+/** Opens without following links, then sets the mode on the descriptor, so no path is re-resolved. */
+function openOwnerOnly(file: string): void {
+  let fd: number;
+  try {
+    fd = openSync(
+      file,
+      constants.O_RDWR | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+  } catch (error) {
+    if (hasErrno(error, 'ELOOP')) {
       throw new Error(`Refusing to open ${file}: it is a symbolic link`);
     }
-    closeSync(openSync(file, 'a', 0o600));
-    chmodSync(file, 0o600);
+    throw error;
   }
+  try {
+    const st = fstatSync(fd);
+    const uid = process.getuid?.();
+    if (!st.isFile() || (uid !== undefined && st.uid !== uid)) {
+      throw new Error(
+        `Refusing to open ${file}: not a regular file owned by this user`,
+      );
+    }
+    fchmodSync(fd, 0o600);
+  } catch (error) {
+    if (hasErrno(error, 'EPERM') || hasErrno(error, 'ENOTSUP')) {
+      throw new Error(`Cannot make ${file} owner-only on this filesystem`);
+    }
+    throw error;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function hasErrno(error: unknown, code: string): boolean {
+  return error instanceof Error && 'code' in error && error.code === code;
 }
 
 function wrap(handle: DatabaseSync): SqlDatabase {

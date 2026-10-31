@@ -86,6 +86,12 @@ Scope: the Auto Tower control plane, its HTTP and MCP surfaces, the runner proto
 
 - **Plan:** Rate limits, backpressure on free-tier quotas, and fail-closed behavior for unsafe mutations when quota is exhausted.
 
+### T-15 Local file exposure and swapping
+
+- **Mitigation:** The database directory must not be writable by other users, so Tower refuses a pre-existing shared directory such as `/tmp`. The database, WAL and shared-memory files are opened without following links, checked to be regular files owned by the current user, and set to `0600` on the open descriptor.
+- **Mitigation:** Directories and files Tower creates are `0700` and `0600`.
+- **Residual:** On filesystems that reject POSIX modes, Tower fails closed with an explicit error. Windows has no POSIX file modes, so this control does not apply there. A user with root can read everything.
+
 ## Explicit non-goals for v1
 
 - No hosted model reads untrusted content on Tower's behalf. The cloud AI path is off by default.
