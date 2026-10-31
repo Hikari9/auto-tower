@@ -63,6 +63,29 @@ describe('packetCovers', () => {
     },
   );
 
+  it.each(['*e*', '*a*', '*0*', 'a*', 'ab*', '*src', '*/utils'])(
+    'does not count %s, which names too little to bind anything',
+    (pattern) => {
+      expect(packetCovers(packet('p', [pattern]), 'repo/docs/x')).toBe(false);
+      expect(
+        withinAuthorizedScope(
+          undefined,
+          [packet('s', [pattern], true)],
+          'repo/docs/x',
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it.each(['src/*', 'env:*', 'infra', 'ci', 'abc*'])(
+    'counts %s as declaring something',
+    (pattern) => {
+      expect(
+        packetCovers(packet('p', [pattern]), pattern.replace('*', 'x')),
+      ).toBe(true);
+    },
+  );
+
   it.each(['src/.*', 'src/..*', 'src/*.*', 'src/*..*'])(
     'does not count %s, which could expand to a parent path',
     (pattern) => {

@@ -23,7 +23,6 @@ const DESTRUCTIVE_VERBS: readonly string[] = [
   'wipe',
   'truncate',
   'remove',
-  'force-push',
 ];
 
 function under(action: string, prefix: string): boolean {
@@ -34,33 +33,36 @@ const startsWithAny = (segment: string, words: readonly string[]): boolean =>
   words.some((word) => segment.startsWith(word));
 
 /**
- * The category of every part of the name but a leading `cleanup`. Sensitive words match as the
- * start of any segment, and `_` reads as `-`, so `deploy.prod-eu`, `db.drop_table`, `git.push_force`
- * and `billing.spend.create` are all caught. This errs toward asking.
+ * The category of every part of the name but a leading `cleanup`. A name is read as words split on
+ * `.`, `-` and `_`. A sensitive word counts when a word starts with it, wherever it sits, so
+ * `deploy.prod-eu`, `deploy.to-prod`, `db.table_drop`, `git.push_force`, `billing.spend.create`
+ * and `cleanup.issue.close` are all caught. This errs toward asking.
  */
 function sensitiveCategory(action: string): ActionCategory {
-  if (under(action, 'review.independent')) {
+  const words = action.split(/[._-]/);
+  const any = (starts: readonly string[]) =>
+    words.some((w) => startsWithAny(w, starts));
+  const followed = (first: string, second: string) =>
+    words.some((w, i) => w === first && words[i + 1]?.startsWith(second));
+  if (followed('review', 'independent')) {
     return 'independent_review';
   }
-  const segments = action.replaceAll('_', '-').split('.');
-  const any = (words: readonly string[]) =>
-    segments.some((s) => startsWithAny(s, words));
   if (any(['spend'])) {
     return 'spend';
   }
-  if ((any(['deploy']) || any(['release'])) && any(['prod'])) {
+  if (any(['deploy', 'release', 'ship', 'publish']) && any(['prod'])) {
     return 'production_deploy';
   }
   if (any(['security'])) {
     return 'security';
   }
-  if (under(action, 'issue.close')) {
+  if (followed('issue', 'close')) {
     return 'external_issue_close';
   }
   if (
-    under(action, 'destructive') ||
+    any(['destructive']) ||
     any(DESTRUCTIVE_VERBS) ||
-    /force.*push|push.*force/.test(action)
+    (any(['force']) && any(['push']))
   ) {
     return 'destructive';
   }

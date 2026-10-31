@@ -256,6 +256,33 @@ describe('rules over HTTP', () => {
     expect(inactive.body.rules).toHaveLength(1);
   });
 
+  it.each([
+    ['2030-01-01T10:00Z', '2030-01-01T10:00:00.000Z'],
+    ['2030-01-01T10:00+10:00', '2030-01-01T00:00:00.000Z'],
+    ['2030-01-01T10:00-05:00', '2030-01-01T15:00:00.000Z'],
+    ['2030-01-01T10:00:30.5Z', '2030-01-01T10:00:30.500Z'],
+    ['2032-02-29T00:00:00Z', '2032-02-29T00:00:00.000Z'],
+    ['2400-02-29T00:00:00Z', '2400-02-29T00:00:00.000Z'],
+  ])('accepts %s', async (expiresAt, canonical) => {
+    const api = createApi();
+    const created = await createRule(api, { ...RULE, expiresAt });
+    expect(created.status).toBe(201);
+    expect(created.body.rule.expiresAt).toBe(canonical);
+  });
+
+  it.each([
+    '2100-02-29T00:00:00Z',
+    '1900-02-29T00:00:00Z',
+    '2030-13-01T00:00:00Z',
+    '2030-00-10T00:00:00Z',
+    '2030-01-00T00:00:00Z',
+    '2030-01-01T10:60:00Z',
+    '2030-01-01T10:00:60Z',
+  ])('rejects %s', async (expiresAt) => {
+    const api = createApi();
+    expect((await createRule(api, { ...RULE, expiresAt })).status).toBe(400);
+  });
+
   it('accepts a leap day', async () => {
     const api = createApi();
     const created = await createRule(api, {

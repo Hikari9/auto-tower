@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { PacketNotFoundError, ValidationError } from '../../src/core/errors.js';
+import {
+  CommandNotAllowedError,
+  PacketNotFoundError,
+  ValidationError,
+} from '../../src/core/errors.js';
+import { createDecisionInbox } from '../../src/decisions/inbox.js';
 import { AuthorityForbiddenError } from '../../src/policy/errors.js';
 import {
   type AuthorityHarness,
@@ -699,5 +704,51 @@ describe('packets that declare nothing, and housekeeping names', () => {
         note: null,
       }).applied,
     ).toBe(true);
+  });
+});
+
+describe('a savepoint that cannot be undone', () => {
+  it('fails the whole answer with the original error and changes nothing', () => {
+    const h = createAuthorityHarness();
+    const m = missionWith(h, [{ title: 'one' }]);
+    // A transaction whose savepoint rollback fails, as when the transaction itself is already gone.
+    const broken = {
+      ...h.db,
+      transaction: <T>(fn: (tx: typeof h.db) => T): T =>
+        h.db.transaction((tx) =>
+          fn({
+            ...tx,
+            exec: (sql: string) => {
+              if (sql.startsWith('ROLLBACK TO')) {
+                throw new Error('no such savepoint');
+              }
+              tx.exec(sql);
+            },
+          }),
+        ),
+    };
+    const inbox = createDecisionInbox({
+      db: broken,
+      guards: h.core.guards,
+      clock: h.clock.now,
+    });
+    const decision = inbox.create(
+      owner(h),
+      decisionInput([{ missionId: m.driver.id, packetId: m.ids[0] as string }]),
+    ).decision;
+    m.driver.go('verifying');
+    const before = m.driver.refresh().version;
+    expect(() =>
+      inbox.answer(owner(h), decision.id, {
+        version: 1,
+        choice: 'approve',
+        note: null,
+      }),
+    ).toThrow(CommandNotAllowedError);
+    expect(inbox.get('ws_test', decision.id)?.status).toBe('open');
+    expect(inbox.answers('ws_test', decision.id)).toEqual([]);
+    expect(h.core.missions.replayMission('ws_test', m.driver.id).version).toBe(
+      before,
+    );
   });
 });

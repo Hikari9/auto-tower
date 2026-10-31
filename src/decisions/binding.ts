@@ -6,15 +6,23 @@ import {
 } from '../policy/patterns.js';
 
 /**
- * A scope that declares something names at least one letter or digit and holds no segment that
- * `*` and dots could expand to `..`. `*`, `**`, `*:*` and `.*` declare nothing.
+ * A scope that declares something names a literal prefix of at least three characters before any
+ * `*` (or no `*` at all, with a letter or digit), and holds no segment that `*` and dots could
+ * expand to `..`. `*`, `**`, `*:*`, `*e*` and `.*` declare nothing.
  */
-const declared = (pattern: string): boolean =>
-  /[A-Za-z0-9]/.test(pattern) &&
-  !hasTraversal(pattern) &&
-  !pattern
-    .split(/[\\/]/)
-    .some((segment) => segment.includes('.') && /^[.*]+$/.test(segment));
+const declared = (pattern: string): boolean => {
+  const prefix = pattern.split('*')[0] ?? '';
+  const named = pattern.includes('*')
+    ? prefix.length >= 3 && /[A-Za-z0-9]/.test(prefix)
+    : /[A-Za-z0-9]/.test(pattern);
+  return (
+    named &&
+    !hasTraversal(pattern) &&
+    !pattern
+      .split(/[\\/]/)
+      .some((segment) => segment.includes('.') && /^[.*]+$/.test(segment))
+  );
+};
 
 /**
  * True when what a request claims to touch lies inside what the packet itself declared. The

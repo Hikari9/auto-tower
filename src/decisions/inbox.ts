@@ -284,14 +284,17 @@ export function createDecisionInbox(deps: DecisionInboxDeps): DecisionInbox {
       );
       tx.exec('RELEASE resume_branch');
     } catch (error) {
+      let restored = true;
       try {
         tx.exec('ROLLBACK TO resume_branch');
         tx.exec('RELEASE resume_branch');
       } catch {
-        // The transaction itself is gone. Report the failure that caused it, not this one.
+        // The transaction itself is gone, or the savepoint could not be undone.
+        restored = false;
       }
-      // Mission state that locks the breakdown (verifying, cancelled) is a stale branch, not a failure.
-      if (error instanceof CommandNotAllowedError) {
+      // A branch is only skipped once the attempt was fully undone. Otherwise the whole answer
+      // fails with the original error, and the surrounding transaction rolls everything back.
+      if (restored && error instanceof CommandNotAllowedError) {
         return { status: 'skipped', reason: error.reason };
       }
       throw error;

@@ -19,16 +19,33 @@ const RFC3339 =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
 /** `Date.parse` rolls 30 February forward into March. A date that does not exist is refused instead. */
 function realDate(value: string): boolean {
-  const [y, mo, d, h, mi, sec] = value.slice(0, 19).split(/[-T:]/).map(Number);
-  const inMonth = new Date(Date.UTC(y ?? 0, mo ?? 0, 0)).getUTCDate();
+  const parts = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/.exec(
+    value,
+  );
+  if (parts === null) {
+    return false;
+  }
+  const [year, month, day, hour, minute, second] = parts
+    .slice(1)
+    .map((part) => (part === undefined ? 0 : Number(part))) as [
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+  ];
+  // A leap year is found by asking for 29 February in a date object set to that exact year.
+  const probe = new Date(0);
+  probe.setUTCFullYear(year, month, 0);
   return (
-    (mo ?? 0) >= 1 &&
-    (mo ?? 13) <= 12 &&
-    (d ?? 0) >= 1 &&
-    (d ?? 99) <= inMonth &&
-    (h ?? 99) <= 23 &&
-    (mi ?? 99) <= 59 &&
-    (Number.isNaN(sec ?? Number.NaN) ? 0 : (sec ?? 0)) <= 59
+    month >= 1 &&
+    month <= 12 &&
+    day >= 1 &&
+    day <= probe.getUTCDate() &&
+    hour <= 23 &&
+    minute <= 59 &&
+    second <= 59
   );
 }
 
