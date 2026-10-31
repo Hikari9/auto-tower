@@ -1170,6 +1170,9 @@ describe('error mapping for core errors', () => {
 
 describe('search filters', () => {
   it('filters by risk, parent and intent text, and orders by recent update', async () => {
+    // Updates are ordered by recording time, so the wall clock is pinned and moved by hand.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-03-01T00:00:00.000Z'));
     const api = setup();
     const parent = await createMission(api, {
       ...NEW_MISSION,
@@ -1196,11 +1199,13 @@ describe('search filters', () => {
       'Parent',
     ]);
 
+    vi.setSystemTime(new Date('2026-03-01T00:00:05.000Z'));
     await api.call(api.owner.token, 'PATCH', `/missions/${parent.id}`, {
       expectedVersion: 1,
       title: 'Parent touched',
     });
-    expect((await titles('?risk=medium'))[0]).toBe('Parent touched');
+    vi.useRealTimers();
+    expect(await titles('?risk=medium')).toEqual(['Parent touched', 'Plain']);
     expect(kid.id).not.toBe(plain.id);
   });
 });
