@@ -7,10 +7,13 @@ import {
 } from '../auth/middleware.js';
 import type { Scope } from '../auth/principals.js';
 import type { Core } from '../core/index.js';
+import type { Authority } from '../decisions/index.js';
 import type { SqlDatabase } from '../storage/database.js';
 import { errorBody, handleError } from './errors.js';
+import { decisionRoutes } from './routes/decisions.js';
 import { healthRoute } from './routes/health.js';
 import { missionRoutes } from './routes/missions.js';
+import { policyRoutes } from './routes/policy.js';
 import { workRoutes } from './routes/work.js';
 
 export type AppEnv = {
@@ -33,6 +36,8 @@ export const ROUTES: readonly RouteSpec[] = [
   healthRoute,
   ...missionRoutes,
   ...workRoutes,
+  ...policyRoutes,
+  ...decisionRoutes,
 ];
 
 export interface AppDependencies {
@@ -40,6 +45,8 @@ export interface AppDependencies {
   now?: () => Date;
   /** Mission core. Built over `db` when absent. Tests and hosts inject one to control the runner pool and clock. */
   core?: Core;
+  /** Policy store, Decision Inbox and tier routing. Built over `db` and the core's guards when absent. */
+  authority?: Authority;
 }
 
 export function createApp(
