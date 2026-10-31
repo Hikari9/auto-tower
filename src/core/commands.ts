@@ -351,7 +351,7 @@ export function authorizePacketDecision(
       if (packet.scope.length === 0) {
         throw new CommandNotAllowedError(
           'authorize a work packet',
-          `packet ${packetId} declares no execution scope, so no runner could be checked against it`,
+          `packet ${packetId} declares no execution scope, so no runner could be checked against it. Cancel it and add the packet again with a scope`,
         );
       }
       // A cited ref is a claim. A chief of staff acts only under a rule that is current now, so

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { runOpsCli } from '../../src/ops/cli.js';
 import {
   BackupError,
@@ -210,6 +210,62 @@ describe('backup and restore drill', () => {
       expect(backup.tables[name]).toBeUndefined();
     }
     world.close();
+  });
+});
+
+describe('a backup does not stop the server writing', () => {
+  it('reads from a snapshot, so a writer on another connection is not blocked and is not in the file', async () => {
+    const { world } = await populated();
+    const writer = openSqliteDatabase(world.dbPath);
+    const reader = openSqliteDatabase(world.dbPath);
+    const spy = vi.spyOn(reader, 'readTransaction');
+    try {
+      const countBefore =
+        reader.get<{ n: number }>('SELECT COUNT(*) AS n FROM workspaces')?.n ??
+        0;
+      let backup: ReturnType<typeof exportBackup> | undefined;
+      reader.readTransaction?.((tx) => {
+        expect(
+          tx.get<{ n: number }>('SELECT COUNT(*) AS n FROM workspaces')?.n,
+        ).toBe(countBefore);
+        // The write lock is free: this would wait out busy_timeout and then fail if the reader held it.
+        const started = Date.now();
+        writer.run(
+          "INSERT INTO workspaces (id, name, created_at) VALUES ('ws_late', 'late', 'z')",
+        );
+        expect(Date.now() - started).toBeLessThan(1000);
+        // And the snapshot does not see it.
+        expect(
+          tx.get<{ n: number }>('SELECT COUNT(*) AS n FROM workspaces')?.n,
+        ).toBe(countBefore);
+      });
+      backup = exportBackup(reader);
+      expect(spy).toHaveBeenCalledTimes(2);
+      // exportBackup took the read path, not the write lock, and holds the late workspace now.
+      expect(backup.tables.workspaces?.rows.length).toBe(countBefore + 1);
+    } finally {
+      writer.close();
+      reader.close();
+      world.close();
+    }
+  });
+
+  it('can still be taken from a store whose guard refuses writes', async () => {
+    const { world } = await populated();
+    const { guardStorage } = await import('../../src/ops/index.js');
+    const guarded = guardStorage(openSqliteDatabase(world.dbPath));
+    try {
+      expect(() =>
+        guarded.run('UPDATE workspaces SET name = name'),
+      ).not.toThrow();
+      guarded.quota.reset();
+      expect(
+        exportBackup(guarded).tables.missions?.rows.length,
+      ).toBeGreaterThan(0);
+    } finally {
+      guarded.close();
+      world.close();
+    }
   });
 });
 
@@ -453,6 +509,50 @@ describe('pnpm ops', () => {
     const again = join(dir, 'again.sqlite');
     expect(run(['restore', '--from', file, '--db', again]).code).toBe(1);
     expect(existsSync(again)).toBe(false);
+    world.close();
+  });
+
+  it('leaves nothing behind when a restore fails, so the retry the error advises is not blocked', async () => {
+    const { world } = await populated();
+    const dir = tempDir();
+    const file = join(dir, 'newer.json');
+    const backup = exportBackup(world.db);
+    // A backup from a newer build: restoreBackup refuses it after the target file was created.
+    writeFileSync(
+      file,
+      JSON.stringify({
+        ...backup,
+        migrations: [
+          ...backup.migrations,
+          { id: '0099_future', checksum: 'x' },
+        ],
+      }),
+    );
+    const target = join(dir, 'restored.sqlite');
+    const failed = run(['restore', '--from', file, '--db', target]);
+    expect(failed.code).toBe(1);
+    expect(failed.err).toMatch(/newer build/);
+    for (const suffix of ['', '-wal', '-shm']) {
+      expect(existsSync(`${target}${suffix}`), suffix || 'main file').toBe(
+        false,
+      );
+    }
+    // The same command with a good backup then works at that path.
+    const good = join(dir, 'good.json');
+    writeFileSync(good, JSON.stringify(backup));
+    expect(run(['restore', '--from', good, '--db', target]).code).toBe(0);
+    world.close();
+  });
+
+  it('does not call a database healthy that it cannot see the signals of', async () => {
+    const { world } = await populated();
+    const status = JSON.parse(
+      run(['status', '--db', world.dbPath, '--workspace', TEST_WORKSPACE]).out,
+    );
+    expect(status.status).toBe('not_halted');
+    expect(status.status).not.toBe('ok');
+    expect(status.signals).toMatch(/running server/);
+    expect(status.signals).toMatch(/read_health/);
     world.close();
   });
 

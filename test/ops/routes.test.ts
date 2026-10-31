@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createApp } from '../../src/api/app.js';
 import { isUniqueViolation } from '../../src/fleet/errors.js';
+import { guardStorage } from '../../src/ops/index.js';
 import { openSqliteDatabase } from '../../src/storage/sqlite.js';
 import { createFleetHarness, type FleetHarness } from '../fleet/helpers.js';
+import { openTestDatabase, seedPrincipal } from '../helpers/tower.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -178,5 +181,65 @@ describe('a claim that loses a race on a unique index', () => {
       false,
     );
     expect(isUniqueViolation('UNIQUE constraint failed')).toBe(false);
+  });
+});
+
+describe('a full store over HTTP', () => {
+  it('answers 503 with the code and the instruction, not a bare 500, and still answers reads', async () => {
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const raw = openTestDatabase();
+    const full = { on: false };
+    const wrapped = {
+      ...raw,
+      exec: (sql: string) => raw.exec(sql),
+      run: (
+        sql: string,
+        params?: readonly (string | number | bigint | null)[],
+      ) => {
+        if (full.on && /^\s*(insert|update|delete)/i.test(sql)) {
+          throw Object.assign(new Error('database or disk is full'), {
+            errcode: 13,
+          });
+        }
+        return raw.run(sql, params);
+      },
+      transaction: <T>(fn: (tx: typeof raw) => T): T =>
+        raw.transaction((tx) => fn(tx === raw ? (wrapped as typeof raw) : tx)),
+    } as typeof raw;
+    const db = guardStorage(wrapped);
+    const owner = seedPrincipal(raw, { kind: 'human' });
+    const app = createApp({ db });
+    const call = (method: string, path: string, body?: unknown) =>
+      app.request(path, {
+        method,
+        headers: {
+          authorization: `Bearer ${owner.token}`,
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+    const mission = { title: 't', intent: 'i', outcome: 'o' };
+    expect((await call('POST', '/missions', mission)).status).toBe(201);
+
+    full.on = true;
+    const refused = await call('POST', '/missions', {
+      ...mission,
+      title: 'two',
+    });
+    expect(refused.status).toBe(503);
+    const body = (await refused.json()) as {
+      error: { code: string; message: string };
+    };
+    expect(body.error.code).toBe('storage_quota_exhausted');
+    expect(body.error.message).toMatch(
+      /Writes are refused until an operator clears it/,
+    );
+    full.on = false;
+    // Reads still answer while the guard holds.
+    expect((await call('GET', '/missions')).status).toBe(200);
+    expect(
+      (await call('POST', '/missions', { ...mission, title: 'three' })).status,
+    ).toBe(503);
+    quiet.mockRestore();
   });
 });

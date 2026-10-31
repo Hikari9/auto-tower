@@ -134,7 +134,10 @@ export function exportBackup(
   options: { now?: Date; includeTokenDigests?: boolean } = {},
 ): BackupFile {
   const includeTokenDigests = options.includeTokenDigests === true;
-  return db.transaction((tx) => {
+  // A read snapshot, not the write lock: the dump of a large store must not make the server's own
+  // writes wait past busy_timeout. A port without one takes the write lock, which is still correct.
+  const consistently = db.readTransaction?.bind(db) ?? db.transaction.bind(db);
+  return consistently((tx) => {
     const migrations = tx
       .all<{ id: string; checksum: string }>(
         'SELECT id, checksum FROM schema_migrations ORDER BY id',

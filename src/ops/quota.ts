@@ -141,6 +141,13 @@ export function guardStorage(
       refuseIfTripped();
       return attempt(() => inner.transaction((tx) => fn(wrapTx(tx))));
     },
+    // Reads are never refused, so a backup can be taken from a store that refuses writes.
+    ...(inner.readTransaction === undefined
+      ? {}
+      : {
+          readTransaction: <T>(fn: (tx: SqlDatabase) => T): T =>
+            (inner.readTransaction as <U>(f: (tx: SqlDatabase) => U) => U)(fn),
+        }),
     close: () => inner.close(),
   };
 

@@ -112,6 +112,21 @@ function wrap(handle: DatabaseSync): SqlDatabase {
       }
       return result;
     },
+    readTransaction: <T>(fn: (tx: SqlDatabase) => T): T => {
+      // A deferred transaction: under WAL the first read pins a snapshot and writers are not blocked.
+      handle.exec('BEGIN');
+      try {
+        const result = fn(db);
+        if (result instanceof Promise) {
+          throw new TypeError('transaction callbacks must be synchronous');
+        }
+        return result;
+      } finally {
+        if (handle.isTransaction) {
+          handle.exec('ROLLBACK');
+        }
+      }
+    },
     close: () => handle.close(),
   };
   return db;

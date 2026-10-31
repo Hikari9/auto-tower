@@ -1,4 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname } from 'node:path';
 import { parseArgs } from 'node:util';
 import { getPrincipal } from '../auth/principals.js';
@@ -164,12 +170,14 @@ export function runOpsCli(
         }
         const backup = readBackup(readFileSync(from, 'utf8'));
         const db = openSqliteDatabase(dbPath);
+        let restored = false;
         try {
           const result = restoreBackup(
             db,
             backup,
             readMigrationFiles(defaultMigrationsDir()),
           );
+          restored = true;
           io.stdout(
             `Restored ${result.rows} rows into ${dbPath}; migrated forward ${result.migratedForward.length} step(s)`,
           );
@@ -182,6 +190,13 @@ export function runOpsCli(
           }
         } finally {
           db.close();
+          // A restore that failed leaves nothing: not a half-loaded file the server would open as
+          // a database, and not a path that blocks the retry the error message advises.
+          if (!restored) {
+            for (const suffix of ['', '-wal', '-shm']) {
+              rmSync(`${dbPath}${suffix}`, { force: true });
+            }
+          }
         }
         return 0;
       }
@@ -289,7 +304,23 @@ export function runOpsCli(
         }
         const db = openSqliteDatabase(dbPath);
         try {
-          io.stdout(JSON.stringify(healthReport(db, workspaceId), null, 2));
+          // Signals live in the running server's memory, and this is another process. Reporting "ok"
+          // from here would say an incident is over when it cannot be seen, so only what the file
+          // holds is reported, and the rest is pointed at the server.
+          const { halt, storageReadable } = healthReport(db, workspaceId);
+          io.stdout(
+            JSON.stringify(
+              {
+                status: halt.halted ? 'halted' : 'not_halted',
+                halt,
+                storageReadable,
+                signals:
+                  'not visible from this command: they live in the running server. Ask it with the read_health tool.',
+              },
+              null,
+              2,
+            ),
+          );
         } finally {
           db.close();
         }
@@ -311,7 +342,11 @@ export function runOpsCli(
     // A file-system code names a cause and no secret, and tells the operator what to fix.
     const code = (error as { code?: unknown } | null)?.code;
     const cause =
-      typeof code === 'string' && /^E[A-Z]+$/.test(code) ? ` (${code})` : '';
+      error instanceof RangeError
+        ? ' (too large for one backup file)'
+        : typeof code === 'string' && /^E[A-Z]+$/.test(code)
+          ? ` (${code})`
+          : '';
     io.stderr(
       `ops failed: ${error instanceof Error ? error.name : 'error'}${cause}`,
     );

@@ -121,6 +121,47 @@ describe('the scheduled sweep', () => {
   });
 });
 
+describe('a sweep that cannot even list workspaces', () => {
+  it('does not throw into the timer: it logs the error name and raises the signal', () => {
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const db = openTestDatabase();
+    const broken = {
+      ...db,
+      all: () => {
+        throw Object.assign(new Error('SECRET page 7 is corrupt'), {
+          name: 'SqliteError',
+        });
+      },
+    } as typeof db;
+    const result = runSweep(broken, { tick: vi.fn() });
+    expect(result).toEqual({ workspaces: 0, failed: ['*'] });
+    expect(JSON.stringify(quiet.mock.calls)).not.toContain('SECRET');
+    // Signals belong to the handle the sweep ran on. healthReport reads a healthy `get`.
+    expect(healthReport(broken, 'ws_a').signals.map((s) => s.code)).toEqual([
+      SWEEP_FAILED,
+    ]);
+    quiet.mockRestore();
+  });
+
+  it('keeps the interval running after one failed tick', () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const db = openTestDatabase();
+    let calls = 0;
+    const broken = {
+      ...db,
+      all: () => {
+        calls += 1;
+        throw new Error('busy');
+      },
+    } as typeof db;
+    const handle = startSweepInterval(broken, { tick: vi.fn() }, 1000);
+    expect(() => vi.advanceTimersByTime(3500)).not.toThrow();
+    expect(calls).toBe(3);
+    handle.stop();
+  });
+});
+
 describe('the sweep interval', () => {
   it('ticks on a timer until stopped, and does not keep the process alive', () => {
     vi.useFakeTimers();

@@ -11,6 +11,9 @@ import { openSqliteDatabase } from '../storage/sqlite.js';
 import { readHostConfig } from './config.js';
 import { LOOPBACK_HOST, listenLoopback } from './listen.js';
 
+const MIN_SWEEP_MS = 10;
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
 /**
  * `TOWER_SWEEP_INTERVAL_MS`: milliseconds between sweeps, `0` for none. An empty or unreadable
  * value is the default, so a typo never silently turns the sweep off.
@@ -24,7 +27,12 @@ export function readSweepInterval(
     return DEFAULT_SWEEP_INTERVAL_MS;
   }
   const ms = Number(raw);
-  return Number.isInteger(ms) && ms >= 0 ? ms : DEFAULT_SWEEP_INTERVAL_MS;
+  // Node clamps a timer above 2^31-1 ms to 1 ms, so a "long" interval would become a busy loop, and
+  // under 10 ms a synchronous sweep would starve the event loop. Both fall back to the default.
+  const ok =
+    Number.isInteger(ms) &&
+    (ms === 0 || (ms >= MIN_SWEEP_MS && ms <= MAX_TIMER_MS));
+  return ok ? ms : DEFAULT_SWEEP_INTERVAL_MS;
 }
 
 /**

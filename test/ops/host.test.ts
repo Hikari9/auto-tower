@@ -28,7 +28,22 @@ describe('TOWER_SWEEP_INTERVAL_MS', () => {
     );
     expect(readSweepInterval({ TOWER_SWEEP_INTERVAL_MS: '0' })).toBe(0);
     expect(readSweepInterval({ TOWER_SWEEP_INTERVAL_MS: '250' })).toBe(250);
-    for (const bad of ['abc', '-5', '1.5', 'NaN', ' ']) {
+    expect(readSweepInterval({ TOWER_SWEEP_INTERVAL_MS: '10' })).toBe(10);
+    expect(readSweepInterval({ TOWER_SWEEP_INTERVAL_MS: '2147483647' })).toBe(
+      2147483647,
+    );
+    // Over 2^31-1 ms a Node timer fires every millisecond, and under 10 ms a sweep starves the loop.
+    for (const bad of [
+      'abc',
+      '-5',
+      '1.5',
+      'NaN',
+      ' ',
+      '2592000000',
+      '2147483648',
+      '1',
+      '9',
+    ]) {
       expect(readSweepInterval({ TOWER_SWEEP_INTERVAL_MS: bad }), bad).toBe(
         DEFAULT_SWEEP_INTERVAL_MS,
       );

@@ -335,4 +335,61 @@ describe('the halt tools', () => {
     expect(resumed.halt).toMatchObject({ halted: false });
     expect((await cos.ok('read_health', {})).health.status).toBe('ok');
   });
+
+  it('runs a retried halt again instead of replaying a stale answer after a resume', async () => {
+    const env = createMcpEnv();
+    const owner = await env.session(env.owner);
+    const haltKey = key('halt');
+    const first = await owner.ok('halt_workspace', {
+      reason: 'a',
+      confirm: true,
+      idempotencyKey: haltKey,
+    });
+    expect(first.halt.halted).toBe(true);
+    await owner.ok('resume_workspace', {
+      confirm: true,
+      idempotencyKey: key(),
+    });
+    expect((await owner.ok('read_health', {})).health.status).toBe('ok');
+
+    // The same key, the same arguments, after the workspace resumed: the halt must happen.
+    const again = await owner.call('halt_workspace', {
+      reason: 'a',
+      confirm: true,
+      idempotencyKey: haltKey,
+    });
+    expect(again.isError).toBe(false);
+    expect(again.meta?.['tower/replayed']).toBeUndefined();
+    expect(again.data.halt.halted).toBe(true);
+    expect((await owner.ok('read_health', {})).health.status).toBe('halted');
+
+    // And a retried resume resumes, even though the stored answer would say it already had.
+    const resumeKey = key('resume');
+    await owner.ok('resume_workspace', {
+      confirm: true,
+      idempotencyKey: resumeKey,
+    });
+    await owner.ok('halt_workspace', { confirm: true, idempotencyKey: key() });
+    const resumed = await owner.call('resume_workspace', {
+      confirm: true,
+      idempotencyKey: resumeKey,
+    });
+    expect(resumed.data.halt.halted).toBe(false);
+    expect((await owner.ok('read_health', {})).health.status).toBe('ok');
+  });
+
+  it('still replays an ordinary tool for the same key, so the exception is only for these', async () => {
+    const env = createMcpEnv();
+    const owner = await env.session(env.owner);
+    const args = {
+      title: 't',
+      intent: 'i',
+      outcome: 'o',
+      idempotencyKey: key('c'),
+    };
+    const a = await owner.call('create_mission', args);
+    const b = await owner.call('create_mission', args);
+    expect(b.meta?.['tower/replayed']).toBe(true);
+    expect(b.data.mission.id).toBe(a.data.mission.id);
+  });
 });

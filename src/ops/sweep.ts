@@ -21,9 +21,27 @@ export function runSweep(
   db: SqlDatabase,
   fleet: Pick<Fleet, 'tick'>,
 ): SweepResult {
-  const ids = db
-    .all<{ id: string }>('SELECT id FROM workspaces ORDER BY id')
-    .map((row) => row.id);
+  const signals = signalsFor(db);
+  let ids: string[];
+  try {
+    ids = db
+      .all<{ id: string }>('SELECT id FROM workspaces ORDER BY id')
+      .map((row) => row.id);
+  } catch (error) {
+    // Not even the workspace list could be read. This runs in a timer, where an escape would end
+    // the process, so it is a signal and a log line naming the error.
+    console.error(
+      `sweep could not list workspaces: ${error instanceof Error ? error.name : 'error'}`,
+    );
+    signals.raise(SWEEP_FAILED, {
+      severity: 'warning',
+      message:
+        'The scheduled sweep could not read the workspace list. Leases may not expire and ready work may wait for a runner poll.',
+      action:
+        'Check the server log for the error name and the database health.',
+    });
+    return { workspaces: 0, failed: ['*'] };
+  }
   const failed: string[] = [];
   for (const id of ids) {
     try {
@@ -35,7 +53,6 @@ export function runSweep(
       );
     }
   }
-  const signals = signalsFor(db);
   if (failed.length > 0) {
     signals.raise(SWEEP_FAILED, {
       severity: 'warning',

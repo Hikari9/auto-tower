@@ -21,6 +21,7 @@ import {
 } from '../../core/inputs.js';
 import type { CommandContext, CommandResult } from '../../core/service.js';
 import { authorityHoldsFor } from '../../fleet/broker.js';
+import { StorageQuotaError } from '../../ops/quota.js';
 import { createPolicyService } from '../../policy/service.js';
 import type { AppDependencies, AppEnv, RouteSpec } from '../app.js';
 
@@ -190,6 +191,14 @@ export function guarded(handler: RouteHandler): RouteHandler {
         return c.json(
           { error: { code: error.code, message: error.message } },
           error.status,
+        );
+      }
+      // The store refused a write for space. A runner or client retries a 503, and the message
+      // says what an operator must do, where a bare 500 would look like a bug.
+      if (error instanceof StorageQuotaError) {
+        return c.json(
+          { error: { code: error.code, message: error.message } },
+          503,
         );
       }
       throw error;

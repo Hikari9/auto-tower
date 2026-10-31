@@ -48,6 +48,12 @@ export interface ToolDefinition {
   readOnly: boolean;
   /** Every one is required. The server checks them before the tool runs. */
   scopes: readonly [Scope, ...Scope[]];
+  /**
+   * Never answered from a stored result. For a tool whose answer is the live state of something that
+   * can change between two calls with one key (halt, resume, the storage guard): a retry runs again,
+   * so a stale `halted: true` is never returned for a workspace that has since resumed.
+   */
+  noReplay?: boolean;
   /** Grant, revoke, dispatch request and close. The call must carry `confirm: true`. */
   material?: boolean;
   /** Properties of the call, without `idempotencyKey` and `confirm`, which the server adds. */

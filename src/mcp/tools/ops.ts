@@ -44,6 +44,7 @@ export const opsTools: readonly ToolDefinition[] = [
     readOnly: false,
     scopes: ['policy:write'],
     material: true,
+    noReplay: true,
     effect:
       'Stops new dispatch and guarded effects such as closing provider issues, until a person resumes.',
     properties: { reason: { type: ['string', 'null'], maxLength: REASON_MAX } },
@@ -71,6 +72,7 @@ export const opsTools: readonly ToolDefinition[] = [
     readOnly: false,
     scopes: ['policy:write'],
     material: true,
+    noReplay: true,
     effect: 'Lets dispatch and guarded effects run again.',
     properties: { reason: { type: ['string', 'null'], maxLength: REASON_MAX } },
     run(ctx, args) {
@@ -97,6 +99,7 @@ export const opsTools: readonly ToolDefinition[] = [
     readOnly: false,
     scopes: ['policy:write'],
     material: true,
+    noReplay: true,
     effect: 'Lets writes be tried against the store again.',
     properties: {},
     run(ctx, args) {
