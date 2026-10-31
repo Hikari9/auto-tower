@@ -329,7 +329,10 @@ describe('sensitive actions', () => {
         resource: '*',
         scope: '*',
         maxRisk: 'high',
-        limits: { maxAmount: 1_000_000, missionIds: null },
+        limits: {
+          maxAmount: 'amount' in extra ? 1_000_000 : null,
+          missionIds: null,
+        },
       });
       const evaluation = policy.authorize(
         request({ action, resource, scope, ...extra }),
@@ -343,7 +346,10 @@ describe('sensitive actions', () => {
         action,
         resource: '*',
         scope,
-        limits: { maxAmount: 1_000_000, missionIds: null },
+        limits: {
+          maxAmount: 'amount' in extra ? 1_000_000 : null,
+          missionIds: null,
+        },
       });
       expect(
         policy.authorize(request({ action, resource, scope, ...extra })).effect,
@@ -359,7 +365,10 @@ describe('sensitive actions', () => {
         action,
         resource,
         scope,
-        limits: { maxAmount: 1_000, missionIds: null },
+        limits: {
+          maxAmount: 'amount' in extra ? 1_000 : null,
+          missionIds: null,
+        },
       });
       expect(
         policy.authorize(request({ action, resource, scope, ...extra })).effect,
@@ -546,5 +555,71 @@ describe('what evaluation ignores', () => {
     expect(after).toEqual(before);
     expect(after.every((e) => e.effect === 'deny')).toBe(true);
     expect(after[0]?.policyVersion).toBe(0);
+  });
+});
+
+describe('what counts as an explicit grant, and what a cap needs', () => {
+  const SPEND = {
+    action: 'spend.card',
+    resource: 'account:main',
+    scope: 'month:2026-03',
+    limits: { maxAmount: 100, missionIds: null },
+  };
+
+  it.each([
+    ['**', '**'],
+    ['***', '*'],
+    ['*', '**'],
+  ])(
+    'does not let a resource of %s and a scope of %s stand in for names',
+    (resource, scope) => {
+      const { h, policy } = setup();
+      grant(h, { ...SPEND, resource, scope, maxRisk: 'high' });
+      expect(
+        policy.authorize(
+          request({
+            action: 'spend.card',
+            resource: 'anything:x',
+            scope: 'prod',
+            amount: 50,
+            risk: 'high',
+          }),
+        ).code,
+      ).toBe('sensitive_requires_explicit_grant');
+    },
+  );
+
+  it('requires a spend request to state its amount, even under a capped grant', () => {
+    const { h, policy } = setup();
+    grant(h, SPEND);
+    const ask = (amount?: number) =>
+      policy.authorize(
+        request({
+          action: 'spend.card',
+          resource: 'account:main',
+          scope: 'month:2026-03',
+          amount,
+        }),
+      );
+    expect(ask(50).effect).toBe('allow');
+    expect(ask()).toMatchObject({ effect: 'deny', code: 'amount_required' });
+  });
+
+  it('does not let a request that omits the amount slip past the cap of an ordinary grant', () => {
+    const { h, policy } = setup();
+    grant(h, { limits: { maxAmount: 100, missionIds: null } });
+    expect(policy.authorize(request()).effect).toBe('deny');
+    expect(policy.authorize(request({ amount: 100 })).effect).toBe('allow');
+    expect(policy.authorize(request({ amount: 101 })).effect).toBe('deny');
+  });
+
+  it('refuses a request that names a wildcard instead of one thing', () => {
+    const { policy } = setup();
+    expect(() => policy.authorize(request({ resource: 'repo:*' }))).toThrow(
+      ValidationError,
+    );
+    expect(() => policy.authorize(request({ scope: '*' }))).toThrow(
+      ValidationError,
+    );
   });
 });

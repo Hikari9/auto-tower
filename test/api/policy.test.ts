@@ -113,6 +113,40 @@ describe('access to policy routes', () => {
     );
   });
 
+  it('refuses every write route to a human token that holds only the read scopes', async () => {
+    const api = createApi();
+    const rule = grant(api.h);
+    const reader = seedPrincipal(api.db, {
+      kind: 'human',
+      scopes: ['policy:read', 'decision:read'],
+    });
+    for (const [method, path, body] of WRITES) {
+      const response = await api.call(
+        reader.token,
+        method,
+        path.replace('rul_x', rule.id),
+        body,
+      );
+      expect(response.status, path).toBe(403);
+    }
+    expect(api.h.authority.policy.getRule('ws_test', rule.id)?.version).toBe(1);
+    expect(api.h.authority.policy.listPreferences('ws_test')).toEqual([]);
+  });
+
+  it('refuses a human token without the scope pair that reads', async () => {
+    const api = createApi();
+    const writerOnly = seedPrincipal(api.db, {
+      kind: 'human',
+      scopes: ['policy:write'],
+    });
+    for (const [method, path] of READS) {
+      expect(
+        (await api.call(writerOnly.token, method, path)).status,
+        path,
+      ).toBe(403);
+    }
+  });
+
   it('refuses a human token whose scopes were narrowed to read-only', async () => {
     const api = createApi();
     const reader = seedPrincipal(api.db, {
@@ -222,6 +256,15 @@ describe('rules over HTTP', () => {
     expect(inactive.body.rules).toHaveLength(1);
   });
 
+  it('reads an expiry with an offset as the instant it names', async () => {
+    const api = createApi();
+    const created = await createRule(api, {
+      ...RULE,
+      expiresAt: '2030-01-01T10:00:00+08:00',
+    });
+    expect(created.body.rule.expiresAt).toBe('2030-01-01T02:00:00.000Z');
+  });
+
   it('repeats a creation safely with an idempotency key', async () => {
     const api = createApi();
     const first = await createRule(api, RULE, { 'idempotency-key': 'k1' });
@@ -253,6 +296,12 @@ describe('rules over HTTP', () => {
     ['too many wildcards', { ...RULE, resource: '*a*b*c*d*e*f*g*h*i*' }],
     ['a past expiry', { ...RULE, expiresAt: '2020-01-01T00:00:00Z' }],
     ['a bad expiry', { ...RULE, expiresAt: 'tomorrow' }],
+    [
+      'an expiry with no time zone',
+      { ...RULE, expiresAt: '2030-01-01T00:00:00' },
+    ],
+    ['an expiry with only a date', { ...RULE, expiresAt: '2030-01-01' }],
+    ['a free-form expiry', { ...RULE, expiresAt: 'Jan 1 2030 10:00' }],
     ['a negative cap', { ...RULE, limits: { maxAmount: -1 } }],
     ['a fractional cap', { ...RULE, limits: { maxAmount: 1.5 } }],
     ['an empty mission list', { ...RULE, limits: { missionIds: [] } }],
@@ -421,6 +470,64 @@ describe('auditing authority changes', () => {
         policyVersion: 2,
       },
     ]);
+  });
+});
+
+describe('receipts and the rule list', () => {
+  it('pages receipts and lists revoked rules by default', async () => {
+    const api = createApi();
+    const created = await createRule(api, { ...RULE, action: 'land.merge' });
+    await api.call(
+      api.owner.token,
+      'POST',
+      `/policy/rules/${created.body.rule.id}/revoke`,
+      { expectedVersion: 1 },
+    );
+    for (let n = 0; n < 3; n++) {
+      expect(() =>
+        api.h.authority.policy.guard(request({ action: 'land.merge' })),
+      ).toThrow();
+    }
+    const first = await api.call(
+      api.owner.token,
+      'GET',
+      '/policy/receipts?limit=2',
+    );
+    expect(first.body.receipts).toHaveLength(2);
+    expect(first.body.nextAfter).toBe(first.body.receipts[1].seq);
+    const second = await api.call(
+      api.owner.token,
+      'GET',
+      `/policy/receipts?limit=2&after=${first.body.nextAfter}`,
+    );
+    expect(second.body.receipts).toHaveLength(1);
+    expect(second.body.nextAfter).toBeNull();
+    const rules = await api.call(api.owner.token, 'GET', '/policy/rules');
+    expect(rules.body.rules).toHaveLength(1);
+    expect(rules.body.rules[0].revokedAt).not.toBeNull();
+  });
+
+  it('keeps receipts, proposals and preferences inside the caller workspace', async () => {
+    const api = createApi();
+    await api.call(api.owner.token, 'PUT', '/policy/preferences/tone', {
+      value: 'brief',
+    });
+    expect(() => api.h.authority.policy.guard(request())).toThrow();
+    ensureWorkspace(api.db, 'ws_elsewhere', 'elsewhere');
+    const foreign = seedPrincipal(api.db, {
+      kind: 'human',
+      workspaceId: 'ws_elsewhere',
+    });
+    for (const [path, key] of [
+      ['/policy/receipts', 'receipts'],
+      ['/policy/preferences', 'preferences'],
+      ['/policy/proposals', 'proposals'],
+    ] as const) {
+      expect(
+        (await api.call(foreign.token, 'GET', path)).body[key],
+        path,
+      ).toEqual([]);
+    }
   });
 });
 

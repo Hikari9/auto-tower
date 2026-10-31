@@ -6,7 +6,6 @@ import { createMissionService } from '../core/service.js';
 import type { Actor, MissionState } from '../core/types.js';
 import { categoryOf, isSensitive } from '../policy/actions.js';
 import { riskAtMost } from '../policy/evaluate.js';
-import { matchesPattern } from '../policy/patterns.js';
 import { createPolicyService } from '../policy/service.js';
 import { joinTransaction } from '../policy/transaction.js';
 import type {
@@ -16,6 +15,7 @@ import type {
 } from '../policy/types.js';
 import { newId } from '../shared/ids.js';
 import type { SqlDatabase } from '../storage/database.js';
+import { packetCovers, withinAuthorizedScope } from './binding.js';
 import { createDecisionInbox } from './inbox.js';
 import type { ExpansionInput } from './inputs.js';
 import type { Decision, DecisionCategory } from './types.js';
@@ -105,9 +105,9 @@ function defaultDedupeKey(request: ExpansionRequest): string {
 
 /**
  * Tier 1: follow-up inside what the mission already authorized. The request has to stay inside the
- * scope of an authorized sibling packet, at no more than the mission's risk, and carry nothing
- * sensitive or any amount. A packet cannot vouch for itself, and a requester's claim that the work
- * is in scope is not taken from the requester.
+ * scope of authorized sibling packets, at no more than the mission's risk, and carry nothing
+ * sensitive or any amount. The target packet's own declared scope has to stay inside it too, so a
+ * packet cannot vouch for itself and a requester's claim is checked against mission data.
  */
 function inApprovedScope(
   mission: MissionState,
@@ -115,19 +115,15 @@ function inApprovedScope(
 ): boolean {
   if (
     isSensitive(categoryOf(request.action)) ||
+    categoryOf(request.action) === 'cleanup' ||
     request.amount !== null ||
     !LIVE_MISSION.includes(mission.state) ||
     !riskAtMost(request.risk, mission.risk)
   ) {
     return false;
   }
-  return mission.packets
-    .filter((p) => p.authorization !== null && p.id !== request.packetId)
-    .some((p) =>
-      p.scope.some(
-        (pattern) => pattern !== '*' && matchesPattern(pattern, request.scope),
-      ),
-    );
+  const packet = mission.packets.find((p) => p.id === request.packetId);
+  return withinAuthorizedScope(packet, mission.packets, request.scope);
 }
 
 export function createExpansionRouter(
@@ -185,8 +181,15 @@ export function createExpansionRouter(
         const evaluation = policy.authorize(evaluationRequest, {
           escalate: true,
         });
-        if (evaluation.effect === 'allow') {
-          if (request.packetId === null) {
+        const packet = mission.packets.find((p) => p.id === request.packetId);
+        // Only a rule can approve. Safe cleanup is allowed without one and is not an approval.
+        // The request must also lie inside what the packet declares it will touch.
+        if (
+          evaluation.effect === 'allow' &&
+          evaluation.code === 'granted' &&
+          (packet === undefined || packetCovers(packet, request.scope))
+        ) {
+          if (packet === undefined) {
             return {
               tier: 2,
               outcome: 'approved',
@@ -201,7 +204,7 @@ export function createExpansionRouter(
             ctx,
             request.missionId,
             mission.version,
-            request.packetId,
+            packet.id,
             [evaluation.policyRef],
           );
           return {
@@ -220,13 +223,15 @@ export function createExpansionRouter(
         request.requester.kind === 'chief_of_staff'
           ? undefined
           : policy.authorizeDelegate(evaluationRequest);
-      const delegated = delegation?.effect === 'allow';
+      const target = mission.packets.find((p) => p.id === request.packetId);
+      const delegated =
+        delegation?.effect === 'allow' &&
+        delegation.code === 'granted' &&
+        (target === undefined || packetCovers(target, request.scope));
       const evaluation = policy.authorize(evaluationRequest, {
         escalate: true,
       });
-      policy.record(evaluationRequest, evaluation);
-
-      const created = inbox.create(ctx, {
+      const created = inbox.raise(ctx, {
         dedupeKey: request.dedupeKey ?? defaultDedupeKey(request),
         category:
           request.category ?? CATEGORY_BY_ACTION[categoryOf(request.action)],
@@ -253,6 +258,8 @@ export function createExpansionRouter(
           { missionId: request.missionId, packetId: request.packetId },
         ],
       });
+      // Recorded once the request proved valid, so a rejected one leaves nothing behind.
+      policy.record(evaluationRequest, evaluation);
       return {
         tier: created.decision.requiredAuthority === 'human' ? 3 : 2,
         outcome: 'decision_required',

@@ -15,6 +15,7 @@ import { joinTransaction } from '../policy/transaction.js';
 import type { HistoryPage } from '../policy/types.js';
 import { newId } from '../shared/ids.js';
 import type { SqlDatabase } from '../storage/database.js';
+import { packetCovers } from './binding.js';
 import {
   AnswerConflictError,
   DecisionNotFoundError,
@@ -76,6 +77,11 @@ export interface DecisionInbox {
    * same dedupe key. Only the named branches wait. Everything else keeps running.
    */
   create(ctx: DecisionContext, input: CreateDecisionInput): CreateResult;
+  /**
+   * Like `create`, for server-side code that has already settled who may answer, such as
+   * `routeExpansion`. It takes `requiredAuthority` as given. Never call it with a caller's claim.
+   */
+  raise(ctx: DecisionContext, input: CreateDecisionInput): CreateResult;
   /**
    * Records an answer. Answers carry a version and the highest one is effective whatever order
    * they arrive in. An effective approval resumes the blocked branches linked to this decision
@@ -257,6 +263,10 @@ export function createDecisionInbox(deps: DecisionInboxDeps): DecisionInbox {
         reason: `the packet is already ${packet.authorization === null ? packet.status : 'authorized'}`,
       };
     }
+    // The core appends an event before it checks the command, and relies on the transaction rolling
+    // back when a check fails. Inside this shared transaction that rollback would take the whole
+    // answer with it, so the attempt gets a savepoint of its own.
+    tx.exec('SAVEPOINT resume_branch');
     try {
       createMissionService({ db: tx, guards }).authorizePacket(
         {
@@ -271,7 +281,10 @@ export function createDecisionInbox(deps: DecisionInboxDeps): DecisionInbox {
         link.packetId,
         policyRefs,
       );
+      tx.exec('RELEASE resume_branch');
     } catch (error) {
+      tx.exec('ROLLBACK TO resume_branch');
+      tx.exec('RELEASE resume_branch');
       // Mission state that locks the breakdown (verifying, cancelled) is a stale branch, not a failure.
       if (error instanceof CommandNotAllowedError) {
         return { status: 'skipped', reason: error.reason };
@@ -307,10 +320,56 @@ export function createDecisionInbox(deps: DecisionInboxDeps): DecisionInbox {
     );
   }
 
-  const inbox: DecisionInbox = {
-    create(ctx, input) {
+  /**
+   * Only a person decides who may answer a decision they did not raise through the router, and
+   * what each choice does. Anyone else's request is held to a person.
+   */
+  function requireHumanAuthority(
+    ctx: DecisionContext,
+    input: CreateDecisionInput,
+  ): void {
+    if (ctx.actor.kind !== 'human' && input.requiredAuthority !== 'human') {
+      throw new AuthorityForbiddenError(
+        'choose who may answer a decision',
+        ctx.actor.kind,
+      );
+    }
+  }
+
+  /** For anyone but a person, `approve` resumes and no other choice does. */
+  function withFixedChoices(
+    ctx: DecisionContext,
+    input: CreateDecisionInput,
+  ): CreateDecisionInput {
+    return ctx.actor.kind === 'human'
+      ? input
+      : {
+          ...input,
+          alternatives: input.alternatives.map((a) => ({
+            ...a,
+            resumes: a.id === 'approve',
+          })),
+        };
+  }
+
+  function createDecision(
+    ctx: DecisionContext,
+    raw: CreateDecisionInput,
+  ): CreateResult {
+    {
+      const input = withFixedChoices(ctx, raw);
       const at = clock().toISOString();
       return inTransaction((tx, log) => {
+        for (const key of ['resource', 'scope'] as const) {
+          if (input.request?.[key].includes('*')) {
+            throw new ValidationError([
+              {
+                path: `request.${key}`,
+                message: 'must name one thing, without *',
+              },
+            ]);
+          }
+        }
         const seen = new Set<string>();
         for (const branch of input.branches) {
           const key = `${branch.missionId}\0${branch.packetId ?? ''}`;
@@ -404,7 +463,15 @@ export function createDecisionInbox(deps: DecisionInboxDeps): DecisionInbox {
           linked: [...input.branches],
         };
       });
+    }
+  }
+
+  const inbox: DecisionInbox = {
+    create(ctx, input) {
+      requireHumanAuthority(ctx, input);
+      return createDecision(ctx, input);
     },
+    raise: createDecision,
 
     answer(ctx, decisionId, answer) {
       if (ctx.actor.kind !== 'human' && ctx.actor.kind !== 'chief_of_staff') {
@@ -420,11 +487,8 @@ export function createDecisionInbox(deps: DecisionInboxDeps): DecisionInbox {
             { path: 'choice', message: 'is not one of the alternatives' },
           ]);
         }
-        const authority = answererAuthority(tx, ctx, decision);
-        if ('refused' in authority) {
-          return authority;
-        }
-
+        // A repeat of an answer that was already accepted is returned as it was, even if the
+        // answerer's delegation has changed since.
         const prior = loadAnswers(tx, ctx.workspaceId, decisionId);
         const same = prior.find((a) => a.version === answer.version);
         if (same !== undefined) {
@@ -438,6 +502,11 @@ export function createDecisionInbox(deps: DecisionInboxDeps): DecisionInbox {
             replayed: true,
             branches: [],
           };
+        }
+
+        const authority = answererAuthority(tx, ctx, decision);
+        if ('refused' in authority) {
+          return authority;
         }
 
         const at = clock().toISOString();
@@ -598,6 +667,25 @@ export function createDecisionInbox(deps: DecisionInboxDeps): DecisionInbox {
     if (request === null) {
       return refuse('it carries no request to check against a rule');
     }
+    // The request on the decision is a claim. Each branch's packet has to declare a scope that
+    // covers it, so a narrow rule cannot be used to approve unrelated work.
+    for (const link of decision.links) {
+      const packet =
+        link.packetId === null
+          ? undefined
+          : loadMission(tx, ctx.workspaceId, link.missionId)?.packets.find(
+              (p) => p.id === link.packetId,
+            );
+      if (
+        link.packetId !== null &&
+        link.status !== 'resumed' &&
+        (packet === undefined || !packetCovers(packet, request.scope))
+      ) {
+        return refuse(
+          `the scope of packet ${link.packetId} is not covered by the request`,
+        );
+      }
+    }
     const policy = createPolicyService({ db: tx, clock, newId: ids });
     const missions = [...new Set(decision.links.map((l) => l.missionId))];
     const policyRefs: string[] = [];
@@ -613,7 +701,8 @@ export function createDecisionInbox(deps: DecisionInboxDeps): DecisionInbox {
         missionId,
       };
       const evaluation = policy.authorize(evaluationRequest);
-      if (evaluation.effect !== 'allow') {
+      // Safe cleanup is allowed without a rule, and is not an approval.
+      if (evaluation.effect !== 'allow' || evaluation.code !== 'granted') {
         return refuse(evaluation.reason, () =>
           createPolicyService({ db, clock, newId: ids }).record(
             evaluationRequest,

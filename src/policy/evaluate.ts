@@ -82,19 +82,24 @@ function coversEffort(rule: PolicyRule, input: EvaluationInput): boolean {
   if (!riskAtMost(input.risk, rule.maxRisk)) {
     return false;
   }
+  const { maxAmount } = rule.limits;
   if (input.amount === undefined) {
-    return true;
+    // A cap only means something against a stated amount.
+    return maxAmount === null;
   }
   // A grant with no cap says nothing about how much may be spent, so it covers no amount.
-  return (
-    rule.limits.maxAmount !== null && input.amount <= rule.limits.maxAmount
-  );
+  return maxAmount !== null && input.amount <= maxAmount;
 }
+
+/** A name that is only wildcards is a wildcard, however many `*` it has. */
+const isBareWildcard = (pattern: string): boolean => /^\*+$/.test(pattern);
 
 /** A sensitive action needs a rule that names it, its resource and its scope. */
 function isExplicit(rule: PolicyRule): boolean {
   return (
-    !hasWildcard(rule.action) && rule.resource !== '*' && rule.scope !== '*'
+    !hasWildcard(rule.action) &&
+    !isBareWildcard(rule.resource) &&
+    !isBareWildcard(rule.scope)
   );
 }
 
@@ -158,6 +163,15 @@ export function evaluate(input: EvaluationInput): PolicyEvaluation {
       'deny',
       'producer_cannot_review',
       'a producer of this work cannot satisfy an independent review',
+    );
+  }
+
+  // Spending without saying how much would slip past every cap.
+  if (category === 'spend' && input.amount === undefined) {
+    return result(
+      'deny',
+      'amount_required',
+      'a spend request must state its amount',
     );
   }
 

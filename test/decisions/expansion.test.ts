@@ -25,7 +25,7 @@ function setup() {
 function withFollowUp(
   h: AuthorityHarness,
   risk: 'low' | 'medium' | 'high' = 'medium',
-  followUpScope: string[] = [],
+  followUpScope: string[] = ['infra/*'],
 ) {
   const m = missionWith(
     h,
@@ -55,7 +55,7 @@ function expectDecision(outcome: ExpansionOutcome) {
 describe('tier 1: follow-up inside the approved scope', () => {
   it('proceeds without a decision, a receipt or any change to the mission', () => {
     const { h, route } = setup();
-    const m = withFollowUp(h);
+    const m = withFollowUp(h, 'medium', ['src/utils']);
     const version = m.driver.refresh().version;
     const outcome = route(
       expansion(h, {
@@ -86,7 +86,7 @@ describe('tier 1: follow-up inside the approved scope', () => {
     ['an amount', { scope: 'src/utils', amount: 5 }],
   ])('is not tier 1 for %s', (_name, overrides) => {
     const { h, route } = setup();
-    const m = withFollowUp(h);
+    const m = withFollowUp(h, 'medium', ['src/utils']);
     const outcome = route(
       expansion(h, {
         missionId: m.driver.id,
@@ -288,7 +288,9 @@ describe('tier 2: a Chief of Staff under a delegated rule', () => {
       maxRisk: 'high',
       limits: { maxAmount: 1_000_000, missionIds: null },
     });
-    expect(spend(withFollowUp(h), 10).outcome).toBe('decision_required');
+    expect(spend(withFollowUp(h, 'medium', ['month:*']), 10).outcome).toBe(
+      'decision_required',
+    );
 
     grant(h, {
       action: 'spend.compute',
@@ -296,8 +298,12 @@ describe('tier 2: a Chief of Staff under a delegated rule', () => {
       scope: 'month:2026-03',
       limits: { maxAmount: 100, missionIds: null },
     });
-    expect(spend(withFollowUp(h), 100).outcome).toBe('approved');
-    expect(spend(withFollowUp(h), 101).outcome).toBe('decision_required');
+    expect(spend(withFollowUp(h, 'medium', ['month:*']), 100).outcome).toBe(
+      'approved',
+    );
+    expect(spend(withFollowUp(h, 'medium', ['month:*']), 101).outcome).toBe(
+      'decision_required',
+    );
   });
 
   it('is stopped by a deny rule, which no grant or answer overrides', () => {

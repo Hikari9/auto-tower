@@ -28,6 +28,13 @@ function under(action: string, prefix: string): boolean {
   return action === prefix || action.startsWith(`${prefix}.`);
 }
 
+/**
+ * Sensitive words match as the start of any segment, so `deploy.prod-eu`, `db.drop_table` and
+ * `billing.spend.create` are caught as well as the plain names. This errs toward asking.
+ */
+const startsWithAny = (segment: string, words: readonly string[]): boolean =>
+  words.some((word) => segment.startsWith(word));
+
 export function categoryOf(action: string): ActionCategory {
   if (under(action, 'cleanup')) {
     return 'cleanup';
@@ -35,20 +42,24 @@ export function categoryOf(action: string): ActionCategory {
   if (under(action, 'review.independent')) {
     return 'independent_review';
   }
-  if (under(action, 'spend')) {
+  const segments = action.split('.');
+  const last = segments[segments.length - 1] ?? '';
+  if (segments.some((s) => s.startsWith('spend'))) {
     return 'spend';
   }
-  if (under(action, 'deploy.production') || under(action, 'deploy.prod')) {
+  if (
+    under(action, 'deploy.prod') ||
+    (segments[0] === 'deploy' && startsWithAny(segments[1] ?? '', ['prod']))
+  ) {
     return 'production_deploy';
   }
-  if (under(action, 'security')) {
+  if (segments.some((s) => s.startsWith('security'))) {
     return 'security';
   }
   if (under(action, 'issue.close')) {
     return 'external_issue_close';
   }
-  const last = action.slice(action.lastIndexOf('.') + 1);
-  if (under(action, 'destructive') || DESTRUCTIVE_VERBS.includes(last)) {
+  if (under(action, 'destructive') || startsWithAny(last, DESTRUCTIVE_VERBS)) {
     return 'destructive';
   }
   return 'standard';

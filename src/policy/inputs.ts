@@ -15,6 +15,8 @@ const ID = { max: 128, min: 1 } as const;
 const MAX_MISSION_IDS = 50;
 const MAX_AMOUNT = 1e12;
 const MAX_PREFERENCE_BYTES = 4_096;
+const RFC3339 =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
 const CONTROL_CHARS = /\p{Cc}/u;
 
 export interface CreateRuleInput {
@@ -95,9 +97,13 @@ function checkInstant(
   if (value === undefined || value === null) {
     return value;
   }
-  const ms = Date.parse(value);
+  // An offset is required: without one `Date.parse` reads the host's local time zone.
+  const ms = RFC3339.test(value) ? Date.parse(value) : Number.NaN;
   if (Number.isNaN(ms)) {
-    reader.fail(key, 'must be an ISO 8601 date and time');
+    reader.fail(
+      key,
+      'must be an ISO 8601 date and time with a time zone, such as 2026-12-31T00:00:00Z',
+    );
     return undefined;
   }
   return new Date(ms).toISOString();

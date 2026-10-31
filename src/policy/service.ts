@@ -501,8 +501,14 @@ export function createPolicyService(deps: PolicyServiceDeps): PolicyService {
         message: 'must be lower-case dotted segments',
       });
     }
-    if (request.resource === '' || request.scope === '') {
-      issues.push({ path: 'resource', message: 'and scope must not be empty' });
+    for (const key of ['resource', 'scope'] as const) {
+      if (request[key] === '' || request[key].includes('*')) {
+        // A request names one thing. A `*` in it would be matched as literal text by a rule.
+        issues.push({
+          path: key,
+          message: 'must name one thing: not empty and without *',
+        });
+      }
     }
     if (!(RISKS as readonly string[]).includes(request.risk)) {
       issues.push({ path: 'risk', message: 'must be low, medium or high' });
@@ -528,21 +534,30 @@ export function createPolicyService(deps: PolicyServiceDeps): PolicyService {
     escalate: boolean,
   ): PolicyEvaluation {
     const workspaceId = request.workspace;
-    return evaluate({
-      rules: loadRules(db, workspaceId),
-      policyVersion: loadPolicyVersion(db, workspaceId),
-      now: clock(),
-      principal,
-      principalDisabled,
-      action: request.action,
-      resource: request.resource,
-      scope: request.scope,
-      risk: request.risk,
-      amount: request.amount,
-      missionId: request.missionId,
-      producers: producersOf(workspaceId, request),
-      escalate,
-    });
+    const producers = producersOf(workspaceId, request);
+    // Rules and their version are separate reads. Read the version on both sides and go again if a
+    // writer got in between, so the version named in the result is the one the rules came from.
+    for (let attempt = 0; ; attempt++) {
+      const before = loadPolicyVersion(db, workspaceId);
+      const rules = loadRules(db, workspaceId);
+      if (attempt >= 3 || loadPolicyVersion(db, workspaceId) === before) {
+        return evaluate({
+          rules,
+          policyVersion: before,
+          now: clock(),
+          principal,
+          principalDisabled,
+          action: request.action,
+          resource: request.resource,
+          scope: request.scope,
+          risk: request.risk,
+          amount: request.amount,
+          missionId: request.missionId,
+          producers,
+          escalate,
+        });
+      }
+    }
   }
 
   const service: PolicyService = {

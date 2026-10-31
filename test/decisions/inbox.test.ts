@@ -36,12 +36,12 @@ function ctx(h: AuthorityHarness, actor = h.owner) {
 function twoMissions(h: AuthorityHarness) {
   const a = missionWith(h, [
     { title: 'a-run', authorized: true },
-    { title: 'a-wait' },
-    { title: 'a-other-wait' },
+    { title: 'a-wait', scope: ['infra'] },
+    { title: 'a-other-wait', scope: ['infra'] },
   ]);
   const b = missionWith(h, [
     { title: 'b-run', authorized: true },
-    { title: 'b-wait' },
+    { title: 'b-wait', scope: ['infra'] },
   ]);
   return { a, b };
 }
@@ -733,7 +733,7 @@ describe('who may answer', () => {
     const { h, inbox } = setup();
     const { a } = twoMissions(h);
     const rule = grant(h, delegation);
-    const decision = inbox.create(
+    const decision = inbox.raise(
       ctx(h, h.runner),
       decisionInput(
         [{ missionId: a.driver.id, packetId: a.ids[1] as string }],
@@ -764,7 +764,7 @@ describe('who may answer', () => {
     const { h, inbox } = setup();
     const { a } = twoMissions(h);
     const rule = grant(h, delegation);
-    const decision = inbox.create(
+    const decision = inbox.raise(
       ctx(h, h.runner),
       decisionInput(
         [{ missionId: a.driver.id, packetId: a.ids[1] as string }],
@@ -848,7 +848,7 @@ describe('who may answer', () => {
       ...delegation,
       limits: { maxAmount: null, missionIds: [a.driver.id] },
     });
-    const decision = inbox.create(
+    const decision = inbox.raise(
       ctx(h, h.runner),
       decisionInput(
         [

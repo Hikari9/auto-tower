@@ -210,7 +210,7 @@ describe('narrowing a proposal', () => {
     ['resource', { resource: 'repo:*' }],
     ['scope', { scope: '*' }],
     ['maxRisk', { maxRisk: 'high' as const }],
-  ])('rejects a widened %s and creates nothing', (field, narrowing) => {
+  ])('rejects a widened %s and creates nothing', (_field, narrowing) => {
     const { h, policy } = setup();
     const proposal = proposeOnce(h);
     expect(() =>
@@ -221,7 +221,6 @@ describe('narrowing a proposal', () => {
     ).toThrow(WideningError);
     expect(policy.getProposal('ws_test', proposal.id)?.status).toBe('pending');
     expect(policy.listRules('ws_test')).toEqual([]);
-    expect(field).toBeTruthy();
   });
 
   it('rejects a larger amount cap and mission list than the proposal had', () => {
@@ -260,6 +259,32 @@ describe('narrowing a proposal', () => {
       }),
     ).toThrow();
     expect(policy.getProposal('ws_test', proposal.id)?.status).toBe('pending');
+  });
+});
+
+describe('narrowing a wildcard proposal', () => {
+  it('grants the narrower resource and scope that were asked for', () => {
+    const { h, policy } = setup();
+    // A proposal built straight from the service, whose qualifiers are patterns.
+    for (let n = 1; n <= PROPOSAL_THRESHOLD; n++) {
+      approve(h, n, { resource: 'repo:*', scope: 'env:*' });
+    }
+    const proposal = policy.listProposals('ws_test', 'pending')[0];
+    const { rule } = policy.narrowProposal(
+      h.ctx(h.owner),
+      proposal?.id as string,
+      {
+        resource: 'repo:app',
+        scope: 'env:staging',
+        note: null,
+      },
+    );
+    expect(rule).toMatchObject({ resource: 'repo:app', scope: 'env:staging' });
+    expect(policy.authorize(request({ risk: 'medium' })).effect).toBe('allow');
+    expect(
+      policy.authorize(request({ risk: 'medium', resource: 'repo:other' }))
+        .effect,
+    ).toBe('deny');
   });
 });
 

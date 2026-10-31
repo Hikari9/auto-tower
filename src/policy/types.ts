@@ -13,6 +13,7 @@ export type EvaluationCode =
   | 'explicit_deny'
   | 'no_matching_grant'
   | 'sensitive_requires_explicit_grant'
+  | 'amount_required'
   | 'grant_expired'
   | 'grant_revoked'
   | 'producer_cannot_review'

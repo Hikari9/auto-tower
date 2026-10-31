@@ -4,6 +4,7 @@ import { seedPrincipal } from '../helpers/tower.js';
 import {
   type Api,
   createApi,
+  decisionInput,
   grant,
   missionWith,
   packetStatus,
@@ -12,7 +13,10 @@ import {
 function blocked(api: Api, packets = 1) {
   return missionWith(
     api.h,
-    Array.from({ length: packets }, (_, i) => ({ title: `wait ${i}` })),
+    Array.from({ length: packets }, (_, i) => ({
+      title: `wait ${i}`,
+      scope: ['infra'],
+    })),
   );
 }
 
@@ -140,6 +144,20 @@ describe('access to decision routes', () => {
       expect(packetStatus(m.driver, m.ids[0] as string).authorized).toBe(false);
     },
   );
+
+  it('refuses every write route to a human token that holds only the read scopes', async () => {
+    const api = createApi();
+    const reader = seedPrincipal(api.db, {
+      kind: 'human',
+      scopes: ['policy:read', 'decision:read'],
+    });
+    for (const [method, path, payload] of WRITES) {
+      expect(
+        (await api.call(reader.token, method, path, payload)).status,
+        path,
+      ).toBe(403);
+    }
+  });
 
   it('refuses a human token without the decision scopes', async () => {
     const api = createApi();
@@ -498,12 +516,21 @@ describe('a Chief of Staff answering over HTTP', () => {
   it('is refused with no delegated rule, and allowed once one covers the request', async () => {
     const api = createApi();
     const m = blocked(api);
-    const created = await api.call(
-      api.cos.token,
-      'POST',
-      '/decisions',
-      delegated(m),
-    );
+    // Raised server side for a Chief of Staff, as the router does for a runner's request.
+    const created = {
+      body: {
+        decision: api.h.authority.decisions.raise(
+          { workspaceId: 'ws_test', actor: api.h.runner },
+          decisionInput(
+            [{ missionId: m.driver.id, packetId: m.ids[0] as string }],
+            {
+              requiredAuthority: 'chief_of_staff',
+              request: { ...REQUEST, risk: 'low', amount: null },
+            },
+          ),
+        ).decision,
+      },
+    };
     const id = created.body.decision.id;
     const refused = await api.call(
       api.cos.token,
@@ -538,6 +565,27 @@ describe('a Chief of Staff answering over HTTP', () => {
     );
     expect(allowed.status).toBe(200);
     expect(allowed.body.branches).toMatchObject([{ status: 'resumed' }]);
+  });
+
+  it('cannot raise a decision for itself to answer', async () => {
+    const api = createApi();
+    const m = blocked(api);
+    grant(api.h, {
+      action: 'scope.extend',
+      resource: 'repo:app',
+      scope: 'infra',
+    });
+    const response = await api.call(
+      api.cos.token,
+      'POST',
+      '/decisions',
+      delegated(m),
+    );
+    expect(response.status).toBe(403);
+    expect(response.body.error.code).toBe('forbidden_actor');
+    expect(
+      api.h.authority.decisions.list('ws_test', { status: 'all' }),
+    ).toEqual([]);
   });
 
   it('cannot answer a decision that needs a person', async () => {

@@ -76,7 +76,14 @@ describe('categoryOf', () => {
     ['review.self', 'standard'],
     ['cleanup.release-lease', 'cleanup'],
     ['cleanupish.thing', 'standard'],
-    ['spending.report', 'standard'],
+    ['spending.report', 'spend'],
+    ['deploy.prod-eu', 'production_deploy'],
+    ['deploy.production_eu', 'production_deploy'],
+    ['db.drop_table', 'destructive'],
+    ['iam.security.disable', 'security'],
+    ['billing.spend.create', 'spend'],
+    ['deploy.preview', 'standard'],
+    ['docs.publish', 'standard'],
   ])('%s is %s', (action, category) => {
     expect(categoryOf(action)).toBe(category);
   });
