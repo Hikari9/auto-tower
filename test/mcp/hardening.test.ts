@@ -109,11 +109,30 @@ describe('feature flag history', () => {
   });
 
   it('shows the same history to a chief of staff, who may read policy, and not to a runner', async () => {
-    const { env } = await setup();
+    const { env, s: owner } = await setup();
     const cos = await env.session(env.cos);
+    const { rule } = await owner.ok('grant_policy', {
+      ...RULE,
+      limits: { maxAmount: 5000 },
+      idempotencyKey: key(),
+      confirm: true,
+    });
+    await owner.ok('set_feature_flag', {
+      ...ENABLE,
+      policyRuleId: rule.id,
+      idempotencyKey: key(),
+      confirm: true,
+    });
+    const seenByOwner = (
+      await owner.ok('read_audit', { source: 'feature_flags' })
+    ).records;
+    const seenByCos = (await cos.ok('read_audit', { source: 'feature_flags' }))
+      .records;
+    expect(seenByCos).toHaveLength(1);
+    expect(seenByCos).toEqual(seenByOwner);
     expect(
-      (await cos.ok('read_audit', { source: 'tool_calls' })).records,
-    ).toBeInstanceOf(Array);
+      (await cos.ok('read_audit', { source: 'tool_calls' })).records.length,
+    ).toBeGreaterThan(0);
     const runner = await env.session(env.runner);
     expect(
       (await runner.call('read_audit', { source: 'feature_flags' })).status,
@@ -182,7 +201,58 @@ describe('a flag needs the rule it names, not any rule', () => {
       (f: { flag: string }) => f.flag === 'cloud_ai.triage',
     );
     expect(flag.enabled).toBe(false);
-    expect(env.db.get('SELECT 1 FROM feature_flags')).toBeDefined();
+    // The switch-off is read time, not a change: the request and its history stay as they were.
+    const audit = await s.ok('read_audit', { source: 'feature_flags' });
+    expect(audit.records).toHaveLength(1);
+    expect(audit.records[0]).toMatchObject({
+      newEnabled: true,
+      policyRuleId: named.rule.id,
+    });
+    expect(
+      env.db.get<{ enabled: number }>('SELECT enabled FROM feature_flags')
+        ?.enabled,
+    ).toBe(1);
+  });
+});
+
+describe('a halt stops a feature flag too', () => {
+  it('reads an enabled flag as blocked while halted, with the reason, and back on once resumed', async () => {
+    const { env, s } = await setup();
+    const named = await s.ok('grant_policy', {
+      ...RULE,
+      limits: { maxAmount: 5000 },
+      idempotencyKey: key(),
+      confirm: true,
+    });
+    await s.ok('set_feature_flag', {
+      ...ENABLE,
+      policyRuleId: named.rule.id,
+      idempotencyKey: key(),
+      confirm: true,
+    });
+    const flag = async () =>
+      (await s.ok('read_feature_flags')).flags.find(
+        (f: { flag: string }) => f.flag === 'cloud_ai.triage',
+      );
+    expect(await flag()).toMatchObject({ enabled: true, blockedBy: null });
+
+    await s.ok('halt_workspace', {
+      reason: 'drill',
+      confirm: true,
+      idempotencyKey: key(),
+    });
+    const halted = await flag();
+    expect(halted).toMatchObject({ requested: true, enabled: false });
+    expect(halted.blockedBy).toContain('halt: the workspace is halted');
+    // The request stays on record: a halt blocks the effect, it does not edit the flag.
+    expect(
+      env.db.get<{ enabled: number }>(
+        "SELECT enabled FROM feature_flags WHERE flag = 'cloud_ai.triage'",
+      )?.enabled,
+    ).toBe(1);
+
+    await s.ok('resume_workspace', { confirm: true, idempotencyKey: key() });
+    expect(await flag()).toMatchObject({ enabled: true, blockedBy: null });
   });
 });
 

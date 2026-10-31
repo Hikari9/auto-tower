@@ -88,7 +88,7 @@ describe('a signed body replayed under a new delivery id', () => {
     expect(h.db.all('SELECT delivery_id FROM webhook_deliveries')).toHaveLength(
       2,
     );
-    expect(driver.refresh().state).toBeDefined();
+    expect(driver.refresh().state).toBe('needs-attention');
   });
 
   it('keys on the provider and workspace as well: the same hash from another provider is its own delivery', async () => {
@@ -104,6 +104,12 @@ describe('a signed body replayed under a new delivery id', () => {
       payloadHash: 'shared-hash',
     });
     expect(other.status).not.toBe('duplicate');
+    // It is its own delivery: recorded under its own provider with the same hash.
+    expect(
+      h.db.all<{ provider: string }>(
+        'SELECT provider FROM webhook_deliveries ORDER BY provider',
+      ),
+    ).toEqual([{ provider: 'github' }, { provider: 'gitlab' }]);
   });
 
   it('records the hash beside the delivery id so it survives a restart', async () => {

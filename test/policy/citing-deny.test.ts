@@ -71,6 +71,59 @@ describe('a cited rule and a narrower deny', () => {
     expect(resource.cite('src/other')).toMatchObject({ code: 'granted' });
   });
 
+  it('denies when only the resource of the deny is narrower than the cited rule', () => {
+    const h = createAuthorityHarness();
+    const allow = grant(h, {
+      action: 'a.*',
+      resource: 'repo:*',
+      scope: 'src/*',
+    });
+    const cite = () =>
+      h.authority.policy.authorize(
+        request({
+          principal: h.cos.id,
+          action: allow.action,
+          resource: allow.resource,
+          scope: 'src/x',
+        }),
+        { citing: allow.id },
+      );
+    expect(cite()).toMatchObject({ code: 'granted' });
+    grant(h, {
+      effect: 'deny',
+      action: 'a.*',
+      resource: 'repo:app',
+      scope: 'src/*',
+    });
+    expect(cite()).toMatchObject({ code: 'explicit_deny' });
+  });
+
+  it('ignores a deny on an unrelated resource', () => {
+    const h = createAuthorityHarness();
+    const allow = grant(h, {
+      action: 'a.*',
+      resource: 'repo:*',
+      scope: 'src/*',
+    });
+    grant(h, {
+      effect: 'deny',
+      action: 'a.*',
+      resource: 'host:prod',
+      scope: 'src/*',
+    });
+    expect(
+      h.authority.policy.authorize(
+        request({
+          principal: h.cos.id,
+          action: allow.action,
+          resource: allow.resource,
+          scope: 'src/x',
+        }),
+        { citing: allow.id },
+      ),
+    ).toMatchObject({ code: 'granted' });
+  });
+
   it('ignores a deny rule that cannot match anything the cited rule covers', () => {
     const { h, cite } = setup();
     grant(h, { effect: 'deny', action: 'b.c', scope: 'src/*' });

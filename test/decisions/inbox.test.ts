@@ -635,7 +635,8 @@ describe('out-of-order answers', () => {
     const reversed = run([2, 1], 'approve', 'decline');
     expect(reversed.effective).toMatchObject({ version: 2, choice: 'decline' });
     expect(reversed.authorized).toBe(false);
-    expect(reversed.missionState).not.toBe('needs-attention');
+    // Nothing was authorized and nothing was undone, so the mission is exactly as it began: ready.
+    expect(reversed.missionState).toBe('ready');
   });
 
   it('treats the same answer repeated as a replay and a different one as a conflict', () => {

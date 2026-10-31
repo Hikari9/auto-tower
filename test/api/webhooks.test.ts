@@ -219,7 +219,14 @@ describe('signature and delivery checks', () => {
     expect(((await other.json()) as { status: string }).status).toBe(
       'processed',
     );
-    expect(driver.refresh().state).toBeDefined();
+    expect(
+      api.h.db.get<{ n: number }>(
+        'SELECT COUNT(*) AS n FROM webhook_deliveries',
+      )?.n,
+    ).toBe(2);
+    expect(
+      api.h.issues.discrepancies('ws_test', driver.id, 'all').length,
+    ).toBeGreaterThan(0);
   });
 
   it('refuses a verified request without a delivery id, with invalid JSON, or that is too large', async () => {

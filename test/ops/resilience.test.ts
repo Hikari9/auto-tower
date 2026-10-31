@@ -94,10 +94,17 @@ describe('conflicting receipts from two hosts', () => {
       summary: 'failed on host B',
     });
     expect(rival.status).toBe(409);
-    // Once the first receipt closed the lease, a rival is refused as closed or as a conflict.
-    expect(['lease_closed', 'receipt_conflict']).toContain(
-      rival.body.error.code,
-    );
+    // The first receipt closed the lease, so a rival is refused as closed.
+    expect(rival.body.error.code).toBe('lease_closed');
+    // The same receipt id with another outcome is a conflict, answered before lease checks.
+    const flipped = await runner.receipt(lease.leaseId, {
+      receiptId: 'host-a',
+      fence: lease.fence,
+      outcome: 'failed',
+      summary: 'done on host A',
+    });
+    expect(flipped.status).toBe(409);
+    expect(flipped.body.error.code).toBe('receipt_conflict');
     const attempt = h.getMission(missionId).attempts[0];
     expect(attempt?.status).toBe('self-reported-succeeded');
     expect(attempt?.report?.summary).toBe('done on host A');
@@ -247,10 +254,33 @@ describe('runner heartbeat with no progress evidence', () => {
   it('does not keep a lease alive, and the work is never reported as done', async () => {
     const h = createFleetHarness();
     const { runner, lease, missionId } = await heldLease(h);
-    for (let i = 0; i < 5; i += 1) {
-      h.clock.advance(h.config.leaseTtlMs / 4);
-      const beat = await runner.heartbeat([]);
+    // One heartbeat with matching evidence confirms the lease. That is real proof and renews it.
+    const matching = {
+      leaseId: lease.leaseId,
+      attemptId: lease.attemptId,
+      fence: lease.fence,
+      progressSeq: 0,
+    };
+    await runner.heartbeat([matching]);
+    const expiry = () =>
+      h.db.get<{ expires_at: string }>(
+        'SELECT expires_at FROM runner_leases WHERE id = ?',
+        [lease.leaseId],
+      )?.expires_at;
+    const confirmedExpiry = expiry();
+    // After that the runner goes quiet in every way short of proof: it still heartbeats, with no
+    // evidence, or with evidence that does not match what Tower holds. None of it renews the lease.
+    const noProof = [
+      [],
+      [{ ...matching, fence: lease.fence + 1 }],
+      [{ ...matching, progressSeq: 7 }],
+      [{ ...matching, attemptId: 'att_other' }],
+    ];
+    for (const evidence of noProof) {
+      h.clock.advance(h.config.leaseTtlMs / 8);
+      const beat = await runner.heartbeat(evidence);
       expect(beat.status).toBe(200);
+      expect(expiry()).toBe(confirmedExpiry);
     }
     h.clock.advance(h.config.leaseTtlMs);
     h.fleet.sweep(TEST_WORKSPACE);

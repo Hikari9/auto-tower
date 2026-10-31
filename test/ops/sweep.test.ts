@@ -52,16 +52,39 @@ describe('the scheduled sweep', () => {
     ).toBe('recovering');
   });
 
-  it('does not dispatch for a halted workspace, and still sweeps it', async () => {
+  it('does not dispatch for a halted workspace, and still expires its leases', async () => {
     const h = createFleetHarness();
-    await (await h.runner()).claim();
+    const runner = await h.runner();
+    await runner.claim();
     h.mission([{ scope: ['repo:app'] }]);
+    h.tick();
+    const lease = (await runner.claim()).body.assignments[0];
+    await runner.heartbeat([
+      {
+        leaseId: lease.leaseId,
+        attemptId: lease.attemptId,
+        fence: lease.fence,
+        progressSeq: 0,
+      },
+    ]);
+    // Work added after the halt must not be dispatched.
     h.db.run(
       "INSERT INTO ops_halt (workspace_id, halted, reason, changed_by, changed_at) VALUES (?, 1, NULL, ?, '2026-03-01T00:00:00Z')",
       [TEST_WORKSPACE, h.owner.actor.id],
     );
+    const { id: later } = h.mission([{ scope: ['repo:later'] }]);
+    h.clock.advance(h.config.leaseTtlMs + 1000);
     runSweep(h.db, h.fleet);
-    expect(h.db.all('SELECT id FROM execution_attempts')).toEqual([]);
+    // The sweep half ran: the lease the runner stopped renewing moved to recovery.
+    expect(
+      h.db.get<{ status: string }>(
+        'SELECT status FROM runner_leases WHERE id = ?',
+        [lease.leaseId],
+      )?.status,
+    ).toBe('recovering');
+    // The scheduling half did not: the new work has no attempt and did not move.
+    expect(h.getMission(later).attempts).toEqual([]);
+    expect(h.getMission(later).packets[0]?.status).toBe('pending');
   });
 
   it('keeps going when one workspace fails, and reports it as a health signal until a clean sweep', () => {

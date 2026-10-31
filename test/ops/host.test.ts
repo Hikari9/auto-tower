@@ -161,6 +161,7 @@ describe('the Node server sweeps with no runner poll', () => {
   });
 
   it('stops its timer when the server closes', async () => {
+    const set = vi.spyOn(globalThis, 'setInterval');
     const clear = vi.spyOn(globalThis, 'clearInterval');
     const server = startHost(
       {
@@ -172,7 +173,12 @@ describe('the Node server sweeps with no runner poll', () => {
     );
     await listening(server);
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    expect(clear).toHaveBeenCalled();
+    // The sweep's own timer is the one that was cleared, not some other interval in the process.
+    const sweepTimer = set.mock.results.find(
+      (r) => (r.value as NodeJS.Timeout).hasRef?.() === false,
+    )?.value;
+    expect(sweepTimer).toBeDefined();
+    expect(clear.mock.calls.map((c) => c[0])).toContain(sweepTimer);
   });
 });
 
