@@ -1,0 +1,32 @@
+{
+  "name": "auto-tower",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Durable mission control for AI chiefs of staff and distributed Auto-Office execution fleets.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "bin": {
+    "tower": "./bin/tower.ts",
+    "tower-runner": "./bin/tower-runner.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "pnpm typecheck && pnpm test",
+    "dev": "node bin/tower.ts serve",
+    "runner": "node bin/tower-runner.ts"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261031.1",
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
+  }
+}
