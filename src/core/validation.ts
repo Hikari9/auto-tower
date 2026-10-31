@@ -1,3 +1,4 @@
+import { parsePublicHttpsUrl } from '../issues/url.js';
 import { ValidationError, type ValidationIssue } from './errors.js';
 import {
   type DoneItem,
@@ -287,24 +288,17 @@ function readLink(item: InputReader): IssueLinkRef {
 }
 
 /**
- * Links are http(s) only and carry no credentials, which keeps secrets out of stored
- * URLs and rules out `file:` and `javascript:` schemes. The fragment is dropped.
+ * Links are public https URLs: the same check `addLink` applies. That rules out `file:`,
+ * `javascript:` and plain http, credentials, IP literals (loopback, private, link-local and
+ * metadata hosts) and internal names. The fragment is dropped.
  */
 function normalizeLinkUrl(item: InputReader, raw: string): string {
-  let parsed: URL;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    item.fail('url', 'must be an absolute URL');
+  const parsed = parsePublicHttpsUrl(raw);
+  if (!parsed.ok) {
+    item.fail('url', parsed.message);
     return raw;
   }
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-    item.fail('url', 'must use http or https');
-  } else if (parsed.username !== '' || parsed.password !== '') {
-    item.fail('url', 'must not contain credentials');
-  }
-  parsed.hash = '';
-  return parsed.href;
+  return parsed.url.href;
 }
 
 export function readLinks(

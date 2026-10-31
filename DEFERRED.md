@@ -49,3 +49,20 @@ Items here are real, planned, and intentionally not done in Phase 0. Each has an
 4. **Install the runner.** On the machine, register with `tower-runner register` using a fresh enrollment token from a human. Pin the version and digest the enrollment expects. Keep the state file owner-only.
 5. **Run one packet end to end.** Start `tower-runner run` against a preview Tower. Confirm the lease, progress, receipt, and ingestion. Check that a high-risk mission is not completed on the engine's self-report.
 6. **Roll back.** Stop the runner, quarantine it from Tower, and release its leases with `POST /runners/leases/:id/release`.
+
+## GitHub App and token provisioning, and public webhook delivery (T6)
+
+**Status:** Deferred. The provider, the sync configuration, the guard and the webhook receiver are built and tested against a fake. Nothing has been registered with GitHub, no credential exists, and no public endpoint is exposed. This supersedes the earlier "Webhook endpoints" line above: the receiver now exists, and it stays off until a host opts in.
+
+**Why it matters:** Until these are done, `link-only` works and nothing reads or writes GitHub. `observe` and `bidirectional` need a credential, and webhooks need a public URL.
+
+**Activation steps:**
+
+1. **Get explicit approval.** Creating a GitHub App and exposing an endpoint are external actions. Confirm the account, the repositories and the host first.
+2. **Create a GitHub App** owned by the organization. Give it the narrowest permissions: Issues read, and Issues write only if `bidirectional` is wanted. Subscribe it to Issues and Issue comment events. Set a webhook secret.
+3. **Keep the credential on the host.** Mint installation tokens on the host and pass `token: () => ...` to `createGitHubProvider`. Tower stores no credential. Do not paste a key or token into logs or chat.
+4. **Wire the host.** Build `createApp` with `issueProviders: { github: createGitHubProvider({ token }) }`. Create a `provider_adapter` principal for the workspace. Pass `webhooks: { resolve }` returning that principal's id and the webhook secret for each workspace.
+5. **Choose the scope per repository.** A person sets `PUT /issues/sync-config` to `observe` first. Move a repository to `bidirectional` only with a matching `issue.close` grant (action `issue.close`, resource `github:<owner>/<repo>#*`, scope `repo:<owner>/<repo>`).
+6. **Expose the endpoint** `POST /webhooks/github/<workspaceId>` behind HTTPS only after steps 2 to 5, and point the App's webhook URL at it. Check a `ping` answers `pong`.
+7. **Schedule polling** (`POST /issues/poll` with the adapter's token) as the fallback for missed deliveries. Nothing in `src/hosting` runs it on a timer yet.
+8. **Roll back** by setting the repository to `link-only` and removing the webhook from the App. Stored discrepancies and history remain.
