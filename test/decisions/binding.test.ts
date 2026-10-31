@@ -77,6 +77,12 @@ describe('packetCovers', () => {
     },
   );
 
+  it('does not count a scope with fewer than three literal characters before its first *', () => {
+    expect(packetCovers(packet('p', ['ab*']), 'abc')).toBe(false);
+    expect(packetCovers(packet('p', ['a*']), 'ax')).toBe(false);
+    expect(packetCovers(packet('p', ['abc*']), 'abcd')).toBe(true);
+  });
+
   it.each(['src/*', 'env:*', 'infra', 'ci', 'abc*'])(
     'counts %s as declaring something',
     (pattern) => {

@@ -60,18 +60,18 @@ A grant with no `maxAmount` covers no request that carries an amount, and a gran
 
 The first segments of an action name set its category.
 
-| Category               | Matches                                                                                                                                      |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `spend`                | `spend`, `spend.*`                                                                                                                           |
-| `production_deploy`    | a `deploy` or `release` segment with a segment starting `prod`, such as `deploy.production`, `release.production`, `infra.deploy.prod-eu`    |
-| `security`             | `security.*`                                                                                                                                 |
-| `destructive`          | `destructive.*`, or any segment starting `delete`, `destroy`, `drop`, `purge`, `wipe`, `truncate`, `remove`, or `force` together with `push` |
-| `external_issue_close` | `issue.close`, `issue.close.*`                                                                                                               |
-| `independent_review`   | `review.independent.*`                                                                                                                       |
-| `cleanup`              | `cleanup.*`                                                                                                                                  |
-| `standard`             | everything else                                                                                                                              |
+| Category               | Matches                                                                                                                                                                  |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `spend`                | `spend`, `spend.*`                                                                                                                                                       |
+| `production_deploy`    | a word starting `deploy`, `release`, `ship` or `publish` together with a word starting `prod`, such as `deploy.production`, `release.production`, `infra.deploy.to-prod` |
+| `security`             | `security.*`                                                                                                                                                             |
+| `destructive`          | `destructive` anywhere, or a word starting `delete`, `destroy`, `drop`, `purge`, `wipe`, `truncate` or `remove`, or `force` together with `push`                         |
+| `external_issue_close` | `issue` followed by a word starting `close`, anywhere in the name                                                                                                        |
+| `independent_review`   | `review` followed by a word starting `independent`, anywhere in the name                                                                                                 |
+| `cleanup`              | `cleanup.*`                                                                                                                                                              |
+| `standard`             | everything else                                                                                                                                                          |
 
-Words match as the start of any segment, `_` reads as `-`, and a leading `cleanup.` does not hide them: `cleanup.drop-prod-db` is destructive, not cleanup. So `deploy.prod-eu`, `db.drop_table` and `billing.spend.create` are sensitive too. Every category except `standard` and `cleanup` is **sensitive**. A sensitive action is denied unless an active grant names the action, with no wildcard, and names a resource and a scope that are not made only of `*` (`**` counts as bare). A grant of `*` / `*` / `*` allows ordinary work and none of these. Callers choose action names, so a runner cannot relabel a sensitive effect. A name of the form `cleanup.*` whose remaining segments are not sensitive is allowed without a grant for a guarded effect, and is never an approval: the router and a Chief of Staff's answer accept only a real rule.
+A name is read as words split on `.`, `-` and `_`, and a sensitive word counts wherever it sits: `deploy.to-prod`, `db.table_drop` and `cleanup.issue.close` are all sensitive, and `cleanup.drop-prod-db` is destructive, not cleanup. So `deploy.prod-eu`, `db.drop_table` and `billing.spend.create` are sensitive too. Every category except `standard` and `cleanup` is **sensitive**. A sensitive action is denied unless an active grant names the action, with no wildcard, and names a resource and a scope that are not made only of `*` (`**` counts as bare). A grant of `*` / `*` / `*` allows ordinary work and none of these. Callers choose action names, so a runner cannot relabel a sensitive effect. A name of the form `cleanup.*` whose remaining segments are not sensitive is allowed without a grant for a guarded effect, and is never an approval: the router and a Chief of Staff's answer accept only a real rule.
 
 ### Revocation and expiry
 
@@ -126,7 +126,7 @@ A one-off approval of a decision never creates a grant. A CoS answer does not co
 | 3    | Anything else: no covering grant, an expired or revoked one, a sensitive or destructive action without a named grant, a limit exceeded.                                                                                                                                                                     | A decision raised for a person.                                                      |
 | -    | A deny rule, an unknown or disabled requester.                                                                                                                                                                                                                                                              | `denied`. No decision. Nobody can approve past it.                                   |
 
-Tiers 1 and 2 are judged against the mission's own data. A packet cannot vouch for its own scope, a scope of `*` does not count, and a claim about scope is checked against what the packet declared. A packet that declares no scope is never approved by a Chief of Staff. It goes to a person.
+Tiers 1 and 2 are judged against the mission's own data. A packet cannot vouch for its own scope, a scope that names too little does not count (`*`, `*:*` and `*e*` declare nothing, and a pattern with a `*` needs three literal characters before it), and a claim about scope is checked against what the packet declared. A packet that declares no scope is never approved by a Chief of Staff. It goes to a person.
 
 **Confidence is advisory.** The request may carry `advisory.confidencePercent`. It is stored with the decision for the answerer to read. It is not an input to evaluation, so 100 never authorizes and 0 never blocks.
 
