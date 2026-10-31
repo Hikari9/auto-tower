@@ -63,6 +63,18 @@ async function enroll(
   return runner;
 }
 
+/** Waits for a signal that a run reached, or fails by name after a few seconds rather than hanging. */
+function reached(promise: Promise<void>, what: string): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const bound = new Promise<void>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`timed out waiting for: ${what}`)),
+      3_000,
+    );
+  });
+  return Promise.race([promise, bound]).finally(() => clearTimeout(timer));
+}
+
 describe('a receipt refusal is parked or retried by its kind', () => {
   /** Counts receipt POSTs and answers them with the given status until told otherwise. */
   function receiptRefusals(
@@ -289,7 +301,7 @@ describe('a re-fenced lease waits for the old run to end', () => {
       officeRunnerEngine(fake),
     );
     await runner.pollOnce();
-    await fake.stallReached;
+    await reached(fake.stallReached, 'the engine stalls');
     // The runner goes quiet past the lease TTL, so Tower moves the lease to recovery.
     h.clock.advance(61_000);
     await runner.pollOnce();
@@ -471,7 +483,7 @@ describe('a cancelled run ends before its scope is granted again', () => {
       officeRunnerEngine(fake),
     );
     await runner.pollOnce();
-    await fake.stallReached;
+    await reached(fake.stallReached, 'the engine stalls');
     h.core.missions.cancelMission(
       h.ctx(),
       cancelled.id,
