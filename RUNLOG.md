@@ -20,7 +20,7 @@ Token totals include the orchestrator, every Office executor, reviewer and plann
 
 ## Notes
 
-- `gh issue edit 1 --add-assignee @me` failed: the active `gh` account (`rico-favor`) lacks assign permission on Hikari9/auto-tower. The dibs comment posted.
+- `gh issue edit 1 --add-assignee @me` first failed for lack of permission; it succeeded after Rico granted write access.
 - `git push origin office/v1` initially failed with 403 for `rico-favor`, so the run started with `--no-prs` (pinned for its lifetime). Rico granted write access around 2026-10-31T04:00Z; `office/v1` is pushed after each landed phase.
 - Office refuses a run base that is not `origin/main` (`unsafe-run-base`), so a separate run per phase could not build on earlier phases. One run carries all phases as lanes, and each lane is merged into local `office/v1` once its review is APPROVED and its checks pass.
 - `office doctor` reports headless Chromium cannot launch, so browser visual review is unavailable. The dashboard is gated by DOM tests instead.
