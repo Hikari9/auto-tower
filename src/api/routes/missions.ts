@@ -20,7 +20,11 @@ import {
   parseUpdateMission,
 } from '../../core/inputs.js';
 import type { CommandContext, CommandResult } from '../../core/service.js';
-import { authorityHoldsFor, missionForViewer } from '../../fleet/broker.js';
+import {
+  activityForViewer,
+  authorityHoldsFor,
+  missionForViewer,
+} from '../../fleet/broker.js';
 import { StorageQuotaError } from '../../ops/quota.js';
 import { createPolicyService } from '../../policy/service.js';
 import type { AppDependencies, AppEnv, RouteSpec } from '../app.js';
@@ -413,10 +417,13 @@ const readActivity: RouteSpec = {
   handler: guarded((c) => {
     const page = parseActivity(c.req.query());
     return c.json(
-      coreOf(c).missions.activity(
-        callerOf(c).workspaceId,
-        c.req.param('id') ?? '',
-        page,
+      activityForViewer(
+        coreOf(c).missions.activity(
+          callerOf(c).workspaceId,
+          c.req.param('id') ?? '',
+          page,
+        ),
+        callerOf(c).actor.kind,
       ),
     );
   }),

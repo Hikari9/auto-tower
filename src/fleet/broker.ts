@@ -1,5 +1,6 @@
 import type { PrincipalKind } from '../auth/principals.js';
 import type { RunnerPool } from '../core/scheduler.js';
+import type { ActivityPage } from '../core/service.js';
 import type { MissionState, WorkPacket } from '../core/types.js';
 import { isHalted } from '../ops/halt.js';
 import { refusalForPolicyRefs } from '../policy/packet-refs.js';
@@ -338,6 +339,39 @@ export function missionForViewer(
           },
     ),
   };
+}
+
+/** Rule-id-free copy of any JSON value: `policyRefs` keys are dropped and every string is cleaned. */
+function withoutRuleIdsDeep(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return withoutRuleIds(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(withoutRuleIdsDeep);
+  }
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([key]) => key !== 'policyRefs')
+        .map(([key, item]) => [key, withoutRuleIdsDeep(item)]),
+    );
+  }
+  return value;
+}
+
+/**
+ * A mission's activity as one viewer may read it. A person or a chief of staff sees it whole. For
+ * a runner or a provider, each item loses its `policyRefs`, any `policyRefs` inside its payload
+ * (`mission.created` carries them), and every rule id or policy ref written in a string.
+ */
+export function activityForViewer(
+  page: ActivityPage,
+  viewer: PrincipalKind,
+): ActivityPage {
+  if (viewer === 'human' || viewer === 'chief_of_staff') {
+    return page;
+  }
+  return withoutRuleIdsDeep(page) as ActivityPage;
 }
 
 /**

@@ -200,7 +200,7 @@ Of the refs a Chief of Staff cites, those starting `policy:` are checked and at 
 
 A packet that declares no scope cannot be authorized by anyone, because there is nothing to check a rule or a runner's allowed scopes against. A scope with a `..` segment cannot be authorized by a Chief of Staff for the same reason. To fix a scopeless packet, cancel it and add it again with a scope. The check reads the latest committed policy, so a revocation after a dry run or after dispatch refuses the next authorization. It records no receipt, because the refusal rolls the transaction back. The rule is checked against its own action and resource patterns. The request that led to the ref is not known to the core, so a broad grant such as `deploy.*` is not narrowed by a deny rule written for one of its actions.
 
-**Rule ids are not shown to runners.** `GET /missions/:id` and the MCP `read_mission` tool replace every policy ref (the mission's and each `packets[].authorization.policyRefs` entry) with `[redacted]` for a runner or provider principal, and claim-hold reasons drop rule ids the same way. A person and a Chief of Staff see the refs.
+**Rule ids are not shown to runners.** `GET /missions/:id` and the MCP `read_mission` tool replace every policy ref (the mission's and each `packets[].authorization.policyRefs` entry) with `[redacted]` for a runner or provider principal, and `GET /missions/:id/activity` and the MCP `recent_activity` tool omit `policyRefs` from each item and its payload and clean any rule id written in a payload string, and claim-hold reasons and `preview_dispatch` policy reasons drop rule ids the same way. A person and a Chief of Staff see the refs.
 
 ## Who may do what
 
