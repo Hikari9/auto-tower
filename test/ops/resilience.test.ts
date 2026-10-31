@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../../src/api/app.js';
+import { createIssueService } from '../../src/issues/index.js';
 import {
   guardStorage,
   healthReport,
@@ -18,7 +19,6 @@ import {
   createIssueHarness,
   grantClose,
   ISSUE_URL,
-  ISSUE_URL_2,
   missionWithLinks,
 } from '../issues/helpers.js';
 import { appRequester, key, McpClient } from '../mcp/helpers.js';
@@ -480,18 +480,48 @@ describe('quota exhaustion fails closed, with nothing lost and nothing falsely d
     h.github.add(ISSUE_URL);
     const driver = missionWithLinks(h);
     driver.verifyOutcome();
-    const guarded = guardStorage(h.db);
-    // The close path writes its marker before it acts. With the guard tripped it cannot.
-    guarded.quota.reset();
-    const failing = vi.spyOn(h.db, 'transaction').mockImplementation(() => {
-      throw new StorageQuotaError();
+    // The same service over a guarded handle whose store is full. Reads still work.
+    const full = { on: false };
+    const raw = h.db;
+    const failing: SqlDatabase = {
+      exec: (sql) => raw.exec(sql),
+      run: (sql, params) => {
+        if (full.on && /^\s*(insert|update|delete)/i.test(sql)) {
+          throw Object.assign(new Error('database or disk is full'), {
+            errcode: 13,
+          });
+        }
+        return raw.run(sql, params);
+      },
+      get: (sql, params) => raw.get(sql, params),
+      all: (sql, params) => raw.all(sql, params),
+      transaction: (fn) =>
+        raw.transaction((tx) => fn(tx === raw ? failing : tx)),
+      close: () => raw.close(),
+    };
+    const guarded = guardStorage(failing);
+    const issues = createIssueService({
+      db: guarded,
+      core: h.core,
+      policy: h.authority.policy,
+      providers: { github: h.github },
+      clock: h.clock.now,
     });
+    full.on = true;
     await expect(
-      h.issues.closeRequired(h.ctx(h.cos), driver.id),
-    ).rejects.toThrow(StorageQuotaError);
+      issues.closeRequired(h.ctx(h.cos), driver.id),
+    ).rejects.toBeInstanceOf(StorageQuotaError);
+    // The provider was never asked to close, and nothing claims the issue is closed.
     expect(h.github.closeCalls).toBe(0);
-    failing.mockRestore();
     expect(h.github.issue(ISSUE_URL).state).toBe('open');
-    expect(ISSUE_URL_2).toBeTruthy();
+    expect(driver.refresh().state).not.toBe('completed');
+    expect(guarded.quota.tripped).toBe(true);
+    expect(healthReport(guarded, TEST_WORKSPACE).status).toBe('critical');
+
+    full.on = false;
+    guarded.quota.reset();
+    const report = await issues.closeRequired(h.ctx(h.cos), driver.id);
+    expect(report.satisfied).toBe(true);
+    expect(h.github.closeCalls).toBe(1);
   });
 });

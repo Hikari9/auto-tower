@@ -245,13 +245,11 @@ function recordClaimRefusal(
 ): void {
   const at = clock().toISOString();
   const { policyVersion } = refusal;
-  const seenAudit = db.get<{ n: number }>(
-    `SELECT COUNT(*) AS n FROM fleet_audit
-      WHERE workspace_id = ? AND kind = 'claim.authority_denied'
-        AND json_extract(detail_json, '$.attemptId') = ?
-        AND json_extract(detail_json, '$.policyVersion') = ?`,
-    [workspaceId, refusal.attemptId, policyVersion],
-  );
+  const seenAudit = db.get<{ n: number }>(CLAIM_REFUSAL_SEEN_SQL, [
+    workspaceId,
+    refusal.attemptId,
+    policyVersion,
+  ]);
   if ((seenAudit?.n ?? 0) === 0) {
     recordAudit(db, workspaceId, at, {
       kind: 'claim.authority_denied',
@@ -306,6 +304,33 @@ export function withoutRuleIds(text: string): string {
     .replace(/\brul_[A-Za-z0-9_-]+/g, 'a rule');
 }
 
+/**
+ * The two audit lookups a claim poll makes. Their WHERE clauses repeat the expression and the
+ * `kind` literal of the partial indexes `fleet_audit_claim_attempt_idx` and
+ * `fleet_audit_claim_mission_idx` (migration 0009), so they search those indexes and never scan the
+ * workspace's audit. A change here must change the index, and the plan test fails if it does not.
+ */
+export const CLAIM_REFUSAL_SEEN_SQL = `SELECT COUNT(*) AS n FROM fleet_audit
+      WHERE workspace_id = ? AND kind = 'claim.authority_denied'
+        AND json_extract(detail_json, '$.attemptId') = ?
+        AND json_extract(detail_json, '$.policyVersion') = ?`;
+
+export const AUTHORITY_HOLDS_SQL = `SELECT json_extract(f.detail_json, '$.attemptId') AS attempt_id,
+            json_extract(f.detail_json, '$.packetId') AS packet_id,
+            f.at AS at
+       FROM fleet_audit f
+       JOIN execution_attempts a
+         ON a.workspace_id = f.workspace_id
+        AND a.id = json_extract(f.detail_json, '$.attemptId')
+      WHERE f.workspace_id = ? AND f.kind = 'claim.authority_denied'
+        AND json_extract(f.detail_json, '$.missionId') = ?
+        AND a.status IN ('leased', 'running')
+        AND NOT EXISTS (
+          SELECT 1 FROM runner_leases l
+           WHERE l.workspace_id = a.workspace_id AND l.attempt_id = a.id
+             AND l.confirmed_at IS NOT NULL)
+      ORDER BY f.seq`;
+
 /** A refusal still standing on an offer a runner has not yet been granted, for the API. */
 export interface AuthorityHold {
   attemptId: string;
@@ -340,24 +365,7 @@ export function authorityHoldsFor(
     attempt_id: string;
     packet_id: string;
     at: string;
-  }>(
-    `SELECT json_extract(f.detail_json, '$.attemptId') AS attempt_id,
-            json_extract(f.detail_json, '$.packetId') AS packet_id,
-            f.at AS at
-       FROM fleet_audit f
-       JOIN execution_attempts a
-         ON a.workspace_id = f.workspace_id
-        AND a.id = json_extract(f.detail_json, '$.attemptId')
-      WHERE f.workspace_id = ? AND f.kind = 'claim.authority_denied'
-        AND json_extract(f.detail_json, '$.missionId') = ?
-        AND a.status IN ('leased', 'running')
-        AND NOT EXISTS (
-          SELECT 1 FROM runner_leases l
-           WHERE l.workspace_id = a.workspace_id AND l.attempt_id = a.id
-             AND l.confirmed_at IS NOT NULL)
-      ORDER BY f.seq`,
-    [workspaceId, mission.id],
-  );
+  }>(AUTHORITY_HOLDS_SQL, [workspaceId, mission.id]);
   const latest = new Map<string, { packet_id: string; at: string }>();
   for (const row of refused) {
     latest.set(row.attempt_id, { packet_id: row.packet_id, at: row.at });
