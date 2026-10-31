@@ -81,6 +81,12 @@ export interface ProgressResponse {
 export interface ReceiptResponse {
   receiptId: string;
   replayed: boolean;
+  /**
+   * Present when the receipt claimed the Office contract. `ingested: false` means Tower stored the
+   * receipt but did not read an Office verdict from it, and says why. A runner that sees it must
+   * not treat the work as reviewed.
+   */
+  office?: { ingested: boolean; reason?: string; message?: string };
 }
 
 /** The active-lease evidence a poll presents. Only what Tower already stored may be claimed. */
@@ -271,8 +277,19 @@ export function parseProgress(value: unknown): ProgressResponse {
 
 export function parseReceiptResponse(value: unknown): ReceiptResponse {
   const o = expectObject(value, 'receipt response');
-  return {
+  const response: ReceiptResponse = {
     receiptId: expectString(o.receiptId, 'receiptId'),
     replayed: o.replayed === true,
   };
+  if (o.office !== undefined) {
+    const office = expectObject(o.office, 'office');
+    response.office = {
+      ingested: office.ingested === true,
+      ...(typeof office.reason === 'string' ? { reason: office.reason } : {}),
+      ...(typeof office.message === 'string'
+        ? { message: office.message }
+        : {}),
+    };
+  }
+  return response;
 }
