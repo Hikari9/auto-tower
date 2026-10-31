@@ -50,8 +50,10 @@ export interface ToolDefinition {
   scopes: readonly [Scope, ...Scope[]];
   /**
    * For a tool whose answer is the live state of something that changes between two calls with one
-   * key (halt, resume, the storage guard). A retry never runs the effect again: the key is still
-   * recorded, so a late retry cannot lift a newer halt. But it is answered with the state now, not
+   * key (halt, resume, the storage guard). Within the retention window, and once the record was stored, a retry
+   * does not run the effect again: the key is still recorded, so a late retry cannot lift a newer
+   * halt. (A record that could not be written, because the store was full, or one older than the
+   * retention window, no longer protects.) But it is answered with the state now, not
    * the stored body, so a caller is never told `halted: true` for a workspace that has resumed.
    */
   liveReplay?(ctx: ToolContext): Record<string, unknown>;

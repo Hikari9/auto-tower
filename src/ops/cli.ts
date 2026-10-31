@@ -17,6 +17,7 @@ import {
 } from '../storage/migration-files.js';
 import { openSqliteDatabase } from '../storage/sqlite.js';
 import {
+  assertRestorable,
   BackupError,
   exportBackup,
   readBackup,
@@ -180,27 +181,27 @@ export function runOpsCli(
           return 1;
         }
         const backup = readBackup(readFileSync(from, 'utf8'));
+        const migrationFiles = readMigrationFiles(defaultMigrationsDir());
+        const options = {
+          allowTokenDigests: values['restore-token-digests'] === true,
+        };
+        // Refused before anything is created: no directory, no file, nothing to clean up.
+        assertRestorable(backup, migrationFiles, options);
         // Created exclusively, so this command owns the file. If anything else made it first the
         // command stops, and a failed restore removes only a file this command made.
         mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
         createNewFile(dbPath);
-        const db = openSqliteDatabase(dbPath);
         let restored = false;
+        let db: ReturnType<typeof openSqliteDatabase> | undefined;
         try {
-          const result = restoreBackup(
-            db,
-            backup,
-            readMigrationFiles(defaultMigrationsDir()),
-            { allowTokenDigests: values['restore-token-digests'] === true },
-          );
+          // Inside the try: opening refuses an unsafe directory, and the file made above must go.
+          db = openSqliteDatabase(dbPath);
+          const result = restoreBackup(db, backup, migrationFiles, options);
           restored = true;
           io.stdout(
             `Restored ${result.rows} rows into ${dbPath}; migrated forward ${result.migratedForward.length} step(s)`,
           );
-          if (
-            !backup.includesTokenDigests ||
-            !values['restore-token-digests']
-          ) {
+          if (!options.allowTokenDigests) {
             io.stdout(
               'No tokens were restored. Issue new ones with `pnpm tower token create --db ' +
                 dbPath +
@@ -208,7 +209,7 @@ export function runOpsCli(
             );
           }
         } finally {
-          db.close();
+          db?.close();
           // A restore that failed leaves nothing: not a half-loaded file the server would open as
           // a database, and not a path that blocks the retry the error message advises.
           if (!restored) {

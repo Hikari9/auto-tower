@@ -267,6 +267,57 @@ describe('the quota guard on the host database', () => {
     expect((await human.ok('read_health', {})).health.status).toBe('ok');
   });
 
+  it('answers a retried reset with the guard as it is now, without clearing it again', async () => {
+    const raw = openTestDatabase();
+    const full = { on: false };
+    const wrapped = {
+      ...raw,
+      run: (
+        sql: string,
+        params?: readonly (string | number | bigint | null)[],
+      ) => {
+        if (full.on && /^\s*(insert|update|delete)/i.test(sql)) {
+          throw Object.assign(new Error('database or disk is full'), {
+            errcode: 13,
+          });
+        }
+        return raw.run(sql, params);
+      },
+      transaction: <T>(fn: (tx: typeof raw) => T): T =>
+        raw.transaction((tx) => fn(tx === raw ? (wrapped as typeof raw) : tx)),
+    } as typeof raw;
+    const db = guardStorage(wrapped);
+    const owner = seedPrincipal(raw, { kind: 'human' });
+    const human = new McpClient(appRequester(createApp({ db })), owner.token);
+    await human.initialize();
+    const resetKey = key('reset');
+    expect(
+      await human.ok('reset_storage_guard', {
+        confirm: true,
+        idempotencyKey: resetKey,
+      }),
+    ).toEqual({
+      guarded: true,
+      tripped: false,
+    });
+    // The store fills and the guard trips again. A late retry of the old reset must not clear it.
+    full.on = true;
+    await human.call('create_mission', {
+      title: 'x',
+      intent: 'i',
+      outcome: 'o',
+      idempotencyKey: key(),
+    });
+    expect(db.quota.tripped).toBe(true);
+    const late = await human.call('reset_storage_guard', {
+      confirm: true,
+      idempotencyKey: resetKey,
+    });
+    expect(late.meta?.['tower/replayed']).toBe(true);
+    expect(late.data).toEqual({ guarded: true, tripped: true });
+    expect(db.quota.tripped).toBe(true);
+  });
+
   it('reports an unguarded database as such', async () => {
     const raw = openTestDatabase();
     const owner = seedPrincipal(raw, { kind: 'human' });

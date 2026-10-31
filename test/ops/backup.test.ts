@@ -1,5 +1,12 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createNewFile, runOpsCli } from '../../src/ops/cli.js';
@@ -403,14 +410,10 @@ describe('a backup edited and re-digested by someone who can write the file', ()
         () => restoreBackup(fresh, planted, migrations()),
         String(claim),
       ).toThrow(/explicit option/);
+      // Refused before the target was touched: no schema, no rows, no credential.
       expect(
-        fresh.get<{ n: number }>(
-          "SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'api_tokens'",
-        )?.n,
-      ).toBe(1);
-      expect(
-        fresh.get<{ n: number }>('SELECT COUNT(*) AS n FROM api_tokens')?.n,
-      ).toBe(0);
+        fresh.all("SELECT name FROM sqlite_master WHERE type = 'table'"),
+      ).toEqual([]);
       fresh.close();
     }
     world.close();
@@ -627,6 +630,51 @@ describe('pnpm ops', () => {
       copy.get<{ n: number }>('SELECT COUNT(*) AS n FROM api_tokens')?.n,
     ).toBeGreaterThan(0);
     copy.close();
+    world.close();
+  });
+
+  it('leaves no file when the directory is unsafe to put a database in, so the retry is not blocked', async () => {
+    const { world } = await populated();
+    const dir = tempDir();
+    const file = join(dir, 'b.json');
+    expect(run(['backup', '--db', world.dbPath, '--out', file]).code).toBe(0);
+    const shared = join(dir, 'shared');
+    mkdirSync(shared, { mode: 0o777 });
+    chmodSync(shared, 0o777);
+    const target = join(shared, 'restored.sqlite');
+    const refused = run(['restore', '--from', file, '--db', target]);
+    expect(refused.code).toBe(1);
+    expect(refused.err).toMatch(/ops failed/);
+    for (const suffix of ['', '-wal', '-shm']) {
+      expect(existsSync(`${target}${suffix}`), suffix || 'main file').toBe(
+        false,
+      );
+    }
+    // Once the directory is safe, the same command works.
+    chmodSync(shared, 0o700);
+    expect(run(['restore', '--from', file, '--db', target]).code).toBe(0);
+    world.close();
+  });
+
+  it('refuses a backup that cannot be restored before it creates any file or directory', async () => {
+    const { world } = await populated();
+    const dir = tempDir();
+    const file = join(dir, 'tokens.json');
+    expect(
+      run([
+        'backup',
+        '--db',
+        world.dbPath,
+        '--out',
+        file,
+        '--include-token-digests',
+      ]).code,
+    ).toBe(0);
+    const nested = join(dir, 'new', 'deeper', 'x.sqlite');
+    const refused = run(['restore', '--from', file, '--db', nested]);
+    expect(refused.code).toBe(1);
+    expect(refused.err).toMatch(/--restore-token-digests/);
+    expect(existsSync(join(dir, 'new'))).toBe(false);
     world.close();
   });
 

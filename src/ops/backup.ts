@@ -215,15 +215,18 @@ export interface RestoreResult {
 }
 
 /**
- * Restores a backup into a fresh store. The store must have no workspaces. Migrations are the
- * build's own: the backup's must be a prefix of them with the same checksums.
+ * Every check that needs no database, so a caller can refuse a backup before it creates a file,
+ * a directory or a connection. `restoreBackup` runs it first as well.
+ *
+ * The digest is not a signature: anyone who can edit the file can recompute it. So the file is held
+ * to what an export can contain, and the operator, not the file, decides whether credentials come
+ * back (a flag inside the file is as editable as its tables).
  */
-export function restoreBackup(
-  db: SqlDatabase,
+export function assertRestorable(
   backup: BackupFile,
   migrations: readonly Migration[],
   options: { allowTokenDigests?: boolean } = {},
-): RestoreResult {
+): void {
   if (digestOf(backup.tables) !== backup.digest) {
     throw new BackupError(
       'digest_mismatch',
@@ -250,7 +253,40 @@ export function restoreBackup(
       );
     }
   }
-  const replayed = applyMigrations(db, migrations.slice(0, wanted.length));
+  for (const name of Object.keys(backup.tables)) {
+    if (EPHEMERAL_TABLES.includes(name)) {
+      throw new BackupError(
+        'invalid_file',
+        `The backup holds ${name}, which a backup never contains`,
+      );
+    }
+    if (
+      CREDENTIAL_TABLES.includes(name) &&
+      options.allowTokenDigests !== true
+    ) {
+      throw new BackupError(
+        'invalid_file',
+        `The backup holds ${name}. Restoring credentials needs the explicit option (--restore-token-digests), whatever the file says`,
+      );
+    }
+  }
+}
+
+/**
+ * Restores a backup into a fresh store. The store must have no workspaces. Migrations are the
+ * build's own: the backup's must be a prefix of them with the same checksums.
+ */
+export function restoreBackup(
+  db: SqlDatabase,
+  backup: BackupFile,
+  migrations: readonly Migration[],
+  options: { allowTokenDigests?: boolean } = {},
+): RestoreResult {
+  assertRestorable(backup, migrations, options);
+  const replayed = applyMigrations(
+    db,
+    migrations.slice(0, backup.migrations.length),
+  );
   const existing = db.get<{ n: number }>(
     'SELECT COUNT(*) AS n FROM workspaces',
   );
@@ -264,26 +300,6 @@ export function restoreBackup(
   const known = new Set(tableNames(db));
   const included = Object.keys(backup.tables);
   for (const name of included) {
-    // The digest is not a signature: anyone who can edit the file can recompute it. So the file is
-    // held to what an export can contain. A table an export never writes, or token digests in a
-    // file that says it has none, would let an edited backup plant a credential or a migration.
-    if (EPHEMERAL_TABLES.includes(name)) {
-      throw new BackupError(
-        'invalid_file',
-        `The backup holds ${name}, which a backup never contains`,
-      );
-    }
-    // The operator decides whether credentials come back, not the file. A file's own header is as
-    // editable as its tables, so a flag inside it proves nothing.
-    if (
-      CREDENTIAL_TABLES.includes(name) &&
-      options.allowTokenDigests !== true
-    ) {
-      throw new BackupError(
-        'invalid_file',
-        `The backup holds ${name}. Restoring credentials needs the explicit option (--restore-token-digests), whatever the file says`,
-      );
-    }
     if (!known.has(name)) {
       throw new BackupError(
         'schema_mismatch',
