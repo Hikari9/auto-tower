@@ -108,6 +108,7 @@ function missionsIn(ctx: FleetContext, tx: SqlDatabase) {
     db: joined(tx),
     guards: ctx.core.guards,
     newId: ctx.ids,
+    clock: ctx.now,
   });
 }
 
