@@ -57,6 +57,8 @@ describe('runner credentials cannot reach authority routes', () => {
     expect(paths.some((p) => p.startsWith('/decisions'))).toBe(true);
     expect(paths).toContain('/missions/:id/transitions');
     expect(paths).toContain('/runners/enrollments');
+    expect(paths).toContain('/missions/:id/issue-links');
+    expect(paths).toContain('/missions/:id/issue-links/:linkId/exemption');
 
     for (const token of [runner.token, full.token]) {
       for (const route of forbidden) {
