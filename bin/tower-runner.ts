@@ -23,13 +23,14 @@ const { values } = parseArgs({
     concurrency: { type: 'string', default: '1' },
     'poll-ms': { type: 'string', default: '15000' },
     once: { type: 'boolean', default: false },
+    ticks: { type: 'string' },
     help: { type: 'boolean', short: 'h' },
   },
 });
 
 if (values.help) {
   console.log(`tower-runner --url URL [--name NAME] [--engine auto-office|fake] [--repo owner/name=/path/to/checkout ...]
-             [--capability CAP ...] [--scope 'repo:owner/*' ...] [--concurrency 1] [--poll-ms 15000] [--once]
+             [--capability CAP ...] [--scope 'repo:owner/*' ...] [--concurrency 1] [--poll-ms 15000] [--once | --ticks N]
 Token: TOWER_RUNNER_TOKEN env var (never pass tokens as arguments).`);
   process.exit(0);
 }
@@ -99,7 +100,8 @@ const agent = new RunnerAgent({
 });
 
 let backoff = Number(values['poll-ms']);
-for (;;) {
+const maxTicks = values.once ? 1 : values.ticks ? Number(values.ticks) : Infinity;
+for (let tick = 1; ; tick++) {
   try {
     await agent.tick();
     backoff = Number(values['poll-ms']);
@@ -108,6 +110,6 @@ for (;;) {
     console.error(`tick failed: ${err instanceof Error ? err.message : String(err)}`);
     backoff = Math.min(backoff * 2, 5 * 60_000);
   }
-  if (values.once) break;
+  if (tick >= maxTicks) break;
   await new Promise((r) => setTimeout(r, backoff));
 }

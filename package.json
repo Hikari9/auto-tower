@@ -17,7 +17,8 @@
     "test:watch": "vitest",
     "check": "pnpm typecheck && pnpm test",
     "dev": "node bin/tower.ts serve",
-    "runner": "node bin/tower-runner.ts"
+    "runner": "node bin/tower-runner.ts",
+    "smoke": "node scripts/smoke.ts"
   },
   "license": "MIT",
   "devDependencies": {

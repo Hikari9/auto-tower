@@ -187,9 +187,21 @@ export class MissionService {
     return { mission, packets, attempts, decisions, links, evidence, children, events };
   }
 
+  /** Missions with the overview extras: who owns each and how much of its work is done. */
   async list(actor: Actor, f: { states?: MissionState[]; q?: string; parentId?: string | null; limit?: number } = {}) {
     requireScope(actor, 'missions:read');
-    return this.t.repo.missions(actor.principal.workspaceId, f);
+    const ws = actor.principal.workspaceId;
+    const [missions, counts, principals] = await Promise.all([
+      this.t.repo.missions(ws, f),
+      this.t.db.all<{ mission_id: string; total: number; done: number }>(
+        "SELECT mission_id, COUNT(*) AS total, SUM(CASE WHEN state = 'done' THEN 1 ELSE 0 END) AS done FROM packets WHERE workspace_id = ? AND state != 'cancelled' GROUP BY mission_id",
+        [ws],
+      ),
+      this.t.repo.principals(ws),
+    ]);
+    const byMission = new Map(counts.map((c) => [c.mission_id, c]));
+    const names = new Map(principals.map((p) => [p.id, p.name]));
+    return missions.map((m) => ({ ...m, ownerName: names.get(m.createdBy) ?? m.createdBy, progress: { done: byMission.get(m.id)?.done ?? 0, total: byMission.get(m.id)?.total ?? 0 } }));
   }
 
   async update(actor: Actor, id: string, expectedVersion: number, patch: MissionPatch): Promise<Mission> {
