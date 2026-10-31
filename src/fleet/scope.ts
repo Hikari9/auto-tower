@@ -51,6 +51,19 @@ function normalise(name: string): string | undefined {
 
 const PREFIXED = /^\s*(cap|repo|worktree)\s*:([\s\S]*)$/i;
 
+/**
+ * The canonical spelling of a `repo:` or `worktree:` entry, or undefined for any other entry or a
+ * name that has no canonical form. Two entries with the same canonical spelling are one scope.
+ */
+export function canonicalEntry(entry: string): string | undefined {
+  const parts = prefixed(entry);
+  if (parts === undefined || parts.kind === 'cap') {
+    return undefined;
+  }
+  const name = normalise(parts.value);
+  return name === undefined ? undefined : `${parts.kind}:${name}`;
+}
+
 /** The kind and value of a `cap:`, `repo:` or `worktree:` entry, whatever its case or spacing. */
 function prefixed(
   entry: string,

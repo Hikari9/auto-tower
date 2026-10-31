@@ -154,17 +154,61 @@ messages.
 
 ## Claim-time authority
 
-`claim` and reconcile re-check each cited policy rule before they grant work. A chief of staff's
-authorization cites rules. Each cited rule is evaluated again at the point of the claim, through the
-same check the mission core uses at authorization (`refusalForPolicyRefs`). A revoked, expired, replaced
-or deny-covered rule withholds only the packet it authorized. The offer comes back with a reason that
-starts with `authority:`. Other branches of the mission are granted as before.
+`claim` re-checks the authority a packet was authorized under before it grants the packet. Reconcile
+re-checks it too, but records nothing, since reconcile is not a claim. The check runs on each new grant
+and on each re-sent assignment.
 
-A human's authorization cites no rule and is not re-checked. Work already running is not affected. The
-check governs new grants and re-sent assignments.
+The check evaluates the principal that authorized the packet (`authorization.by`). It does not evaluate
+the runner. The runner's own capability, scope, status and quota are checked separately, by
+`ineligibleReason`. Authority to run a packet belongs to whoever authorized it, so the check asks whether
+that principal still stands behind it.
 
-The implementation is in `src/fleet/broker.ts` (`authorityReason`) and `src/fleet/leases.ts`. The tests
-are in `test/fleet/claim-authority.test.ts`.
+- **Authorizer not in the workspace.** The packet is refused.
+- **Disabled authorizer, any kind.** The packet is refused.
+- **Chief of staff.** Each cited policy rule is evaluated again through the check the mission core uses at
+  authorization (`refusalForPolicyRefs`). A revoked, expired, replaced or deny-covered rule refuses the
+  packet.
+- **Human.** The authorization cites no rule, so the packet is checked against deny rules only. A packet
+  is refused when an active deny rule covers it. A deny rule covers
+  the claim when its grantee is a human or any kind, and names no principal or this packet's authorizer. Its
+  action is `packet.claim` or a wildcard that
+  matches it, its mission is any or this mission, and its scope matches one of the packet's scopes. Its
+  resource is not compared, since a packet names none. A packet with no scope is checked under its own
+  name, `packet:<id>`, so only a wildcard scope rule covers it. A packet whose scope is not printable lowercase ASCII, or contains `*` or `..`, is refused, since
+  the rules match literal ASCII names. Spacing is refused too: the fleet reads `cap: docker` as `cap:docker`,
+  which a literal rule would not match. A missing allow rule is not a refusal, because a human's
+  authorization needs none.
+
+A scopeless packet (`scope: []`) authorized by a human is evaluated under `packet:<id>`. A scope-specific
+deny rule (for example `env:prod`) does not narrow it, and neither does the runner's `allowedScopes`, since
+a scopeless packet declares nothing those would match. A chief of staff's scopeless packet is refused,
+because its cited rule cannot be checked against no scope. This is a residual for human packets: they are
+still dispatched with no scope gate. Runner-dispatched packets are to declare a scope (T9).
+
+A refused packet is not granted. Its offer comes back in `withheld` with a reason that starts with
+`authority:`. The branch is held and other branches of the mission proceed as before.
+
+Each claim-time refusal is recorded once per attempt and policy version, so repeated polls under the same
+policy write nothing new:
+
+- A `claim.authority_denied` row in `fleet_audit`, with the attempt, packet, mission, policy version and
+  redacted reason. Its actor is the authorizing principal.
+- A deny row in `policy_receipts`, with action `packet.claim`, resource `attempt:<id>`, and code
+  `claim_authority_denied`. A receipt needs the authorizing principal to exist in the workspace. When it
+  does not, the receipt is skipped and the audit row still lands.
+
+Refusals are written after the claim settles, in their own transaction, whether the claim succeeds or
+fails. A claim that rolls back still leaves its refusals on record.
+
+`GET /missions/:id` returns `holds`: each attempt that was refused at a claim, is still refused now, and has
+no lease the runner has confirmed. Each hold carries the reason it is refused now and the current policy
+version. A confirmed lease keeps running and is not listed. An attempt that ended is not listed. A hold
+therefore clears as soon as its authority is restored, with no claim needed.
+
+Work already running is not affected. The check governs new grants and re-sent assignments.
+
+The implementation is in `src/fleet/broker.ts` (`authorityReason`, `recordClaimRefusals`,
+`authorityHoldsFor`) and `src/fleet/leases.ts`. The tests are in `test/fleet/claim-authority.test.ts`.
 
 ## Tests
 
@@ -204,6 +248,7 @@ These are accepted, and the code does not mitigate them.
 - **Same-user engine.** The engine runs as the runner's user. It can read any file that user can read. Keeping the state file outside the repository limits what the engine sees by default, and it does not stop a same-user process.
 - **Enrollment token.** Registration redeems the token before the credential is saved. If the save fails after a successful redeem, the credential is lost, and a human must issue a new enrollment.
 - **Durability.** The state write is fsynced, but on macOS `fsync` does not force the disk cache. A power loss can still lose the most recent save, and the runner then reconciles from Tower's record.
+- **Scopeless human packets.** A human-authorized packet with no scope is evaluated under `packet:<id>`, so no scope-specific deny rule or runner `allowedScopes` narrows it. T9 will require runner-dispatched packets to declare a scope.
 - **Running work after revocation.** The claim-time check governs new grants and re-sent assignments. A lease already running continues until it ends, as `docs/runner-protocol.md` describes for quota and scope changes.
 - **Pause.** The runner does not act on a `pause` directive. Tower withholds new work from a paused runner, and the runner's in-flight step runs to its end.
 - **Homoglyphs.** Look-alike letters from other scripts are not folded in identity comparison (see Identities above).
