@@ -163,16 +163,18 @@ the runner. The runner's own capability, scope, status and quota are checked sep
 `ineligibleReason`. Authority to run a packet belongs to whoever authorized it, so the check asks whether
 that principal still stands behind it.
 
+- **Authorizer not in the workspace.** The packet is refused.
 - **Chief of staff.** Each cited policy rule is evaluated again through the check the mission core uses at
   authorization (`refusalForPolicyRefs`). A revoked, expired, replaced or deny-covered rule refuses the
   packet.
-- **Human.** The authorization cites no rule, so the packet is checked against deny rules only. The check
-  evaluates the human for action `packet.claim`, resource `packet:<id>`, each packet scope, and the
-  mission's risk. Only an explicit deny refuses. The absence of an allow rule does not, because a human's
-  authorization needs none. A deny rule covers this check when it names `packet.claim`, a wildcard that
-  matches it, the packet's scope, and the mission. A packet with no scope is checked under its own name,
-  `packet:<id>`, so only a wildcard scope rule covers it. A packet whose scope contains `*` or `..` is
-  refused, since the policy cannot check it.
+- **Human.** The authorization cites no rule, so the packet is checked against deny rules only. A disabled
+  human is refused. Otherwise a packet is refused when an active deny rule covers it. A deny rule covers
+  the claim when its grantee is any principal or a human, its action is `packet.claim` or a wildcard that
+  matches it, its mission is any or this mission, and its scope matches one of the packet's scopes. Its
+  resource is not compared, since a packet names none. A packet with no scope is checked under its own
+  name, `packet:<id>`, so only a wildcard scope rule covers it. A packet whose scope contains `*` or `..`
+  is refused, since the rules cannot check it. A missing allow rule is not a refusal, because a human's
+  authorization needs none.
 
 A refused packet is not granted. Its offer comes back in `withheld` with a reason that starts with
 `authority:`. The branch is held and other branches of the mission proceed as before.
@@ -186,12 +188,17 @@ policy write nothing new:
   `claim_authority_denied`. A receipt needs the authorizing principal to exist in the workspace. When it
   does not, the receipt is skipped and the audit row still lands.
 
-`GET /missions/:id` returns `holds`: the latest refusal per attempt that has not ended and has not been
-granted a lease since. A hold clears on the first claim that grants the branch.
+Refusals are written after the claim settles, in their own transaction, whether the claim succeeds or
+fails. A claim that rolls back still leaves its refusals on record.
+
+`GET /missions/:id` returns `holds`: each offer that was refused at a claim and is still refused now, with
+the reason it is refused now and the policy version it was evaluated under. An offer the runner was granted,
+or whose attempt ended, is not listed. A hold therefore clears as soon as its authority is restored, with no
+claim needed.
 
 Work already running is not affected. The check governs new grants and re-sent assignments.
 
-The implementation is in `src/fleet/broker.ts` (`authorityReason`, `recordClaimDenial`,
+The implementation is in `src/fleet/broker.ts` (`authorityReason`, `recordClaimRefusals`,
 `authorityHoldsFor`) and `src/fleet/leases.ts`. The tests are in `test/fleet/claim-authority.test.ts`.
 
 ## Tests

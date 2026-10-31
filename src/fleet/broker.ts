@@ -1,8 +1,9 @@
 import type { RunnerPool } from '../core/scheduler.js';
 import type { MissionState, WorkPacket } from '../core/types.js';
 import { refusalForPolicyRefs } from '../policy/packet-refs.js';
-import { hasTraversal } from '../policy/patterns.js';
-import { createPolicyService, type PolicyService } from '../policy/service.js';
+import { hasTraversal, matchesPattern } from '../policy/patterns.js';
+import { createPolicyService } from '../policy/service.js';
+import type { PolicyRule } from '../policy/types.js';
 import type { SqlDatabase } from '../storage/database.js';
 import type { FleetConfig } from './config.js';
 import { redactString } from './redact.js';
@@ -47,6 +48,7 @@ export function ineligibleReason(
  * and the mission.
  */
 const CLAIM_ACTION = 'packet.claim';
+const CLAIM_DENIED_CODE = 'claim_authority_denied';
 
 /**
  * Re-checks the authority a packet was authorized under, at the point of a claim, and returns why
@@ -54,8 +56,9 @@ const CLAIM_ACTION = 'packet.claim';
  *
  * - A chief of staff's cited policy refs are re-validated, as at authorization: a revoked, expired,
  *   deny-covered or replaced rule refuses that packet only.
- * - A human's authorization is re-checked against deny rules only. A human's standing does not
- *   expire, but a deny rule added since authorization still withholds the branch.
+ * - A human's authorization is re-checked against deny rules only, and refuses if the human is
+ *   disabled. A human's standing does not expire, but a deny rule added since authorization still
+ *   withholds the branch.
  *
  * The principal evaluated is the one that authorized the packet (`authorization.by`), not the
  * runner: the runner's own scope, capability and quota are checked by `ineligibleReason`, and the
@@ -72,23 +75,32 @@ export function authorityReason(
   if (auth === null) {
     return undefined;
   }
-  const actor = db.get<{ kind: string }>(
-    'SELECT kind FROM principals WHERE id = ? AND workspace_id = ?',
+  const actor = db.get<{ kind: string; disabled_at: string | null }>(
+    'SELECT kind, disabled_at FROM principals WHERE id = ? AND workspace_id = ?',
     [auth.by, workspaceId],
   );
-  const policy = createPolicyService({ db, clock });
-  if (actor?.kind === 'human') {
-    const denied = deniedClaim(policy, workspaceId, auth.by, mission, packet);
+  // A packet whose authorizer is no longer in the workspace has no standing to run.
+  if (actor === undefined) {
+    const who = redactString(auth.by).slice(0, 128);
+    return `authority: the authorizing principal ${who} is not in this workspace`;
+  }
+  if (actor.kind === 'human') {
+    const denied = deniedClaim(db, clock, workspaceId, {
+      id: auth.by,
+      disabled: actor.disabled_at !== null,
+      mission,
+      packet,
+    });
     return denied === undefined
       ? undefined
       : `authority: ${redactString(denied).slice(0, 280)}`;
   }
+  const policy = createPolicyService({ db, clock });
   const cited = auth.policyRefs.filter((ref) => ref.startsWith('policy:'));
   if (cited.length === 0) {
     return undefined;
   }
-  // Only a confirmed human is exempt from the cited refs. Anything else, including a principal row
-  // that is missing, is re-checked, and an unknown principal is denied by the policy service.
+  // Only a confirmed human is exempt from the cited refs. Anything else is re-checked.
   const refusal = refusalForPolicyRefs(
     policy,
     { workspaceId, actor: { id: auth.by }, mission, packet },
@@ -100,19 +112,29 @@ export function authorityReason(
 }
 
 /**
- * Why a human's packet may not be claimed under current deny rules, or `undefined`. Only an
- * explicit deny refuses: the absence of an allow rule is not a refusal here, since a human's
- * authorization needs no rule. A packet with no scope is checked under its own name, so a deny rule
- * with a wildcard scope still covers it. A scope the policy service cannot check refuses, as an
+ * Why a human's packet may not be claimed under current deny rules, or `undefined`. A deny rule
+ * covers the claim when it names the grantee, the claim action, the mission, and one of the packet's
+ * scopes. Its resource is not compared, since a packet names no resource to compare it with. This
+ * mirrors the policy service's deny coverage on that basis. A missing allow rule is not a refusal,
+ * since a human's authorization needs none. A packet with no scope is checked under its own name, so
+ * a deny rule with a wildcard scope still covers it. A scope the rules cannot check refuses, as an
  * unchecked scope would otherwise slip past every deny rule.
  */
 function deniedClaim(
-  policy: PolicyService,
+  db: SqlDatabase,
+  clock: () => Date,
   workspaceId: string,
-  authorizedBy: string,
-  mission: Pick<MissionState, 'id' | 'risk'>,
-  packet: WorkPacket,
+  authorizer: {
+    id: string;
+    disabled: boolean;
+    mission: Pick<MissionState, 'id'>;
+    packet: WorkPacket;
+  },
 ): string | undefined {
+  const { id, mission, packet } = authorizer;
+  if (authorizer.disabled) {
+    return 'the principal is disabled';
+  }
   if (
     packet.scope.some((scope) => scope.includes('*') || hasTraversal(scope))
   ) {
@@ -120,44 +142,66 @@ function deniedClaim(
   }
   const scopes =
     packet.scope.length === 0 ? [`packet:${packet.id}`] : packet.scope;
+  const denies = createPolicyService({ db, clock })
+    .listRules(workspaceId, { status: 'active' })
+    .filter((rule) => denyApplies(rule, id, mission.id));
   for (const scope of scopes) {
-    const evaluation = policy.authorize({
-      workspace: workspaceId,
-      principal: authorizedBy,
-      action: CLAIM_ACTION,
-      resource: `packet:${packet.id}`,
-      scope,
-      risk: mission.risk,
-      missionId: mission.id,
-    });
-    if (evaluation.code === 'explicit_deny') {
-      return evaluation.reason;
+    const rule = denies.find((candidate) =>
+      matchesPattern(candidate.scope, scope),
+    );
+    if (rule !== undefined) {
+      return `denied by rule ${rule.id} for scope ${scope}`;
     }
   }
   return undefined;
 }
 
-const CLAIM_DENIED_CODE = 'claim_authority_denied';
+/** Whether an active deny rule names this claim's principal, action and mission, not its resource. */
+function denyApplies(rule: PolicyRule, principalId: string, missionId: string) {
+  const { grantee, limits } = rule;
+  // A human's claim is only ever checked here, so a grantee of any kind but human does not apply.
+  return (
+    rule.effect === 'deny' &&
+    (grantee.kind === null || grantee.kind === 'human') &&
+    (grantee.principalId === null || grantee.principalId === principalId) &&
+    matchesPattern(rule.action, CLAIM_ACTION) &&
+    (limits.missionIds === null || limits.missionIds.includes(missionId))
+  );
+}
+
+/** A claim-time refusal, held until the claim settles so it is recorded whatever the outcome. */
+export interface ClaimRefusal {
+  attemptId: string;
+  runnerId: string;
+  authorizedBy: string;
+  mission: Pick<MissionState, 'id' | 'risk'>;
+  packet: Pick<WorkPacket, 'id' | 'scope'>;
+  reason: string;
+}
 
 /**
- * Records a claim-time authority refusal: a `claim.authority_denied` audit row and a deny receipt,
- * once per attempt and policy version, so repeated polls under the same policy write nothing new.
- * The receipt needs the authorizing principal to exist, and is skipped when it does not; the audit
- * row always lands. Called inside the claim's transaction, which commits because a refusal is a
- * held offer and not an error.
+ * Writes a claim-time refusal: a `claim.authority_denied` audit row and a deny receipt, once per
+ * attempt and policy version, so repeated polls under the same policy write nothing new. The receipt
+ * needs the authorizing principal to exist, and is skipped when it does not; the audit row always
+ * lands. Runs in its own transaction after the claim settles, so a claim that rolls back still
+ * leaves its refusals on record.
  */
-export function recordClaimDenial(
+export function recordClaimRefusals(
   db: SqlDatabase,
   clock: () => Date,
   workspaceId: string,
-  claim: {
-    attemptId: string;
-    runnerId: string;
-    authorizedBy: string;
-    mission: Pick<MissionState, 'id' | 'risk'>;
-    packet: Pick<WorkPacket, 'id' | 'scope'>;
-    reason: string;
-  },
+  refusals: readonly ClaimRefusal[],
+): void {
+  for (const refusal of refusals) {
+    recordClaimRefusal(db, clock, workspaceId, refusal);
+  }
+}
+
+function recordClaimRefusal(
+  db: SqlDatabase,
+  clock: () => Date,
+  workspaceId: string,
+  refusal: ClaimRefusal,
 ): void {
   const at = clock().toISOString();
   const policyVersion = createPolicyService({ db, clock }).policyVersion(
@@ -168,27 +212,27 @@ export function recordClaimDenial(
       WHERE workspace_id = ? AND kind = 'claim.authority_denied'
         AND json_extract(detail_json, '$.attemptId') = ?
         AND json_extract(detail_json, '$.policyVersion') = ?`,
-    [workspaceId, claim.attemptId, policyVersion],
+    [workspaceId, refusal.attemptId, policyVersion],
   );
   if ((seenAudit?.n ?? 0) === 0) {
     recordAudit(db, workspaceId, at, {
       kind: 'claim.authority_denied',
-      runnerId: claim.runnerId,
-      actorId: claim.authorizedBy,
+      runnerId: refusal.runnerId,
+      actorId: refusal.authorizedBy,
       detail: {
-        attemptId: claim.attemptId,
-        packetId: claim.packet.id,
-        missionId: claim.mission.id,
+        attemptId: refusal.attemptId,
+        packetId: refusal.packet.id,
+        missionId: refusal.mission.id,
         policyVersion,
-        reason: claim.reason,
+        reason: refusal.reason,
       },
     });
   }
   const principal = db.get<{ id: string }>(
     'SELECT id FROM principals WHERE id = ? AND workspace_id = ?',
-    [claim.authorizedBy, workspaceId],
+    [refusal.authorizedBy, workspaceId],
   );
-  const resource = `attempt:${claim.attemptId}`;
+  const resource = `attempt:${refusal.attemptId}`;
   const seenReceipt = db.get<{ n: number }>(
     `SELECT COUNT(*) AS n FROM policy_receipts
       WHERE workspace_id = ? AND resource = ? AND policy_version = ? AND code = ?`,
@@ -203,49 +247,48 @@ export function recordClaimDenial(
      VALUES (?, ?, ?, ?, ?, ?, ?, 'deny', ?, ?, NULL, NULL, ?, ?)`,
     [
       workspaceId,
-      claim.authorizedBy,
+      refusal.authorizedBy,
       CLAIM_ACTION,
       resource,
-      claim.packet.scope.join(','),
-      claim.mission.risk,
-      claim.mission.id,
+      refusal.packet.scope.join(','),
+      refusal.mission.risk,
+      refusal.mission.id,
       CLAIM_DENIED_CODE,
-      claim.reason,
+      refusal.reason,
       policyVersion,
       at,
     ],
   );
 }
 
-/** The latest open claim-time refusal per attempt for a mission, for the API. */
+/** A refusal still standing on an offer a runner has not yet been granted, for the API. */
 export interface AuthorityHold {
   attemptId: string;
   packetId: string;
   reason: string;
   policyVersion: number;
+  /** When the refusal was last recorded. */
   at: string;
 }
 
 /**
- * The claim-time refusals still standing for a mission: the latest per attempt, for attempts that
- * have not ended and have not been granted a lease since the refusal.
+ * The holds on a mission's offers: each offer that was refused at a claim and is still refused now,
+ * with the reason it is refused now. Read-only. An offer the runner was granted, or an attempt that
+ * ended, is not held, and neither is one whose authority has since been restored.
  */
 export function authorityHoldsFor(
   db: SqlDatabase,
+  clock: () => Date,
   workspaceId: string,
-  missionId: string,
+  mission: MissionState,
 ): AuthorityHold[] {
-  const rows = db.all<{
+  const refused = db.all<{
     attempt_id: string;
     packet_id: string;
-    reason: string;
-    policy_version: number;
     at: string;
   }>(
     `SELECT json_extract(f.detail_json, '$.attemptId') AS attempt_id,
             json_extract(f.detail_json, '$.packetId') AS packet_id,
-            json_extract(f.detail_json, '$.reason') AS reason,
-            json_extract(f.detail_json, '$.policyVersion') AS policy_version,
             f.at AS at
        FROM fleet_audit f
        JOIN execution_attempts a
@@ -253,26 +296,38 @@ export function authorityHoldsFor(
         AND a.id = json_extract(f.detail_json, '$.attemptId')
       WHERE f.workspace_id = ? AND f.kind = 'claim.authority_denied'
         AND json_extract(f.detail_json, '$.missionId') = ?
-        AND a.status IN ('leased', 'running')
+        AND a.status = 'leased'
         AND NOT EXISTS (
-          SELECT 1 FROM fleet_audit g
-           WHERE g.workspace_id = f.workspace_id AND g.kind = 'lease.granted'
-             AND g.seq > f.seq
-             AND json_extract(g.detail_json, '$.attemptId') = a.id)
+          SELECT 1 FROM runner_leases l
+           WHERE l.workspace_id = a.workspace_id AND l.attempt_id = a.id)
       ORDER BY f.seq`,
-    [workspaceId, missionId],
+    [workspaceId, mission.id],
   );
-  const latest = new Map<string, AuthorityHold>();
-  for (const row of rows) {
-    latest.set(row.attempt_id, {
-      attemptId: row.attempt_id,
-      packetId: row.packet_id,
-      reason: row.reason,
-      policyVersion: row.policy_version,
-      at: row.at,
-    });
+  const latest = new Map<string, { packet_id: string; at: string }>();
+  for (const row of refused) {
+    latest.set(row.attempt_id, { packet_id: row.packet_id, at: row.at });
   }
-  return [...latest.values()];
+  const policyVersion = createPolicyService({ db, clock }).policyVersion(
+    workspaceId,
+  );
+  const holds: AuthorityHold[] = [];
+  for (const [attemptId, { packet_id, at }] of latest) {
+    const packet = mission.packets.find((p) => p.id === packet_id);
+    if (packet === undefined) {
+      continue;
+    }
+    const reason = authorityReason(db, clock, workspaceId, mission, packet);
+    if (reason !== undefined) {
+      holds.push({
+        attemptId,
+        packetId: packet_id,
+        reason,
+        policyVersion,
+        at,
+      });
+    }
+  }
+  return holds;
 }
 
 function reasonFor(

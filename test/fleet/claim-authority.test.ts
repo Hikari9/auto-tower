@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createPolicyService } from '../../src/policy/service.js';
 import { mission } from '../core/helpers.js';
 import { TEST_WORKSPACE } from '../helpers/tower.js';
@@ -152,6 +152,9 @@ describe('claim-time authority re-check', () => {
     expect(answer.body.lease.fence).toBe(granted?.fence);
     expect(answer.body.lease.status).toBe('recovering');
     expect(answer.body.withheld).toMatch(/^authority: /);
+    // Reconcile is not a claim: the refusal is returned, not recorded.
+    expect(denials(h)).toHaveLength(0);
+    expect(receipts(h)).toHaveLength(0);
   });
 });
 
@@ -204,7 +207,9 @@ describe('a claim-time authority refusal is durable and visible', () => {
       packetId: cited,
       missionId: expect.any(String),
       policyVersion: expect.any(Number),
-      reason: expect.stringMatching(/^authority: policy ref .* does not name a current rule/),
+      reason: expect.stringMatching(
+        /^authority: policy ref .* does not name a current rule/,
+      ),
     });
 
     const deny = receipts(h);
@@ -247,11 +252,10 @@ describe('a claim-time authority refusal is durable and visible', () => {
     const runner = await h.runner();
     const claim = (await runner.claim()) as Claim;
     const attemptId = claim.body.withheld[0]?.attemptId;
-    const missionId = h.db
-      .all<{ mission_id: string }>(
-        'SELECT mission_id FROM execution_attempts WHERE workspace_id = ? AND id = ?',
-        [TEST_WORKSPACE, attemptId ?? ''],
-      )[0]?.mission_id;
+    const missionId = h.db.all<{ mission_id: string }>(
+      'SELECT mission_id FROM execution_attempts WHERE workspace_id = ? AND id = ?',
+      [TEST_WORKSPACE, attemptId ?? ''],
+    )[0]?.mission_id;
 
     const held = await h.call(h.owner.token, 'GET', `/missions/${missionId}`);
     expect(held.status).toBe(200);
@@ -322,5 +326,308 @@ describe('a human-authorized packet is re-checked against deny rules at claim', 
     const claim = (await runner.claim()) as Claim;
     expect(packetsGranted(claim)).toContain(human);
     expect(denials(h).map((row) => row.detail.packetId)).not.toContain(human);
+  });
+});
+
+describe('claim-time refusals: coverage of each record and hold', () => {
+  it('records one row per refused attempt, distinct by attempt, under one policy version', async () => {
+    const { h, policy } = setup();
+    policy.createRule(
+      h.ctx(),
+      ruleInput({
+        effect: 'deny',
+        action: '*',
+        resource: '*',
+        scope: '*',
+        grantee: { kind: null, principalId: null },
+      }),
+    );
+    const runner = await h.runner();
+    const claim = (await runner.claim()) as Claim;
+    expect(claim.body.withheld).toHaveLength(2);
+    const attempts = claim.body.withheld.map((w) => w.attemptId);
+    const rows = denials(h);
+    expect(rows.map((r) => r.detail.attemptId).sort()).toEqual(
+      [...attempts].sort(),
+    );
+    expect(new Set(rows.map((r) => r.detail.policyVersion)).size).toBe(1);
+    const deny = receipts(h);
+    expect(deny.map((r) => r.resource).sort()).toEqual(
+      attempts.map((a) => `attempt:${a}`).sort(),
+    );
+  });
+
+  it('denies a human branch only when the deny rule names the authorizing principal', async () => {
+    const { h, policy, cited, human } = setup();
+    // Denies a principal other than the authorizer: the human branch must still be granted.
+    policy.createRule(
+      h.ctx(),
+      ruleInput({
+        effect: 'deny',
+        action: '*',
+        resource: '*',
+        scope: 'env:prod',
+        grantee: { kind: null, principalId: h.cos.actor.id },
+      }),
+    );
+    const runner = await h.runner();
+    const other = (await runner.claim()) as Claim;
+    expect(packetsGranted(other)).toEqual(expect.arrayContaining([cited, human]));
+    expect(other.body.withheld).toEqual([]);
+
+    // Denies the authorizer by id: the human branch is withheld.
+    policy.createRule(
+      h.ctx(),
+      ruleInput({
+        effect: 'deny',
+        action: '*',
+        resource: '*',
+        scope: 'env:prod',
+        grantee: { kind: null, principalId: h.owner.actor.id },
+      }),
+    );
+    const own = (await runner.claim()) as Claim;
+    expect(packetsGranted(own)).not.toContain(human);
+    expect(reasons(own)).toHaveLength(1);
+  });
+
+  it('returns each mission only its own holds, and drops a hold once its offer is released', async () => {
+    const { h, policy, human } = setup();
+    policy.createRule(
+      h.ctx(),
+      ruleInput({
+        effect: 'deny',
+        action: '*',
+        resource: '*',
+        scope: 'env:prod',
+        grantee: { kind: null, principalId: null },
+      }),
+    );
+    const runner = await h.runner({ maxConcurrent: 10 });
+    await runner.claim();
+    const humanAttempt = denials(h).find(
+      (d) => d.detail.packetId === human,
+    )?.detail.attemptId as string;
+    const missionOf = (attemptId: string) =>
+      h.db.all<{ mission_id: string }>(
+        'SELECT mission_id FROM execution_attempts WHERE workspace_id = ? AND id = ?',
+        [TEST_WORKSPACE, attemptId],
+      )[0]?.mission_id as string;
+    const firstMission = missionOf(humanAttempt);
+
+    const other = h.mission([{ title: 'other', scope: ['env:prod'] }]);
+    await runner.claim();
+    const otherHolds = await h.call(h.owner.token, 'GET', `/missions/${other.id}`);
+    expect(otherHolds.body.holds).toHaveLength(1);
+    expect(otherHolds.body.holds[0].packetId).toBe(other.packetIds[0]);
+    const firstHolds = await h.call(h.owner.token, 'GET', `/missions/${firstMission}`);
+    expect(firstHolds.body.holds.map((x: { packetId: string }) => x.packetId)).toEqual([human]);
+
+    const released = await h.call(
+      h.owner.token,
+      'POST',
+      `/runners/attempts/${humanAttempt}/release`,
+      { reason: 'withdrawn by owner' },
+    );
+    expect(released.status).toBe(200);
+    const after = await h.call(h.owner.token, 'GET', `/missions/${firstMission}`);
+    expect(after.body.holds).toEqual([]);
+  });
+
+  it('keeps the latest reason and policy version for an attempt refused twice', async () => {
+    const { h, policy, rule, human } = setup();
+    policy.revokeRule(h.ctx(), rule.id, 1, 'withdrawn');
+    const runner = await h.runner();
+    const first = (await runner.claim()) as Claim;
+    const attemptId = first.body.withheld.find((w) => w.reason.includes('current rule'))?.attemptId;
+    policy.createRule(h.ctx(), ruleInput({ action: 'unrelated.check' }));
+    await runner.claim();
+    const rows = denials(h).filter((d) => d.detail.attemptId === attemptId);
+    expect(rows).toHaveLength(2);
+    const missionId = rows[0]?.detail.missionId;
+    const res = await h.call(h.owner.token, 'GET', `/missions/${missionId}`);
+    const holds = res.body.holds.filter((x: { packetId: string }) => x.packetId !== human);
+    expect(holds).toHaveLength(1);
+    expect(holds[0].policyVersion).toBe(rows[1]?.detail.policyVersion);
+    expect(holds[0].reason).toBe(rows[1]?.detail.reason);
+  });
+
+  it('refuses a human packet whose scope the policy cannot check, and checks an empty scope under the packet name', async () => {
+    const { h, policy } = setup();
+    const wildcard = h.mission([{ title: 'wild', scope: ['env:*'] }]);
+    const traversal = h.mission([{ title: 'trav', scope: ['../x'] }]);
+    const empty = h.mission([{ title: 'empty', scope: [] }]);
+    policy.createRule(
+      h.ctx(),
+      ruleInput({
+        effect: 'deny',
+        action: '*',
+        resource: '*',
+        scope: '*',
+        grantee: { kind: null, principalId: null },
+      }),
+    );
+    const runner = await h.runner({ maxConcurrent: 10 });
+    const claim = (await runner.claim()) as Claim;
+    const reasonFor = (packetId: string) =>
+      denials(h).find((d) => d.detail.packetId === packetId)?.detail.reason;
+    expect(reasonFor(wildcard.packetIds[0] ?? '')).toMatch(
+      /^authority: packet .* declares a scope a deny rule cannot be checked against/,
+    );
+    expect(reasonFor(traversal.packetIds[0] ?? '')).toMatch(/^authority: packet .* declares a scope/);
+    // An empty scope is checked under `packet:<id>`, which the wildcard deny covers.
+    expect(reasonFor(empty.packetIds[0] ?? '')).toMatch(/^authority: .*denied by rule/);
+    expect(packetsGranted(claim)).toEqual([]);
+  });
+
+  it('records nothing and still refuses when the authorizing principal row is gone', async () => {
+    const { h, policy, rule, cited } = setup();
+    policy.revokeRule(h.ctx(), rule.id, 1, 'withdrawn');
+    h.db.run('PRAGMA foreign_keys = OFF');
+    h.db.run('DELETE FROM principals WHERE id = ? AND workspace_id = ?', [
+      h.cos.actor.id,
+      TEST_WORKSPACE,
+    ]);
+    const runner = await h.runner();
+    const claim = (await runner.claim()) as Claim;
+    expect(claim.status).toBe(200);
+    expect(packetsGranted(claim)).not.toContain(cited);
+    const rows = denials(h);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.detail.packetId).toBe(cited);
+    expect(receipts(h)).toHaveLength(0);
+  });
+});
+
+describe('claim-time refusals: resource, principal state, live holds and durability', () => {
+  it('refuses a human packet under a deny rule whose resource is concrete', async () => {
+    const { h, policy, human } = setup();
+    policy.createRule(
+      h.ctx(),
+      ruleInput({
+        effect: 'deny',
+        action: '*',
+        resource: 'repo:app',
+        scope: 'env:prod',
+        grantee: { kind: null, principalId: null },
+      }),
+    );
+    const runner = await h.runner({ maxConcurrent: 10 });
+    const claim = (await runner.claim()) as Claim;
+    expect(packetsGranted(claim)).not.toContain(human);
+    expect(reasons(claim)[0]).toMatch(/^authority: denied by rule/);
+  });
+
+  it('refuses a human packet whose authorizer is disabled', async () => {
+    const { h, human } = setup();
+    const runner = await h.runner({ maxConcurrent: 10 });
+    h.db.run(
+      'UPDATE principals SET disabled_at = ? WHERE id = ? AND workspace_id = ?',
+      ['2026-01-01T00:00:00.000Z', h.owner.actor.id, TEST_WORKSPACE],
+    );
+    const claim = (await runner.claim()) as Claim;
+    expect(packetsGranted(claim)).not.toContain(human);
+    expect(reasons(claim)[0]).toBe('authority: the principal is disabled');
+    expect(denials(h).map((d) => d.detail.packetId)).toEqual([human]);
+  });
+
+  it('refuses a human packet whose authorizer is no longer in the workspace, and records no receipt for it', async () => {
+    const { h, human } = setup();
+    const runner = await h.runner({ maxConcurrent: 10 });
+    h.db.run('PRAGMA foreign_keys = OFF');
+    h.db.run('DELETE FROM principals WHERE id = ? AND workspace_id = ?', [
+      h.owner.actor.id,
+      TEST_WORKSPACE,
+    ]);
+    const claim = (await runner.claim()) as Claim;
+    expect(packetsGranted(claim)).not.toContain(human);
+    expect(reasons(claim)).toContainEqual(
+      expect.stringMatching(/^authority: the authorizing principal .* is not in this workspace/),
+    );
+    expect(denials(h).map((d) => d.detail.packetId)).toContain(human);
+    // The authorizer has no row to attribute a receipt to, so the refusal is audited without one.
+    expect(receipts(h)).toHaveLength(0);
+  });
+
+  it('shows a hold only while its refusal stands, with no claim needed to clear it', async () => {
+    const { h, policy, human } = setup();
+    const deny = policy.createRule(
+      h.ctx(),
+      ruleInput({
+        effect: 'deny',
+        action: '*',
+        resource: '*',
+        scope: 'env:prod',
+        grantee: { kind: null, principalId: null },
+      }),
+    ).rule;
+    const runner = await h.runner({ maxConcurrent: 10 });
+    await runner.claim();
+    const attemptId = denials(h).find((d) => d.detail.packetId === human)?.detail.attemptId as string;
+    const missionId = denials(h).find((d) => d.detail.packetId === human)?.detail.missionId as string;
+    expect(
+      (await h.call(h.owner.token, 'GET', `/missions/${missionId}`)).body.holds,
+    ).toHaveLength(1);
+    policy.revokeRule(h.ctx(), deny.id, 1, 'lifted');
+    const read = await h.call(h.owner.token, 'GET', `/missions/${missionId}`);
+    expect(read.body.holds).toEqual([]);
+    expect(attemptId).toBeTruthy();
+  });
+
+  it('clears a hold on a held lease once its resend is granted again', async () => {
+    const { h, policy, cited } = setup();
+    const runner = await h.runner({ maxConcurrent: 10 });
+    const first = (await runner.claim()) as Claim;
+    expect(packetsGranted(first)).toContain(cited);
+    const attempt = first.body.assignments.find((a) => a.packetId === cited) as unknown as {
+      missionId: string;
+    };
+    const missionId = attempt.missionId;
+    const deny = policy.createRule(
+      h.ctx(),
+      ruleInput({
+        effect: 'deny',
+        grantee: { kind: null, principalId: null },
+        scope: 'env:staging',
+      }),
+    ).rule;
+    // The runner has not confirmed the lease, so the next poll tries to resend it, and is refused.
+    const refused = (await runner.claim()) as Claim;
+    expect(packetsGranted(refused)).not.toContain(cited);
+    expect(reasons(refused)).toHaveLength(1);
+    // The branch still holds its lease, so the refusal is a withheld resend, not an offer on hold.
+    const whileHeld = await h.call(h.owner.token, 'GET', `/missions/${missionId}`);
+    expect(whileHeld.body.holds).toEqual([]);
+    policy.revokeRule(h.ctx(), deny.id, 1, 'lifted');
+    const resent = (await runner.claim()) as Claim;
+    expect(packetsGranted(resent)).toContain(cited);
+    const read = await h.call(h.owner.token, 'GET', `/missions/${missionId}`);
+    expect(read.body.holds).toEqual([]);
+  });
+
+  it('keeps the refusal on record when the claim that found it rolls back', async () => {
+    const { h, policy, rule, cited } = setup();
+    const runner = await h.runner({ maxConcurrent: 10 });
+    // Both branches are granted, so the cited one is a held lease the next poll resends.
+    expect(packetsGranted((await runner.claim()) as Claim)).toContain(cited);
+    policy.revokeRule(h.ctx(), rule.id, 1, 'withdrawn');
+    // A new offer is granted after the resend is refused, and its lease write fails, so the claim
+    // rolls back after the refusal was collected.
+    h.mission([{ title: 'fresh', scope: ['env:fresh'] }]);
+    const real = h.db.run.bind(h.db);
+    const spy = vi.spyOn(h.db, 'run').mockImplementation((...args) => {
+      if (args[0].includes('INSERT INTO runner_leases')) {
+        throw new Error('injected lease write failure');
+      }
+      return real(...args);
+    });
+    try {
+      const res = await runner.claim();
+      expect(res.status).toBe(500);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(denials(h).map((d) => d.detail.packetId)).toEqual([cited]);
+    expect(receipts(h)).toHaveLength(1);
   });
 });

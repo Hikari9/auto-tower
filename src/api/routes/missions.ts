@@ -257,8 +257,16 @@ const readMission: RouteSpec = {
       throw new MissionNotFoundError(id);
     }
     // Claim-time authority refusals still holding a branch of this mission, with the reason.
-    const { db } = c.get('deps');
-    return c.json({ mission, holds: authorityHoldsFor(db, workspaceId, id) });
+    const { db, now } = c.get('deps');
+    return c.json({
+      mission,
+      holds: authorityHoldsFor(
+        db,
+        now ?? (() => new Date()),
+        workspaceId,
+        mission,
+      ),
+    });
   }),
 };
 
