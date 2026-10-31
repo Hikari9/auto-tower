@@ -54,24 +54,24 @@ Order of evaluation:
 
 `escalate` is a refusal that the caller may route to a person or delegate. `authorize` returns it only when asked (`escalate: true`), which `routeExpansion` does. It never permits anything.
 
-A grant with no `maxAmount` covers no request that carries an amount, and a grant with one covers no request that omits it. A spend request must state its amount, whatever grants exist. A request names one thing: a `*` in its resource or scope is refused, so a rule can never match it as literal text.
+A grant with no `maxAmount` covers no request that carries an amount, and a grant with one covers no request that omits it. A spend request must state its amount, whatever grants exist. A request names one thing: a `*` or a `..` segment in its resource or scope is refused, so a rule can never match it as literal text and a pattern like `dir/*` cannot be walked out of.
 
 ### Sensitive actions
 
 The first segments of an action name set its category.
 
-| Category               | Matches                                                                                          |
-| ---------------------- | ------------------------------------------------------------------------------------------------ |
-| `spend`                | `spend`, `spend.*`                                                                               |
-| `production_deploy`    | `deploy.production`, `deploy.prod` and anything under them                                       |
-| `security`             | `security.*`                                                                                     |
-| `destructive`          | `destructive.*`, or a last segment of `delete`, `destroy`, `drop`, `purge`, `wipe`, `force-push` |
-| `external_issue_close` | `issue.close`, `issue.close.*`                                                                   |
-| `independent_review`   | `review.independent.*`                                                                           |
-| `cleanup`              | `cleanup.*`                                                                                      |
-| `standard`             | everything else                                                                                  |
+| Category               | Matches                                                                                                                                      |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spend`                | `spend`, `spend.*`                                                                                                                           |
+| `production_deploy`    | a `deploy` or `release` segment with a segment starting `prod`, such as `deploy.production`, `release.production`, `infra.deploy.prod-eu`    |
+| `security`             | `security.*`                                                                                                                                 |
+| `destructive`          | `destructive.*`, or any segment starting `delete`, `destroy`, `drop`, `purge`, `wipe`, `truncate`, `remove`, or `force` together with `push` |
+| `external_issue_close` | `issue.close`, `issue.close.*`                                                                                                               |
+| `independent_review`   | `review.independent.*`                                                                                                                       |
+| `cleanup`              | `cleanup.*`                                                                                                                                  |
+| `standard`             | everything else                                                                                                                              |
 
-Words match as the start of any segment, so `deploy.prod-eu`, `db.drop_table` and `billing.spend.create` are sensitive too. Every category except `standard` and `cleanup` is **sensitive**. A sensitive action is denied unless an active grant names the action, with no wildcard, and names a resource and a scope that are not made only of `*` (`**` counts as bare). A grant of `*` / `*` / `*` allows ordinary work and none of these. Callers choose action names, so a runner cannot relabel a sensitive effect. A name of the form `cleanup.*` is allowed without a grant for a guarded effect, and is never an approval: the router and a Chief of Staff's answer accept only a real rule.
+Words match as the start of any segment, `_` reads as `-`, and a leading `cleanup.` does not hide them: `cleanup.drop-prod-db` is destructive, not cleanup. So `deploy.prod-eu`, `db.drop_table` and `billing.spend.create` are sensitive too. Every category except `standard` and `cleanup` is **sensitive**. A sensitive action is denied unless an active grant names the action, with no wildcard, and names a resource and a scope that are not made only of `*` (`**` counts as bare). A grant of `*` / `*` / `*` allows ordinary work and none of these. Callers choose action names, so a runner cannot relabel a sensitive effect. A name of the form `cleanup.*` whose remaining segments are not sensitive is allowed without a grant for a guarded effect, and is never an approval: the router and a Chief of Staff's answer accept only a real rule.
 
 ### Revocation and expiry
 

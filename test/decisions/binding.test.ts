@@ -63,6 +63,14 @@ describe('packetCovers', () => {
     },
   );
 
+  it.each(['src/.*', 'src/..*', 'src/*.*', 'src/*..*'])(
+    'does not count %s, which could expand to a parent path',
+    (pattern) => {
+      expect(packetCovers(packet('p', [pattern]), 'src/.hidden')).toBe(false);
+      expect(packetCovers(packet('p', ['src/*']), 'src/.hidden')).toBe(true);
+    },
+  );
+
   it('rejects a request that climbs out of the declared subtree', () => {
     const p = packet('p', ['src/*']);
     expect(packetCovers(p, 'src/utils')).toBe(true);
