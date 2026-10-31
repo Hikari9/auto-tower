@@ -23,6 +23,7 @@ Token totals include the orchestrator, every Office executor, reviewer and plann
 | Phase | Landed (UTC) | office/v1 merge | Office revisions | Gate |
 | --- | --- | --- | --- | --- |
 | 0+1 | 2026-10-31T05:32Z | `91c73ba` | T1 R1, T2 R2, T3 R4 (`0260a5f`) | RECHECK (CoS policy-ref bypass) then APPROVED; 846 tests green |
+| 3 | 2026-10-31T05:41Z | `04839b8` | T6 R7 (`da0d13a`) | RECHECK (required-link downgrade bypass, mission-link SSRF, poll starvation) then APPROVED; 1007 tests green |
 
 ## Notes
 
