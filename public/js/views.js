@@ -329,7 +329,7 @@ export function renderMission(ctx, params) {
           ctx.api.get(`/missions/${id}/activity`),
           ctx.api.get('/decisions?status=open&limit=200'),
         ]);
-      return { mission, holds, links, activity, decisions };
+      return { mission, holds: holds ?? [], links, activity, decisions };
     },
     ({ mission, holds, links, activity, decisions }) => {
       const packetsById = new Map(mission.packets.map((p) => [p.id, p]));
