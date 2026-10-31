@@ -167,16 +167,19 @@ function denyApplies(rule: PolicyRule, principalId: string, missionId: string) {
 }
 
 /**
- * A scope a deny rule can be matched against: literal, with no wildcard, traversal, or whitespace,
- * control or format characters (so padding such as a zero-width space cannot hide it from a rule).
+ * A scope a deny rule can be matched against. The rules match literal names, so only a name in
+ * printable lowercase ASCII, with no wildcard or traversal, can be checked. Any other spelling is
+ * refused as uncheckable: spacing (the fleet reads `cap: docker` as `cap:docker`, which a literal
+ * rule would not match), uppercase, homoglyphs, combining or invisible characters, and padding.
  */
-const UNCHECKABLE_CHARS = /[\s\p{Cc}\p{Cf}]/u;
+const CHECKABLE_SCOPE = /^[\x21-\x7e]+$/;
 
 function checkableScope(scope: string): boolean {
   return (
+    CHECKABLE_SCOPE.test(scope) &&
+    !/[A-Z]/.test(scope) &&
     !scope.includes('*') &&
-    !hasTraversal(scope) &&
-    !UNCHECKABLE_CHARS.test(scope)
+    !hasTraversal(scope)
   );
 }
 

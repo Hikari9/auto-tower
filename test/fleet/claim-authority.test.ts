@@ -760,6 +760,11 @@ describe('claim-time authority: scope spelling', () => {
   it.each([
     ['trailing zero-width space', 'env:prod\u200b'],
     ['trailing no-break space', 'env:prod\u00a0'],
+    ['trailing soft hyphen', 'env:prod\u00ad'],
+    ['trailing zero-width joiner', 'env:prod\u200d'],
+    ['internal space', 'env:my prod'],
+    ['uppercase', 'ENV:PROD'],
+    ['cyrillic homoglyph', 'env:\u0440rod'],
   ])('refuses a human packet whose scope has a %s', async (_label, scope) => {
     const { h, policy } = setup();
     const padded = h.mission([{ title: 'hidden', scope: [scope] }]);
@@ -773,7 +778,10 @@ describe('claim-time authority: scope spelling', () => {
         grantee: { kind: null, principalId: null },
       }),
     );
-    const runner = await h.runner({ maxConcurrent: 10 });
+    const runner = await h.runner({
+      maxConcurrent: 10,
+      capabilities: ['docker'],
+    });
     const claim = (await runner.claim()) as Claim;
     expect(packetsGranted(claim)).not.toContain(padded.packetIds[0]);
     expect(reasons(claim)).toContainEqual(

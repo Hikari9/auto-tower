@@ -174,8 +174,9 @@ that principal still stands behind it.
   action is `packet.claim` or a wildcard that
   matches it, its mission is any or this mission, and its scope matches one of the packet's scopes. Its
   resource is not compared, since a packet names none. A packet with no scope is checked under its own
-  name, `packet:<id>`, so only a wildcard scope rule covers it. A packet whose scope contains `*` or `..`
-  is refused, since the rules cannot check it. A missing allow rule is not a refusal, because a human's
+  name, `packet:<id>`, so only a wildcard scope rule covers it. A packet whose scope is not printable lowercase ASCII, or contains `*` or `..`, is refused, since
+  the rules match literal ASCII names. Spacing is refused too: the fleet reads `cap: docker` as `cap:docker`,
+  which a literal rule would not match. A missing allow rule is not a refusal, because a human's
   authorization needs none.
 
 A scopeless packet (`scope: []`) authorized by a human is evaluated under `packet:<id>`. A scope-specific
