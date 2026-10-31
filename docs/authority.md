@@ -54,7 +54,7 @@ Order of evaluation:
 
 `escalate` is a refusal that the caller may route to a person or delegate. `authorize` returns it only when asked (`escalate: true`), which `routeExpansion` does. It never permits anything.
 
-A grant with no `maxAmount` covers no request that carries an amount.
+A grant with no `maxAmount` covers no request that carries an amount, and a grant with one covers no request that omits it. A spend request must state its amount, whatever grants exist. A request names one thing: a `*` in its resource or scope is refused, so a rule can never match it as literal text.
 
 ### Sensitive actions
 
@@ -71,7 +71,7 @@ The first segments of an action name set its category.
 | `cleanup`              | `cleanup.*`                                                                                      |
 | `standard`             | everything else                                                                                  |
 
-Every category except `standard` and `cleanup` is **sensitive**. A sensitive action is denied unless an active grant names the action, with no wildcard, and names a resource and a scope that are not a bare `*`. A grant of `*` / `*` / `*` allows ordinary work and none of these. Callers choose action names, so a runner cannot relabel a sensitive effect.
+Words match as the start of any segment, so `deploy.prod-eu`, `db.drop_table` and `billing.spend.create` are sensitive too. Every category except `standard` and `cleanup` is **sensitive**. A sensitive action is denied unless an active grant names the action, with no wildcard, and names a resource and a scope that are not made only of `*` (`**` counts as bare). A grant of `*` / `*` / `*` allows ordinary work and none of these. Callers choose action names, so a runner cannot relabel a sensitive effect. A name of the form `cleanup.*` is allowed without a grant for a guarded effect, and is never an approval: the router and a Chief of Staff's answer accept only a real rule.
 
 ### Revocation and expiry
 
@@ -118,15 +118,15 @@ A one-off approval of a decision never creates a grant. A CoS answer does not co
 
 `routeExpansion(request)` settles a request that goes beyond what a mission already has. The requester is a principal. A runner or provider can ask. It can never approve.
 
-| Tier | Condition                                                                                                                                                                                  | Outcome                                                                              |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
-| 1    | In approved scope. The request's scope matches the scope of an authorized sibling packet, the risk is no higher than the mission's, and the action is not sensitive and carries no amount. | `proceed`. No decision, no change.                                                   |
-| 2    | A Chief of Staff asks and a current, matching grant held by that principal covers the request.                                                                                             | `approved`. The packet is authorized as that principal, citing the policy reference. |
-| 2    | A runner or provider asks and a delegated grant for Chief of Staff would cover it.                                                                                                         | A decision raised for a Chief of Staff.                                              |
-| 3    | Anything else: no covering grant, an expired or revoked one, a sensitive or destructive action without a named grant, a limit exceeded.                                                    | A decision raised for a person.                                                      |
-| -    | A deny rule, an unknown or disabled requester.                                                                                                                                             | `denied`. No decision. Nobody can approve past it.                                   |
+| Tier | Condition                                                                                                                                                                                                                                                                                                   | Outcome                                                                              |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| 1    | In approved scope. The request's scope matches the scope of an authorized sibling packet, every scope the target packet declares lies inside it, the risk is no higher than the mission's, and the action is not sensitive, not cleanup and carries no amount. A scope with a `..` segment never qualifies. | `proceed`. No decision, no change.                                                   |
+| 2    | A Chief A Chief of Staff asks, a current, matching grant held by that principal covers the request, and the target packet declares a scope that covers the requested scope.                                                                                                                                 | `approved`. The packet is authorized as that principal, citing the policy reference. |
+| 2    | A runner A runner or provider asks, a delegated grant for Chief of Staff would cover it, and the packet declares a covering scope.                                                                                                                                                                          | A decision raised for a Chief of Staff.                                              |
+| 3    | Anything else: no covering grant, an expired or revoked one, a sensitive or destructive action without a named grant, a limit exceeded.                                                                                                                                                                     | A decision raised for a person.                                                      |
+| -    | A deny rule, an unknown or disabled requester.                                                                                                                                                                                                                                                              | `denied`. No decision. Nobody can approve past it.                                   |
 
-Tier 1 is judged from the mission's own data. A packet cannot vouch for its own scope, a scope of `*` does not count, and nothing the requester says about scope is taken on trust.
+Tiers 1 and 2 are judged against the mission's own data. A packet cannot vouch for its own scope, a scope of `*` does not count, and a claim about scope is checked against what the packet declared. A packet that declares no scope is never approved by a Chief of Staff. It goes to a person.
 
 **Confidence is advisory.** The request may carry `advisory.confidencePercent`. It is stored with the decision for the answerer to read. It is not an input to evaluation, so 100 never authorizes and 0 never blocks.
 
@@ -155,6 +155,10 @@ A decision carries the fields the spec lists:
 
 The inbox lists open items by urgency, then age, with answered items after.
 
+### Who raises a decision
+
+`POST /decisions` is open to a person and to a Chief of Staff. Only a person may choose `requiredAuthority`, so a request from anyone else is held to a person (`403` otherwise), and a Chief of Staff cannot raise a decision for itself to answer. For anyone but a person, the choices have fixed meanings: `approve` resumes and no other choice does, whatever the request said. `routeExpansion` sets `requiredAuthority` itself, and code that calls `decisions.raise` must do the same and never pass a caller's claim.
+
 ### Deduplication
 
 An open decision with the same dedupe key absorbs a new request: the new branches are linked to it and no second item is created. The key must name the same subject. If its category or request differs, the call fails with `409 dedupe_conflict`, so one request cannot hang a branch on a decision about something else. `routeExpansion` derives its key from the action, resource, scope, risk and amount, so branches that need the same permission share one question. An answered item no longer absorbs requests.
@@ -163,9 +167,9 @@ An open decision with the same dedupe key absorbs a new request: the new branche
 
 `POST /decisions/:id/answers` takes `{ version, choice, note? }`.
 
-- **Who.** A human may answer any decision. A Chief of Staff may answer only a decision raised for one that carries a request, and only while a current grant covers that request for every mission the decision is linked to. That is checked at answer time. Runner and provider principals get `403`, and their tokens do not carry `decision:write`.
+- **Who.** A human may answer any decision. A Chief of Staff may answer only a decision raised for one that carries a request, and only while a current grant covers that request for every mission the decision is linked to. That is checked at answer time, including that each linked packet declares a scope covering the request. Runner and provider principals get `403`, and their tokens do not carry `decision:write`.
 - **Versions.** Answers carry a version. The highest version is effective, whatever order they arrive in. A lower version that arrives late is recorded and has no effect. The same version with the same content is a replay. The same version with different content is `409 answer_conflict`. Answers cannot be edited or deleted.
-- **Resuming.** An effective answer whose choice `resumes` authorizes each linked packet that is still pending, as the answerer, citing `decision:<id>@<version>` and, for a Chief of Staff, the policy reference. It touches those packets and no others. A packet that is no longer waiting, or whose mission is locked, is `skipped` with a reason, and the rest still resume. The scheduler then dispatches the resumed packets on its next tick.
+- **Resuming.** An effective answer whose choice `resumes` authorizes each linked packet that is still pending, as the answerer, citing `decision:<id>@<version>` and, for a Chief of Staff, the policy reference. It touches those packets and no others. A packet that is no longer waiting, or whose mission is locked, is `skipped` with a reason, and the rest still resume. Each attempt runs under a savepoint, so a refused one leaves nothing in the mission's log. The scheduler then dispatches the resumed packets on its next tick.
 - **Declining.** A non-resuming answer marks the links `declined` and changes nothing in the mission. A later answer at a higher version can still approve.
 - **Limit.** Authorizing a packet is an event in the mission's log and is not retracted. If a higher-version decline arrives after a lower-version approval already resumed a branch, the decision record shows the decline and the branch stays authorized. Order of arrival can change which branches resumed. It cannot change which answer is effective.
 
@@ -208,13 +212,15 @@ All routes need a bearer token with the scope shown. Errors use the shared `{ er
 | `GET /decisions/:id/history`                                 | `decision:read`               | Audit events for one decision.                                        |
 | `POST /expansions`                                           | `decision:write`              | Settle an expansion request at its tier. The caller is the requester. |
 
-A rule body names `grantee` and `limits` as nested objects, for example `{"action":"deploy.staging","resource":"repo:app","scope":"env:staging","maxRisk":"medium","grantee":{"kind":"chief_of_staff"},"limits":{"maxAmount":500},"expiresAt":"2026-12-31T00:00:00Z"}`. Unknown fields are rejected.
+A rule body names `grantee` and `limits` as nested objects, for example `{"action":"deploy.staging","resource":"repo:app","scope":"env:staging","maxRisk":"medium","grantee":{"kind":"chief_of_staff"},"limits":{"maxAmount":500},"expiresAt":"2026-12-31T00:00:00Z"}`. Unknown fields are rejected. `expiresAt` needs a time zone (`Z` or an offset). A value without one would be read in the host's zone, so it is refused.
 
 ## Audit
 
 The `policy` event stream holds every authority change: `policy.rule.created`, `.amended`, `.revoked`, and `policy.proposal.created`, `.resolved`. Each event carries the full rule or proposal as it became, the actor, the correlation id and the policy version. `events` rejects update and delete, so history cannot be rewritten through the SQL interface. A decision's stream holds `decision.created`, `decision.linked` and `decision.answered`, and each resumed packet records a `packet.authorized` event in its mission citing the decision. `policy.rebuildProjection(workspace)` rebuilds rules, proposals and the version from the stream alone.
 
 ## Not covered here
+
+- **The mission routes can still authorize a packet.** `POST /missions/:id/work-packets/:packetId/authorize` accepts a Chief of Staff token with any non-empty `policyRefs`, and the core does not evaluate them. A Chief of Staff can therefore authorize a pending packet there without a grant, around the tiers above. Closing it means evaluating policy inside `authorizePacketDecision` in `src/core`, or limiting that route to humans, which is outside this task's scope. Until then the tiers bind only callers that use `routeExpansion`, `/expansions` and the inbox.
 
 - Hash-chaining the log is deferred (see `DEFERRED.md`). Someone with direct file access can still edit the database.
 - A decline that arrives after a resume does not un-authorize the packet (see Answering).
