@@ -1,5 +1,4 @@
 import { MissionNotFoundError } from '../../core/errors.js';
-import { missionForViewer } from '../../fleet/broker.js';
 import {
   parseAddDependency,
   parseAddPacket,
@@ -8,6 +7,7 @@ import {
   parseReject,
   parseVersionOnly,
 } from '../../core/inputs.js';
+import { missionForViewer } from '../../fleet/broker.js';
 import type { RouteSpec } from '../app.js';
 import {
   callerOf,
