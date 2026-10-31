@@ -35,6 +35,21 @@ Items here are real, planned, and intentionally not done in Phase 0. Each has an
 - **Webhook endpoints.** No webhook receiver exists. It arrives with the GitHub provider (T6), with signature verification and replay protection.
 - **Domain tables.** Missions, decisions, policy grants, runners, and issue links arrive in T2 through T7.
 
+## Real Auto-Office engine on a subscription-backed machine
+
+**Status:** Deferred. The adapter (`src/adapters/office/`) and the runner (`src/runner/`) are tested against a fake engine and a stubbed process runner. Nothing has run a real Auto-Office engine.
+
+**Why it matters:** The contract is only proven when a real run returns a receipt that Tower can read. Three things are unverified: the `office start` argv, the receipt JSON, and the run's behaviour under a subscription account.
+
+**Activation steps:**
+
+1. **Get explicit approval.** A real run uses a subscription account and talks to a deployed Tower. Name the machine, the account, and the Tower origin before running anything.
+2. **Close the receipt gap.** `office start --json` prints a run record today, not the `tower.office.v1` receipt that `parseOfficeReceipt` expects. Add an Office-side emitter, or a shim that reads the run and writes the receipt, then test it against a throwaway repository.
+3. **Verify the argv.** Run `buildOfficeArgv` output by hand against that build. Confirm `--no-prs`, `--end-state ask` and `--blast-radius repo` do what they claim, and that the goal argument is taken as text.
+4. **Install the runner.** On the machine, register with `tower-runner register` using a fresh enrollment token from a human. Pin the version and digest the enrollment expects. Keep the state file owner-only.
+5. **Run one packet end to end.** Start `tower-runner run` against a preview Tower. Confirm the lease, progress, receipt, and ingestion. Check that a high-risk mission is not completed on the engine's self-report.
+6. **Roll back.** Stop the runner, quarantine it from Tower, and release its leases with `POST /runners/leases/:id/release`.
+
 ## GitHub App and token provisioning, and public webhook delivery (T6)
 
 **Status:** Deferred. The provider, the sync configuration, the guard and the webhook receiver are built and tested against a fake. Nothing has been registered with GitHub, no credential exists, and no public endpoint is exposed. This supersedes the earlier "Webhook endpoints" line above: the receiver now exists, and it stays off until a host opts in.

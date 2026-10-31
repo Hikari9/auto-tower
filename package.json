@@ -14,7 +14,11 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "test": "vitest run",
-    "check": "pnpm typecheck && pnpm lint && pnpm test"
+    "check": "pnpm typecheck && pnpm lint && pnpm test",
+    "runner": "tsx bin/tower-runner.ts"
+  },
+  "bin": {
+    "tower-runner": "./bin/tower-runner.ts"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.5",

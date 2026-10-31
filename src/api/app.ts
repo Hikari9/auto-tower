@@ -1,13 +1,21 @@
 import type { Context } from 'hono';
 import { Hono } from 'hono';
+import { createOfficeReviewGuard } from '../adapters/office/ledger.js';
 import {
   type AuthVariables,
   authenticate,
   requireScopes,
 } from '../auth/middleware.js';
 import type { Scope } from '../auth/principals.js';
-import type { Core } from '../core/index.js';
+import { createCompletionGuardRegistry } from '../core/guards.js';
+import { type Core, createCore } from '../core/index.js';
 import type { Authority } from '../decisions/index.js';
+import {
+  createFleet,
+  createPool,
+  type Fleet,
+  type FleetConfig,
+} from '../fleet/index.js';
 import type { IssueProvider, IssueService } from '../issues/index.js';
 import type { SqlDatabase } from '../storage/database.js';
 import { errorBody, handleError } from './errors.js';
@@ -16,6 +24,7 @@ import { healthRoute } from './routes/health.js';
 import { issueRoutes, issuesOf } from './routes/issues.js';
 import { missionRoutes } from './routes/missions.js';
 import { policyRoutes } from './routes/policy.js';
+import { runnerRoutes } from './routes/runners.js';
 import { type WebhookSettings, webhookRoutes } from './routes/webhooks.js';
 import { workRoutes } from './routes/work.js';
 
@@ -41,6 +50,7 @@ export const ROUTES: readonly RouteSpec[] = [
   ...workRoutes,
   ...policyRoutes,
   ...decisionRoutes,
+  ...runnerRoutes,
   ...issueRoutes,
 ];
 
@@ -51,6 +61,10 @@ export interface AppDependencies {
   core?: Core;
   /** Policy store, Decision Inbox and tier routing. Built over `db` and the core's guards when absent. */
   authority?: Authority;
+  /** Runner enrollment, leases and fencing. Built over `db` and the core when absent. */
+  fleet?: Fleet;
+  /** Supported client range, lease timing and backoff. Used only when the app builds the fleet. */
+  fleetConfig?: FleetConfig;
   /** Issue links, sync and reconciliation. Built over the core, authority and `issueProviders` when absent. */
   issues?: IssueService;
   /** Provider adapters by id, such as the GitHub provider. With none, links are stored and nothing is fetched. */
@@ -62,15 +76,47 @@ export interface AppDependencies {
   webhooks?: WebhookSettings;
 }
 
+/** The core's default completion guards, plus the Auto-Office high-risk review gate. */
+function officeGuards(db: SqlDatabase) {
+  const guards = createCompletionGuardRegistry();
+  guards.register(createOfficeReviewGuard(db));
+  return guards;
+}
+
 export function createApp(
   deps: AppDependencies,
   routes: readonly RouteSpec[] = ROUTES,
 ): Hono<AppEnv> {
+  // The fleet's broker is the scheduler's runner pool, so a core built here dispatches to real runners.
+  const core =
+    deps.core ??
+    createCore({
+      db: deps.db,
+      guards: officeGuards(deps.db),
+      ...(deps.now === undefined ? {} : { clock: deps.now }),
+      pool: createPool({
+        db: deps.db,
+        ...(deps.now === undefined ? {} : { now: deps.now }),
+        ...(deps.fleetConfig === undefined ? {} : { config: deps.fleetConfig }),
+      }),
+    });
+  const resolved: AppDependencies = {
+    ...deps,
+    core,
+    fleet:
+      deps.fleet ??
+      createFleet({
+        db: deps.db,
+        core,
+        ...(deps.now === undefined ? {} : { now: deps.now }),
+        ...(deps.fleetConfig === undefined ? {} : { config: deps.fleetConfig }),
+      }),
+  };
   const app = new Hono<AppEnv>();
   app.onError(handleError);
   app.notFound((c) => c.json(errorBody('not_found', 'Route not found'), 404));
   app.use('*', async (c, next) => {
-    c.set('deps', deps);
+    c.set('deps', resolved);
     // Wires the required-issues completion guard before any route can complete a mission.
     issuesOf(c);
     await next();

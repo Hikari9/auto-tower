@@ -1,4 +1,6 @@
 import type { Context } from 'hono';
+import { createOfficeReviewGuard } from '../../adapters/office/ledger.js';
+import { RiskLoweringRefusedError } from '../../core/commands.js';
 import {
   type CompletionGuardFailedError,
   CoreError,
@@ -6,6 +8,7 @@ import {
   MissionNotFoundError,
   ValidationError,
 } from '../../core/errors.js';
+import { createCompletionGuardRegistry } from '../../core/guards.js';
 import { type Core, createCore } from '../../core/index.js';
 import {
   parseActivity,
@@ -17,6 +20,8 @@ import {
   parseUpdateMission,
 } from '../../core/inputs.js';
 import type { CommandContext, CommandResult } from '../../core/service.js';
+import { authorityHoldsFor } from '../../fleet/broker.js';
+import { createPolicyService } from '../../policy/service.js';
 import type { AppDependencies, AppEnv, RouteSpec } from '../app.js';
 
 const MAX_BODY_BYTES = 256 * 1024;
@@ -47,8 +52,11 @@ export function coreOf(c: Context<AppEnv>): Core {
   }
   let core = cores.get(deps);
   if (core === undefined) {
+    const guards = createCompletionGuardRegistry();
+    guards.register(createOfficeReviewGuard(deps.db));
     core = createCore({
       db: deps.db,
+      guards,
       ...(deps.now === undefined ? {} : { clock: deps.now }),
     });
     cores.set(deps, core);
@@ -131,6 +139,7 @@ export async function readJson(c: Context<AppEnv>): Promise<unknown> {
 }
 
 const STATUS_BY_CODE: Readonly<Record<string, 400 | 403 | 404 | 409 | 422>> = {
+  risk_lowering_refused: 403,
   validation_failed: 400,
   mission_not_found: 404,
   packet_not_found: 404,
@@ -242,13 +251,64 @@ const readMission: RouteSpec = {
   access: { scopes: ['mission:read'] },
   handler: guarded((c) => {
     const id = c.req.param('id') ?? '';
-    const mission = coreOf(c).missions.getMission(callerOf(c).workspaceId, id);
+    const { workspaceId } = callerOf(c);
+    const mission = coreOf(c).missions.getMission(workspaceId, id);
     if (mission === undefined) {
       throw new MissionNotFoundError(id);
     }
-    return c.json({ mission });
+    // Claim-time authority refusals still holding a branch of this mission, with the reason.
+    const { db, now } = c.get('deps');
+    return c.json({
+      mission,
+      holds: authorityHoldsFor(
+        db,
+        now ?? (() => new Date()),
+        workspaceId,
+        mission,
+      ),
+    });
   }),
 };
+
+/**
+ * Records a refused risk lowering as a deny receipt. The command rolled back, so the receipt is
+ * written here, on its own.
+ */
+function recordRiskRefusal(
+  c: Context<AppEnv>,
+  workspaceId: string,
+  actorId: string,
+  missionId: string,
+  error: RiskLoweringRefusedError,
+): void {
+  const { db, now } = c.get('deps');
+  try {
+    const policyVersion = createPolicyService({ db }).policyVersion(
+      workspaceId,
+    );
+    db.run(
+      `INSERT INTO policy_receipts (workspace_id, principal_id, action, resource, scope, risk, mission_id,
+       effect, code, reason, rule_id, rule_version, policy_version, evaluated_at)
+     VALUES (?, ?, 'mission.risk.lower', ?, 'risk', ?, ?, 'deny', ?, ?, NULL, NULL, ?, ?)`,
+      [
+        workspaceId,
+        actorId,
+        `mission:${missionId}`,
+        error.from,
+        missionId,
+        error.code,
+        error.message,
+        policyVersion,
+        (now ?? (() => new Date()))().toISOString(),
+      ],
+    );
+  } catch (auditError) {
+    // The refusal still stands. Its receipt could not be written, which is logged without the body.
+    console.error(
+      `risk refusal receipt not recorded: ${auditError instanceof Error ? auditError.name : 'error'}`,
+    );
+  }
+}
 
 const updateMission: RouteSpec = {
   method: 'patch',
@@ -256,15 +316,24 @@ const updateMission: RouteSpec = {
   access: { scopes: ['mission:write'] },
   handler: guarded(async (c) => {
     const { expectedVersion, changes } = parseUpdateMission(await readJson(c));
-    return respond(
-      c,
-      coreOf(c).missions.updateMission(
-        commandContext(c),
-        c.req.param('id') ?? '',
-        expectedVersion,
-        changes,
-      ),
-    );
+    const ctx = commandContext(c);
+    const missionId = c.req.param('id') ?? '';
+    try {
+      return respond(
+        c,
+        coreOf(c).missions.updateMission(
+          ctx,
+          missionId,
+          expectedVersion,
+          changes,
+        ),
+      );
+    } catch (error) {
+      if (error instanceof RiskLoweringRefusedError) {
+        recordRiskRefusal(c, ctx.workspaceId, ctx.actor.id, missionId, error);
+      }
+      throw error;
+    }
   }),
 };
 
