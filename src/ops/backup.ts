@@ -222,6 +222,7 @@ export function restoreBackup(
   db: SqlDatabase,
   backup: BackupFile,
   migrations: readonly Migration[],
+  options: { allowTokenDigests?: boolean } = {},
 ): RestoreResult {
   if (digestOf(backup.tables) !== backup.digest) {
     throw new BackupError(
@@ -272,10 +273,15 @@ export function restoreBackup(
         `The backup holds ${name}, which a backup never contains`,
       );
     }
-    if (CREDENTIAL_TABLES.includes(name) && !backup.includesTokenDigests) {
+    // The operator decides whether credentials come back, not the file. A file's own header is as
+    // editable as its tables, so a flag inside it proves nothing.
+    if (
+      CREDENTIAL_TABLES.includes(name) &&
+      options.allowTokenDigests !== true
+    ) {
       throw new BackupError(
         'invalid_file',
-        `The backup holds ${name} but says it has no token digests`,
+        `The backup holds ${name}. Restoring credentials needs the explicit option (--restore-token-digests), whatever the file says`,
       );
     }
     if (!known.has(name)) {

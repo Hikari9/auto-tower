@@ -1,6 +1,6 @@
 import type { Actor } from '../core/types.js';
 import type { SqlDatabase } from '../storage/database.js';
-import { HALT_REASON_MAX, HaltForbiddenError } from './halt.js';
+import { cleanReason, HaltForbiddenError } from './halt.js';
 
 /**
  * Credential revocation for an incident. Tower has no route that revokes a token or disables a
@@ -24,9 +24,6 @@ function requireHuman(actor: Actor): void {
     throw new HaltForbiddenError(actor.kind);
   }
 }
-
-const cleanReason = (reason: string | null | undefined): string | null =>
-  reason?.trim().slice(0, HALT_REASON_MAX) || null;
 
 function record(
   db: SqlDatabase,

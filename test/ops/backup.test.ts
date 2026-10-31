@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { runOpsCli } from '../../src/ops/cli.js';
+import { createNewFile, runOpsCli } from '../../src/ops/cli.js';
 import {
   BackupError,
   exportBackup,
@@ -190,7 +190,7 @@ describe('backup and restore drill', () => {
     );
 
     const fresh = openSqliteDatabase(join(tempDir(), 'y.sqlite'));
-    restoreBackup(fresh, withTokens, migrations());
+    restoreBackup(fresh, withTokens, migrations(), { allowTokenDigests: true });
     expect(
       fresh.get<{ n: number }>('SELECT COUNT(*) AS n FROM api_tokens')?.n,
     ).toBeGreaterThan(0);
@@ -250,22 +250,52 @@ describe('a backup does not stop the server writing', () => {
     }
   });
 
-  it('can still be taken from a store whose guard refuses writes', async () => {
+  it('can still be taken from a store whose guard is tripped and refuses writes', async () => {
     const { world } = await populated();
-    const { guardStorage } = await import('../../src/ops/index.js');
-    const guarded = guardStorage(openSqliteDatabase(world.dbPath));
+    const { guardStorage, StorageQuotaError } = await import(
+      '../../src/ops/index.js'
+    );
+    const inner = openSqliteDatabase(world.dbPath);
+    const failing = {
+      ...inner,
+      run: (
+        sql: string,
+        params?: readonly (string | number | bigint | null)[],
+      ) => {
+        if (/^\s*(insert|update|delete)/i.test(sql)) {
+          throw Object.assign(new Error('database or disk is full'), {
+            errcode: 13,
+          });
+        }
+        return inner.run(sql, params);
+      },
+    } as typeof inner;
+    const guarded = guardStorage(failing);
     try {
-      expect(() =>
-        guarded.run('UPDATE workspaces SET name = name'),
-      ).not.toThrow();
-      guarded.quota.reset();
+      expect(() => guarded.run('UPDATE workspaces SET name = name')).toThrow(
+        StorageQuotaError,
+      );
+      expect(guarded.quota.tripped).toBe(true);
+      // No reset: a tripped store still gives up its state, which is what an operator needs first.
       expect(
         exportBackup(guarded).tables.missions?.rows.length,
       ).toBeGreaterThan(0);
+      expect(guarded.quota.tripped).toBe(true);
     } finally {
       guarded.close();
       world.close();
     }
+  });
+});
+
+describe('createNewFile', () => {
+  it('makes an empty owner-only file, and refuses to touch one that exists', () => {
+    const path = join(tempDir(), 'x.sqlite');
+    createNewFile(path);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    writeFileSync(path, 'someone else wrote this');
+    expect(() => createNewFile(path)).toThrow(/EEXIST/);
+    expect(readFileSync(path, 'utf8')).toBe('someone else wrote this');
   });
 });
 
@@ -355,20 +385,34 @@ describe('a backup edited and re-digested by someone who can write the file', ()
     return edited;
   };
 
-  it('cannot plant a credential in a file that says it holds no token digests', async () => {
+  it('cannot plant a credential, whatever the file says about itself', async () => {
     const { world } = await populated();
     const plain = exportBackup(world.db);
     const withTokens = exportBackup(world.db, { includeTokenDigests: true });
-    const planted = redigest({
-      ...plain,
-      tables: { ...plain.tables, api_tokens: withTokens.tables.api_tokens },
-    } as typeof plain);
-    expect(readBackup(JSON.stringify(planted))).toBeDefined();
-    const fresh = openSqliteDatabase(join(tempDir(), 'planted.sqlite'));
-    expect(() => restoreBackup(fresh, planted, migrations())).toThrow(
-      /api_tokens but says it has no token digests/,
-    );
-    fresh.close();
+    for (const claim of [false, true]) {
+      // The forger edits the header as freely as the tables: flipping the flag changes nothing.
+      const planted = redigest({
+        ...plain,
+        includesTokenDigests: claim,
+        tables: { ...plain.tables, api_tokens: withTokens.tables.api_tokens },
+      } as typeof plain);
+      const fresh = openSqliteDatabase(
+        join(tempDir(), `planted-${claim}.sqlite`),
+      );
+      expect(
+        () => restoreBackup(fresh, planted, migrations()),
+        String(claim),
+      ).toThrow(/explicit option/);
+      expect(
+        fresh.get<{ n: number }>(
+          "SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'api_tokens'",
+        )?.n,
+      ).toBe(1);
+      expect(
+        fresh.get<{ n: number }>('SELECT COUNT(*) AS n FROM api_tokens')?.n,
+      ).toBe(0);
+      fresh.close();
+    }
     world.close();
   });
 
@@ -397,7 +441,7 @@ describe('a backup edited and re-digested by someone who can write the file', ()
     world.close();
   });
 
-  it('still restores a file that says it holds token digests, when it does', async () => {
+  it('restores token digests when the operator asks for them', async () => {
     const { world } = await populated();
     const fresh = openSqliteDatabase(join(tempDir(), 'ok.sqlite'));
     expect(
@@ -405,7 +449,11 @@ describe('a backup edited and re-digested by someone who can write the file', ()
         fresh,
         exportBackup(world.db, { includeTokenDigests: true }),
         migrations(),
+        { allowTokenDigests: true },
       ).rows,
+    ).toBeGreaterThan(0);
+    expect(
+      fresh.get<{ n: number }>('SELECT COUNT(*) AS n FROM api_tokens')?.n,
     ).toBeGreaterThan(0);
     fresh.close();
     world.close();
@@ -541,6 +589,58 @@ describe('pnpm ops', () => {
     const good = join(dir, 'good.json');
     writeFileSync(good, JSON.stringify(backup));
     expect(run(['restore', '--from', good, '--db', target]).code).toBe(0);
+    world.close();
+  });
+
+  it('restores token digests only with --restore-token-digests', async () => {
+    const { world } = await populated();
+    const dir = tempDir();
+    const file = join(dir, 'with-tokens.json');
+    expect(
+      run([
+        'backup',
+        '--db',
+        world.dbPath,
+        '--out',
+        file,
+        '--include-token-digests',
+      ]).code,
+    ).toBe(0);
+    const without = join(dir, 'a.sqlite');
+    const refused = run(['restore', '--from', file, '--db', without]);
+    expect(refused.code).toBe(1);
+    expect(refused.err).toMatch(/--restore-token-digests/);
+    expect(existsSync(without)).toBe(false);
+    const withIt = join(dir, 'b.sqlite');
+    expect(
+      run([
+        'restore',
+        '--from',
+        file,
+        '--db',
+        withIt,
+        '--restore-token-digests',
+      ]).code,
+    ).toBe(0);
+    const copy = openSqliteDatabase(withIt);
+    expect(
+      copy.get<{ n: number }>('SELECT COUNT(*) AS n FROM api_tokens')?.n,
+    ).toBeGreaterThan(0);
+    copy.close();
+    world.close();
+  });
+
+  it('never deletes a database it did not create, even if one appears at the path first', async () => {
+    const { world } = await populated();
+    const dir = tempDir();
+    const file = join(dir, 'b.json');
+    expect(run(['backup', '--db', world.dbPath, '--out', file]).code).toBe(0);
+    const target = join(dir, 'live.sqlite');
+    writeFileSync(target, 'a database somebody else made');
+    const result = run(['restore', '--from', file, '--db', target]);
+    expect(result.code).toBe(1);
+    expect(result.err).toMatch(/Refusing to restore over/);
+    expect(readFileSync(target, 'utf8')).toBe('a database somebody else made');
     world.close();
   });
 

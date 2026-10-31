@@ -51,6 +51,10 @@ export class WorkspaceHaltedError extends Error {
 
 export const HALT_REASON_MAX = 500;
 
+/** A reason as it is stored: trimmed, bounded, and null when blank. */
+export const cleanReason = (reason: string | null | undefined): string | null =>
+  reason?.trim().slice(0, HALT_REASON_MAX) || null;
+
 interface HaltRow {
   halted: number;
   reason: string | null;
@@ -107,7 +111,7 @@ function change(
   if (input.actor.kind !== 'human') {
     throw new HaltForbiddenError(input.actor.kind);
   }
-  const reason = input.reason?.trim().slice(0, HALT_REASON_MAX) || null;
+  const reason = cleanReason(input.reason);
   const at = input.now.toISOString();
   db.transaction((tx) => {
     tx.run(

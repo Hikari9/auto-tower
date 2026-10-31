@@ -3,6 +3,7 @@ import type { Context } from 'hono';
 import { getPrincipal } from '../../auth/principals.js';
 import type { Actor } from '../../core/types.js';
 import type { IssueProvider } from '../../issues/index.js';
+import { StorageQuotaError } from '../../ops/quota.js';
 import type { AppEnv, RouteSpec } from '../app.js';
 import { errorBody } from '../errors.js';
 import { issuesOf } from './issues.js';
@@ -124,17 +125,27 @@ export const webhookRoutes: readonly RouteSpec[] = [
         );
       }
       const actor: Actor = { id: principal.id, kind: principal.kind };
-      const result = issuesOf(c).handleWebhook({
-        workspaceId,
-        actor,
-        provider: providerId,
-        deliveryId,
-        event: c.req.header('x-github-event') ?? 'unknown',
-        observation: codec.decode(c.req.raw.headers, body),
-        // The signature covers the body, not the delivery id, so a captured body replayed under a
-        // new id is caught by its hash.
-        payloadHash: createHash('sha256').update(raw).digest('hex'),
-      });
+      let result: ReturnType<ReturnType<typeof issuesOf>['handleWebhook']>;
+      try {
+        result = issuesOf(c).handleWebhook({
+          workspaceId,
+          actor,
+          provider: providerId,
+          deliveryId,
+          event: c.req.header('x-github-event') ?? 'unknown',
+          observation: codec.decode(c.req.raw.headers, body),
+          // The signature covers the body, not the delivery id, so a captured body replayed under a
+          // new id is caught by its hash.
+          payloadHash: createHash('sha256').update(raw).digest('hex'),
+        });
+      } catch (error) {
+        // The store refused the write. The delivery id was not recorded, so the provider's retry
+        // is processed once there is room, and the answer says why instead of a bare 500.
+        if (error instanceof StorageQuotaError) {
+          return c.json(errorBody(error.code, error.message), 503);
+        }
+        throw error;
+      }
       return c.json(result);
     },
   },

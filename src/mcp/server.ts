@@ -206,18 +206,17 @@ export function createMcpServer(services: Services): McpServer {
         audit(caller, tool, 'ok', null);
         return textResult(data, false);
       }
-      const stored =
-        tool.noReplay === true
-          ? undefined
-          : replayFor(db, owner, key, tool.name, hash);
+      const stored = replayFor(db, owner, key, tool.name, hash);
       if (stored !== undefined) {
         audit(caller, tool, 'replayed', null);
-        return textResult(stored, false, { 'tower/replayed': true });
+        return textResult(tool.liveReplay?.(ctx) ?? stored, false, {
+          'tower/replayed': true,
+        });
       }
       // An async tool can still be running when its retry arrives, and nothing is stored yet.
       // The retry joins the first call instead of running the tool a second time.
       const flight = `${owner.workspaceId}\0${owner.principalId}\0${key}`;
-      const running = tool.noReplay === true ? undefined : inFlight.get(flight);
+      const running = inFlight.get(flight);
       if (running !== undefined) {
         if (running.hash !== hash || running.tool !== tool.name) {
           throw new McpToolError(
@@ -227,28 +226,24 @@ export function createMcpServer(services: Services): McpServer {
         }
         const data = await running.result;
         audit(caller, tool, 'replayed', null);
-        return textResult(data, false, { 'tower/replayed': true });
+        return textResult(tool.liveReplay?.(ctx) ?? data, false, {
+          'tower/replayed': true,
+        });
       }
       const result = Promise.resolve(tool.run(ctx, args, key)).then(
         (output) => output.data,
       );
-      if (tool.noReplay !== true) {
-        inFlight.set(flight, { hash, tool: tool.name, result });
-      }
+      inFlight.set(flight, { hash, tool: tool.name, result });
       let data: Record<string, unknown>;
       try {
         data = await result;
       } finally {
-        if (tool.noReplay !== true) {
-          inFlight.delete(flight);
-        }
+        inFlight.delete(flight);
       }
       // The effect is done. A failure to remember it must not report the call as failed, since a
       // retry would then run it again. The core's own idempotency still covers most tools.
       try {
-        if (tool.noReplay !== true) {
-          storeResult(db, owner, key, tool.name, hash, data, now());
-        }
+        storeResult(db, owner, key, tool.name, hash, data, now());
       } catch (storeError) {
         console.error(
           `mcp result not stored: ${storeError instanceof Error ? storeError.name : 'error'}`,

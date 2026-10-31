@@ -1,6 +1,8 @@
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -37,7 +39,7 @@ const USAGE = [
   '          Writes every canonical table to one JSON file (mode 0600). Refuses to overwrite.',
   '  verify  --from <file>',
   '          Checks a backup against its digest and lists what it holds.',
-  '  restore --from <file> --db <new path>',
+  '  restore --from <file> --db <new path> [--restore-token-digests]',
   '          Restores into a database that does not exist yet, then migrates it forward.',
   '  halt    --actor <human principal id> [--reason <text>] [--workspace <id>] [--db <path>]',
   '  resume  --actor <human principal id> [--reason <text>] [--workspace <id>] [--db <path>]',
@@ -48,6 +50,14 @@ const USAGE = [
   '',
   'Defaults: --db $TOWER_DB_PATH or .tower/tower.sqlite, --workspace $TOWER_WORKSPACE or "default".',
 ].join('\n');
+
+/**
+ * Creates `path` empty, and fails with EEXIST if anything is already there, so the caller owns
+ * what it made. Nothing else could have created it between a check and this call.
+ */
+export function createNewFile(path: string): void {
+  closeSync(openSync(path, 'wx', 0o600));
+}
 
 export interface OpsIo {
   stdout: (line: string) => void;
@@ -64,6 +74,7 @@ const OPTIONS = {
   'token-id': { type: 'string' },
   principal: { type: 'string' },
   'include-token-digests': { type: 'boolean' },
+  'restore-token-digests': { type: 'boolean' },
 } as const;
 
 /** Runs one ops command and returns the process exit code. Works on a database file; the server need not run. */
@@ -169,6 +180,10 @@ export function runOpsCli(
           return 1;
         }
         const backup = readBackup(readFileSync(from, 'utf8'));
+        // Created exclusively, so this command owns the file. If anything else made it first the
+        // command stops, and a failed restore removes only a file this command made.
+        mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
+        createNewFile(dbPath);
         const db = openSqliteDatabase(dbPath);
         let restored = false;
         try {
@@ -176,12 +191,16 @@ export function runOpsCli(
             db,
             backup,
             readMigrationFiles(defaultMigrationsDir()),
+            { allowTokenDigests: values['restore-token-digests'] === true },
           );
           restored = true;
           io.stdout(
             `Restored ${result.rows} rows into ${dbPath}; migrated forward ${result.migratedForward.length} step(s)`,
           );
-          if (!backup.includesTokenDigests) {
+          if (
+            !backup.includesTokenDigests ||
+            !values['restore-token-digests']
+          ) {
             io.stdout(
               'No tokens were restored. Issue new ones with `pnpm tower token create --db ' +
                 dbPath +

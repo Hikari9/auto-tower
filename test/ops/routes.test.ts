@@ -1,10 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../../src/api/app.js';
 import { isUniqueViolation } from '../../src/fleet/errors.js';
+import { createIssueService, signGitHubBody } from '../../src/issues/index.js';
 import { guardStorage } from '../../src/ops/index.js';
 import { openSqliteDatabase } from '../../src/storage/sqlite.js';
 import { createFleetHarness, type FleetHarness } from '../fleet/helpers.js';
 import { openTestDatabase, seedPrincipal } from '../helpers/tower.js';
+import {
+  createIssueApi,
+  ISSUE_URL,
+  missionWithLinks,
+  WEBHOOK_SECRET,
+} from '../issues/helpers.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -240,6 +247,93 @@ describe('a full store over HTTP', () => {
     expect(
       (await call('POST', '/missions', { ...mission, title: 'three' })).status,
     ).toBe(503);
+    quiet.mockRestore();
+  });
+
+  it('answers a signed webhook with 503 while the guard is tripped, and processes the retry once cleared', async () => {
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const api = createIssueApi();
+    const h = api.h;
+    h.github.add(ISSUE_URL);
+    h.issues.setSyncConfig(h.ctx(h.owner), {
+      provider: 'github',
+      repo: 'acme/web',
+      mode: 'observe',
+    });
+    const driver = missionWithLinks(h);
+    await h.issues.verifyMission(h.ctx(h.owner), driver.id);
+    // A guarded handle over the same store, trippable, behind a second app.
+    const full = { on: true };
+    const raw = h.db;
+    const wrapped = {
+      ...raw,
+      run: (
+        sql: string,
+        params?: readonly (string | number | bigint | null)[],
+      ) => {
+        if (full.on && /^\s*(insert|update|delete)/i.test(sql)) {
+          throw Object.assign(new Error('database or disk is full'), {
+            errcode: 13,
+          });
+        }
+        return raw.run(sql, params);
+      },
+      transaction: <T>(fn: (tx: typeof raw) => T): T =>
+        raw.transaction((tx) => fn(tx === raw ? (wrapped as typeof raw) : tx)),
+    } as typeof raw;
+    const guarded = guardStorage(wrapped);
+    const issues = createIssueService({
+      db: guarded,
+      core: h.core,
+      policy: h.authority.policy,
+      providers: { github: h.github },
+      clock: h.clock.now,
+    });
+    const app = createApp({
+      db: guarded,
+      now: h.clock.now,
+      core: h.core,
+      authority: h.authority,
+      issues,
+      issueProviders: { github: h.github },
+      webhooks: {
+        resolve: () => ({ secret: WEBHOOK_SECRET, actorId: h.provider.id }),
+      },
+    });
+    const body = new TextEncoder().encode(
+      JSON.stringify({
+        action: 'reopened',
+        repository: { full_name: 'acme/web' },
+        issue: {
+          number: 1,
+          node_id: 'node_acme/web_1',
+          state: 'open',
+          title: 'Fix',
+        },
+      }),
+    );
+    const post = () =>
+      app.request('/webhooks/github/ws_test', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-github-event': 'issues',
+          'x-github-delivery': 'D-quota',
+          'x-hub-signature-256': signGitHubBody(WEBHOOK_SECRET, body),
+        },
+        body,
+      });
+    const refused = await post();
+    expect(refused.status).toBe(503);
+    expect(
+      ((await refused.json()) as { error: { code: string } }).error.code,
+    ).toBe('storage_quota_exhausted');
+    expect(h.db.all('SELECT 1 FROM webhook_deliveries')).toEqual([]);
+    full.on = false;
+    guarded.quota.reset();
+    const retry = await post();
+    expect(retry.status).toBe(200);
+    expect(h.db.all('SELECT 1 FROM webhook_deliveries')).toHaveLength(1);
     quiet.mockRestore();
   });
 });

@@ -30,7 +30,8 @@ export class StorageQuotaError extends Error {
 const SQLITE_FULL = 13;
 
 /** What D1 says in its error text when a plan limit refuses a write. It always begins the message. */
-const D1_LIMIT_MESSAGE = /^D1_[A-Z_]*:?.{0,80}(limit|quota)/i;
+const D1_LIMIT_MESSAGE =
+  /^D1_[A-Z_]*:?.{0,80}(limit|quota|SQLITE_FULL|disk is full)/i;
 
 /**
  * True only for the store's own refusal. It is decided from the driver's error code, never from

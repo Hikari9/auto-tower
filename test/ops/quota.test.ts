@@ -72,6 +72,11 @@ describe('isQuotaFailure', () => {
     expect(isQuotaFailure(new Error('D1_ERROR: Exceeded storage limit'))).toBe(
       true,
     );
+    expect(
+      isQuotaFailure(
+        new Error('D1_ERROR: database or disk is full: SQLITE_FULL'),
+      ),
+    ).toBe(true);
   });
 
   it.each([

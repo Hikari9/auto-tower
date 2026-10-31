@@ -1,15 +1,15 @@
 import { InputReader } from '../../core/validation.js';
 import {
   engageHalt,
+  HALT_REASON_MAX,
   HaltForbiddenError,
   haltHistory,
+  haltState,
   liftHalt,
 } from '../../ops/halt.js';
 import { healthReport } from '../../ops/health.js';
 import type { GuardedDatabase } from '../../ops/quota.js';
 import type { ToolDefinition } from '../tool.js';
-
-const REASON_MAX = 500;
 
 export const opsTools: readonly ToolDefinition[] = [
   {
@@ -44,13 +44,18 @@ export const opsTools: readonly ToolDefinition[] = [
     readOnly: false,
     scopes: ['policy:write'],
     material: true,
-    noReplay: true,
+    liveReplay: (ctx) => ({
+      halt: haltState(ctx.services.db, ctx.caller.workspaceId),
+    }),
     effect:
       'Stops new dispatch and guarded effects such as closing provider issues, until a person resumes.',
-    properties: { reason: { type: ['string', 'null'], maxLength: REASON_MAX } },
+    properties: {
+      reason: { type: ['string', 'null'], maxLength: HALT_REASON_MAX },
+    },
     run(ctx, args) {
       const r = new InputReader(args);
-      const reason = r.optString('reason', { max: REASON_MAX, min: 1 }) ?? null;
+      const reason =
+        r.optString('reason', { max: HALT_REASON_MAX, min: 1 }) ?? null;
       r.finish();
       return {
         data: {
@@ -72,12 +77,17 @@ export const opsTools: readonly ToolDefinition[] = [
     readOnly: false,
     scopes: ['policy:write'],
     material: true,
-    noReplay: true,
+    liveReplay: (ctx) => ({
+      halt: haltState(ctx.services.db, ctx.caller.workspaceId),
+    }),
     effect: 'Lets dispatch and guarded effects run again.',
-    properties: { reason: { type: ['string', 'null'], maxLength: REASON_MAX } },
+    properties: {
+      reason: { type: ['string', 'null'], maxLength: HALT_REASON_MAX },
+    },
     run(ctx, args) {
       const r = new InputReader(args);
-      const reason = r.optString('reason', { max: REASON_MAX, min: 1 }) ?? null;
+      const reason =
+        r.optString('reason', { max: HALT_REASON_MAX, min: 1 }) ?? null;
       r.finish();
       return {
         data: {
@@ -99,7 +109,10 @@ export const opsTools: readonly ToolDefinition[] = [
     readOnly: false,
     scopes: ['policy:write'],
     material: true,
-    noReplay: true,
+    liveReplay: (ctx) => {
+      const guard = (ctx.services.db as Partial<GuardedDatabase>).quota;
+      return { guarded: guard !== undefined, tripped: guard?.tripped ?? false };
+    },
     effect: 'Lets writes be tried against the store again.',
     properties: {},
     run(ctx, args) {

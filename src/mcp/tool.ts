@@ -49,11 +49,12 @@ export interface ToolDefinition {
   /** Every one is required. The server checks them before the tool runs. */
   scopes: readonly [Scope, ...Scope[]];
   /**
-   * Never answered from a stored result. For a tool whose answer is the live state of something that
-   * can change between two calls with one key (halt, resume, the storage guard): a retry runs again,
-   * so a stale `halted: true` is never returned for a workspace that has since resumed.
+   * For a tool whose answer is the live state of something that changes between two calls with one
+   * key (halt, resume, the storage guard). A retry never runs the effect again: the key is still
+   * recorded, so a late retry cannot lift a newer halt. But it is answered with the state now, not
+   * the stored body, so a caller is never told `halted: true` for a workspace that has resumed.
    */
-  noReplay?: boolean;
+  liveReplay?(ctx: ToolContext): Record<string, unknown>;
   /** Grant, revoke, dispatch request and close. The call must carry `confirm: true`. */
   material?: boolean;
   /** Properties of the call, without `idempotencyKey` and `confirm`, which the server adds. */

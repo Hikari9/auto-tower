@@ -336,46 +336,65 @@ describe('the halt tools', () => {
     expect((await cos.ok('read_health', {})).health.status).toBe('ok');
   });
 
-  it('runs a retried halt again instead of replaying a stale answer after a resume', async () => {
+  it('never lets a late retry undo a newer decision, and answers it with the state now', async () => {
     const env = createMcpEnv();
     const owner = await env.session(env.owner);
     const haltKey = key('halt');
-    const first = await owner.ok('halt_workspace', {
+    const resumeKey = key('resume');
+    const health = async () =>
+      (await owner.ok('read_health', {})).health.status;
+
+    await owner.ok('halt_workspace', {
       reason: 'a',
       confirm: true,
       idempotencyKey: haltKey,
     });
-    expect(first.halt.halted).toBe(true);
     await owner.ok('resume_workspace', {
+      confirm: true,
+      idempotencyKey: resumeKey,
+    });
+    expect(await health()).toBe('ok');
+
+    // A delayed retry of the first halt. It must not halt again, and it must not say `halted: true`.
+    const lateHalt = await owner.call('halt_workspace', {
+      reason: 'a',
+      confirm: true,
+      idempotencyKey: haltKey,
+    });
+    expect(lateHalt.isError).toBe(false);
+    expect(lateHalt.meta?.['tower/replayed']).toBe(true);
+    expect(lateHalt.data.halt.halted).toBe(false);
+    expect(await health()).toBe('ok');
+
+    // A newer, deliberate halt. A delayed retry of the older resume must not lift it.
+    await owner.ok('halt_workspace', {
+      reason: 'b',
       confirm: true,
       idempotencyKey: key(),
     });
-    expect((await owner.ok('read_health', {})).health.status).toBe('ok');
+    const lateResume = await owner.call('resume_workspace', {
+      confirm: true,
+      idempotencyKey: resumeKey,
+    });
+    expect(lateResume.meta?.['tower/replayed']).toBe(true);
+    expect(lateResume.data.halt.halted).toBe(true);
+    expect(await health()).toBe('halted');
 
-    // The same key, the same arguments, after the workspace resumed: the halt must happen.
-    const again = await owner.call('halt_workspace', {
-      reason: 'a',
+    // Each effect ran once: two halts and one resume, however often they were retried.
+    expect(
+      env.db
+        .all<{ action: string }>(
+          'SELECT action FROM ops_halt_history ORDER BY seq',
+        )
+        .map((r) => r.action),
+    ).toEqual(['halt', 'resume', 'halt']);
+    // The key is still bound to its call: reusing it for different arguments is refused.
+    const reused = await owner.call('halt_workspace', {
+      reason: 'other',
       confirm: true,
       idempotencyKey: haltKey,
     });
-    expect(again.isError).toBe(false);
-    expect(again.meta?.['tower/replayed']).toBeUndefined();
-    expect(again.data.halt.halted).toBe(true);
-    expect((await owner.ok('read_health', {})).health.status).toBe('halted');
-
-    // And a retried resume resumes, even though the stored answer would say it already had.
-    const resumeKey = key('resume');
-    await owner.ok('resume_workspace', {
-      confirm: true,
-      idempotencyKey: resumeKey,
-    });
-    await owner.ok('halt_workspace', { confirm: true, idempotencyKey: key() });
-    const resumed = await owner.call('resume_workspace', {
-      confirm: true,
-      idempotencyKey: resumeKey,
-    });
-    expect(resumed.data.halt.halted).toBe(false);
-    expect((await owner.ok('read_health', {})).health.status).toBe('ok');
+    expect(reused.data.error.code).toBe('idempotency_key_reused');
   });
 
   it('still replays an ordinary tool for the same key, so the exception is only for these', async () => {
