@@ -10,13 +10,13 @@ Token totals include the orchestrator, every Office executor, reviewer and plann
 | Orchestrator      | Claude Code, Opus 5.5 (high)           |
 | Claude session id | `62ce3cfa-81e7-4d86-8c85-ae451042030e` |
 | Start (UTC)       | 2026-10-31T02:37:39Z                   |
-| End (UTC)         | 2026-10-31T09:30:25Z                   |
+| End (UTC)         | 2026-11-02T06:34:06Z                   |
 
 ## Office runs
 
-| Run id     | Phases                            | Started (UTC)     | Closed (UTC) | Outcome                                                                                    |
-| ---------- | --------------------------------- | ----------------- | ------------ | ------------------------------------------------------------------------------------------ |
-| `89ad3c5d` | 0-5 (one run, one lane per phase) | 2026-10-31T02:58Z | left open    | All 9 tasks accepted; all 5 phases landed on office/v1; Office convergence blocked by #773 |
+| Run id     | Phases                            | Started (UTC)     | Closed (UTC)      | Outcome                                                                         |
+| ---------- | --------------------------------- | ----------------- | ----------------- | ------------------------------------------------------------------------------- |
+| `89ad3c5d` | 0-5 (one run, one lane per phase) | 2026-10-31T02:58Z | 2026-11-02T06:34Z | Lane convergence APPROVED; closed with handoff `office/v1` (archive `8c279b65`) |
 
 ## Landed phases
 
@@ -43,3 +43,7 @@ Token totals include the orchestrator, every Office executor, reviewer and plann
 - Office end-of-run convergence review is blocked by a known Office defect, Hikari9/auto-office#773. Office's shared-file check requires edits to a `shared:` file to be pure appends at end of file, even for stacked tasks with no concurrent writer. Seven tasks insert route registrations mid-file in `src/api/app.ts`, so lane `L-phase-0-1` reports `conflict` at T3 and no Office command clears it. All five phases passed their own independent review gates before landing.
 - Closeout (2026-10-31T09:30:25Z): `office close --handoff office/v1` was refused with `close-blocked: L-phase-0-1 convergence conflict`. Office only offers a waiver past it. rico-mode chose, under Rico's /afk instruction and not as a new Rico quote, to waive and then hand off, quoting Rico's /afk words verbatim: "make reasonable decisions. finish all runs through prod deployment and release." (Rico, 2026-10-31 12:40, relayed by rico-mode). This orchestrator's Claude Code permission classifier blocked the waiver command as a merge without review, so the waiver was not attempted in Office. Following rico-mode's fallback, run `89ad3c5d` is left open with all work, evidence and reviews preserved. The deploy and release part of the /afk words was not acted on, because this experiment's brief forbids deploying and merging to `main`.
 - Evidence for this run was added to Hikari9/auto-office#773 (comment 6541700037), with Rico's approval.
+- Resume (2026-11-02): auto-office #773 was fixed in Office 3.15.2. rico-mode resumed run `89ad3c5d` without a waiver, and this orchestrator re-bound the auto-wake to its own pane. The first part of the 2026-10-31 run (end 09:30:25Z) and this resumed part both count toward the Office arm's cost.
+- Routing re-pins on the resumed run, with rico-mode's words: "Reviewer order: codex luna high, deepseek max, opus low." and "reviews are still supposed to be codex luna -> deepseek -> opus low". `--apply-routing` does not re-pin `quota.reserve_percent` (pinned 5, live 0), so every code reviewer fell back to `claude-opus-5-5@low`. rico-mode said kabusecha owns that defect and the reviewer-fallback order defect, and told the run to continue on opus low.
+- Office lane convergence review `G2bbf3d2a` (claude-opus-5-5@low) returned APPROVED for `L-phase-0-1` (all 9 tasks). The verified integration `3c3973e7b2` equals `office/v1` apart from this file.
+- Follow-up F1 (low): `withoutRuleIds` strips rule-id refs and `rul_` tokens, but not rule-less refs such as `policy:v3:default-deny`. The fix is to widen it to `policy:v\d+:\S+`, match `rul_` after any non-alphanumeric character, and add a test with a default-deny ref in a hold reason.
